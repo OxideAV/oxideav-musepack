@@ -101,11 +101,7 @@ pub fn dec_enum(br: &mut BitReader<'_>, k: usize, n: usize) -> Result<u64> {
         // `CNK[k - 1][n - 1] = C(n - 1, k)`, so to obtain
         // `C(nn - 1, kk - 1)` we look up `CNK[kk - 2][nn - 1]`. The
         // `kk == 1` corner case is `C(nn - 1, 0) = 1`.
-        let include: u64 = if kk == 1 {
-            1
-        } else {
-            CNK[kk - 2][nn - 1]
-        };
+        let include: u64 = if kk == 1 { 1 } else { CNK[kk - 2][nn - 1] };
         if code < include {
             // Item nn-1 is in the subset.
             mask |= 1u64 << (nn - 1);

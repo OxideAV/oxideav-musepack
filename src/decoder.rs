@@ -13,9 +13,7 @@
 //!   the `SH` extradata. (Not yet wired in — the full-file path is
 //!   the default.)
 
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Decoder, Error, Frame, Packet, Result,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Decoder, Error, Frame, Packet, Result};
 
 use crate::container::{parse_sh, ChunkIter, ChunkTag, MAGIC_SV7, MAGIC_SV8};
 use crate::sv8::Sv8Decoder;
@@ -151,9 +149,7 @@ impl MusepackDecoder {
                 }
                 ChunkTag::Ap => {
                     if header.is_none() {
-                        return Err(Error::invalid(
-                            "musepack SV8: AP chunk before SH",
-                        ));
+                        return Err(Error::invalid("musepack SV8: AP chunk before SH"));
                     }
                     self.pending_packets.push(chunk.payload.to_vec());
                 }
@@ -167,9 +163,8 @@ impl MusepackDecoder {
                 _ => {}
             }
         }
-        let header = header.ok_or_else(|| {
-            Error::invalid("musepack SV8: no SH chunk found before EOF")
-        })?;
+        let header =
+            header.ok_or_else(|| Error::invalid("musepack SV8: no SH chunk found before EOF"))?;
         self.sv8 = Some(Sv8Decoder::new(header));
         Ok(())
     }

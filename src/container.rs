@@ -375,7 +375,7 @@ mod tests {
         // Build an SH payload with sample_rate_idx=0 (44.1 kHz),
         // maxbands_minus_one=27 → maxbands=28, channels_minus_one=1
         // → channels=2, mid_side=1, block_power=3.
-        let extradata: u16 = ((27u16 << 8)) | (1u16 << 4) | (1u16 << 3) | 3u16;
+        let extradata: u16 = (27u16 << 8) | (1u16 << 4) | (1u16 << 3) | 3u16;
         let mut payload = vec![0u8; 4]; // CRC
         payload.push(0x08); // version
         payload.push(0x00); // total_samples = 0
