@@ -174,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unusual_byte_groupings)]
     fn sv8_jpeg_form() {
         // 4-symbol example: length_counts {1, 1, 2} (= 1 one-bit, 1
         // two-bit, 2 three-bit codes). Symbols listed in canonical

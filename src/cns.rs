@@ -130,6 +130,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unusual_byte_groupings)]
     fn dec_base_known_value() {
         // CNK_LEN[0][2] = 2, CNK_LOST[0][2] = 1 (k=1, n=3).
         // dec_base reads `len = 2 - 1 = 1` bit; if the value ≥ 1 (the

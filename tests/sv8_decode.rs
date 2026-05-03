@@ -137,7 +137,7 @@ fn sv8_chunk_walk_smoke() {
     use oxideav_musepack::container::{ChunkIter, ChunkTag};
 
     assert_eq!(&bytes[0..4], b"MPCK");
-    let mut iter = ChunkIter::new(&bytes[4..]);
+    let iter = ChunkIter::new(&bytes[4..]);
     let mut counts = std::collections::BTreeMap::<&'static str, usize>::new();
     for chunk in iter {
         let chunk = chunk.expect("chunk parse");
