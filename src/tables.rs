@@ -18,25 +18,25 @@
 /// are the exact reciprocals of the per-`res` integer dequantiser step
 /// for unit subband amplitude.
 pub const CC: [f32; 19] = [
-    111.285_96, // res = -1  (noise band: 32768 / (2 * 255) * sqrt(3))
-    65536.0,    // res =  0  (never used; res = 0 is the silent path)
-    21845.334,  // res =  1  (3 levels)
-    13107.2,    // res =  2  (5 levels)
-    9362.286,   // res =  3  (7 levels)
-    7281.778,   // res =  4  (9 levels)
-    4369.067,   // res =  5  (15 levels)
+    111.285_96,  // res = -1  (noise band: 32768 / (2 * 255) * sqrt(3))
+    65536.0,     // res =  0  (never used; res = 0 is the silent path)
+    21845.334,   // res =  1  (3 levels)
+    13107.2,     // res =  2  (5 levels)
+    9362.286,    // res =  3  (7 levels)
+    7281.778,    // res =  4  (9 levels)
+    4369.067,    // res =  5  (15 levels)
     2_114.064_5, // res =  6  (31 levels)
-    1040.254,   // res =  7  (63 levels)
-    516.031_5,  // res =  8  (127 levels)
-    257.003_9,  // res =  9  (255 levels)
-    128.250_5,  // res = 10
-    64.062_6,   // res = 11
-    32.015_6,   // res = 12
-    16.003_9,   // res = 13
-    8.001,      // res = 14
-    4.000_2,    // res = 15
-    2.000_1,    // res = 16
-    1.0,        // res = 17
+    1040.254,    // res =  7  (63 levels)
+    516.031_5,   // res =  8  (127 levels)
+    257.003_9,   // res =  9  (255 levels)
+    128.250_5,   // res = 10
+    64.062_6,    // res = 11
+    32.015_6,    // res = 12
+    16.003_9,    // res = 13
+    8.001,       // res = 14
+    4.000_2,     // res = 15
+    2.000_1,     // res = 16
+    1.0,         // res = 17
 ];
 
 /// Log scalefactor table `mpc_SCF[256]`. The first 128 entries form
