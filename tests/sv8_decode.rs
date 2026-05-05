@@ -70,7 +70,7 @@ fn sv8_decoder_registers_and_decodes_first_packet() {
     assert_eq!(&bytes[0..4], b"MPCK");
 
     let params = CodecParameters::audio(CodecId::new("musepack"));
-    let mut dec = codecs.make_decoder(&params).expect("make_decoder");
+    let mut dec = codecs.first_decoder(&params).expect("make_decoder");
     let pkt = Packet {
         data: bytes,
         pts: Some(0),
