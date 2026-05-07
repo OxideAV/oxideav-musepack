@@ -1,0 +1,17 @@
+[package]
+name = "oxideav-musepack"
+version = "0.0.2"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-musepack"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Musepack (SV7 + SV8) audio decoder for the oxideav framework"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-musepack"
+keywords = ["multimedia", "audio", "musepack", "mpc", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = "0.1"
