@@ -20,3 +20,17 @@ The `oxideav_core::CodecResolver` registration this crate's
 `register(ctx)` function provides will be wired up by the
 Implementer round; until then the public API surfaces only the
 crate-local `Error::NotImplemented` placeholder.
+
+## Docs blocker (round 84)
+
+Round 84 attempted round 1 of the rebuild (foundational SV8
+stream-header parse) and confirmed that `docs/audio/musepack/`
+currently contains only `wiki/Musepack.wiki` — a 72-line
+multimedia.cx overview that links outward (to `trac.musepack.net`)
+for the SV7 and SV8 specs but carries **no** byte-level field
+layout, magic identifier, packet taxonomy, or table. Implementer
+work cannot proceed under the clean-room wall until a docs
+collaborator stands up `docs/audio/musepack/spec/` (SV7 + SV8
+byte-level field maps) and `docs/audio/musepack/tables/` (the
+Huffman / CNS / SCF tables). See `CHANGELOG.md` ("Blocked") for
+the full gap list.
