@@ -6,6 +6,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 194** — `framing` module covering the parts of the
+  Musepack container that are *structurally* specified by
+  independent sources in `docs/audio/musepack/musepack-sv7-sv8-spec.md`:
+  - `SV7_MAGIC = b"MP+"` + `SV7_VERSION_NIBBLE = 7` constants and
+    a `SV7Header::parse_magic` recogniser (§2.1) that returns the
+    version byte and a slice over the still-GAP rest of the fixed
+    header without decoding it.
+  - `SV8_MAGIC = b"MPCK"` constant + `parse_sv8_magic` recogniser
+    (§3.1).
+  - `PacketKey` enum covering the full §3.2 vocabulary
+    (`SH` / `RG` / `EI` / `SO` / `ST` / `AP` / `SE`) plus an
+    `Unknown([u8; 2])` catch-all, with `from_bytes` /
+    `as_bytes` / `is_known` helpers.
+  - `PacketHeader` + `parse_packet_header` walking the
+    `[2-byte key][varint size][payload]` outer frame per §3.1,
+    plus a `parse_varint` decoder for the continuation-bit
+    big-endian shape described there. Because §3.1 flags the
+    "varint inclusive of header bytes?" convention as GAP, the
+    decoded header exposes both `payload_len_inclusive()` (returns
+    `None` if the size is too small to cover the header) and
+    `payload_len_exclusive()` so the caller can pick the right one
+    once the observer trace lands.
+  - `StreamKind` + `identify_stream` for magic-bytes-only
+    dispatch between SV7 and SV8.
+  - `Error` enum extended with `InvalidMagic`, `UnexpectedEof`,
+    `UnsupportedVersion(u8)`, and `VarintTooLong` variants.
+- **Round 194** — 22 new unit tests in `framing::tests` covering
+  magic acceptance and rejection (both versions), the seven known
+  packet keys + unknown round-trip, varint single / two / three-byte
+  values + truncated and overlong rejection, packet header parsing
+  for `SH` / `AP` / `SE`, and a synthetic SV8 stream walk
+  reconstructing the packet sequence end-to-end. Total crate test
+  count `12 → 34`, all green; clippy clean with
+  `-D warnings`; `cargo fmt --check` clean.
+
+### Notes
+
+- The bit-precise field layouts **inside** the SV7 fixed header
+  (sample count, intensity / MS flags, `max_band`, encoder
+  profile / quality, gapless trailing-sample count, ReplayGain
+  title / album gain + peak) and **inside** each SV8 SH / RG / EI
+  / SO / ST payload are GAP per the structural spec — they live
+  only in the project's walled Trac `SV7Specification` /
+  `SV8Specification` pages. They are intentionally **not**
+  implemented this round and are the target of the pending
+  Musepack observer-trace round (workspace task #1263).
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-musepack/releases/tag/v0.0.2) - 2026-05-30
 
 ### Other

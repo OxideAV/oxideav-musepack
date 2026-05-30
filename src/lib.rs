@@ -31,13 +31,16 @@
 //! - [`requant`] — SV7 §2.5 / §2.6 requantiser constants:
 //!   `RES_BITS[18]`, `QUANTIZER_OFFSET_D[19]`,
 //!   `DEQUANT_COEFFICIENT_C[19]`, and `SCF_STEP_RATIO`.
+//! - [`framing`] — SV7 / SV8 stream-magic identification and the
+//!   SV8 packet outer-frame walker (key + varint size).
 //!
-//! Header parsing, frame body walking, Huffman decoding, CNS noise
-//! substitution, and the synthesis filterbank are still pending.
-//! See `CHANGELOG.md` `[Unreleased]` for the gap list.
+//! Per-field header decoding, frame body walking, Huffman decoding,
+//! CNS noise substitution, and the synthesis filterbank are still
+//! pending. See `CHANGELOG.md` `[Unreleased]` for the gap list.
 
 #![forbid(unsafe_code)]
 
+pub mod framing;
 pub mod requant;
 
 /// Crate-local error type. Concrete variants land as the Implementer
@@ -46,6 +49,18 @@ pub mod requant;
 pub enum Error {
     /// Reserved placeholder. Replaced by real variants in round 1.
     NotImplemented,
+    /// The input did not start with the expected stream magic
+    /// (`MP+` for SV7 or `MPCK` for SV8).
+    InvalidMagic,
+    /// The input ran out before the requested item could be parsed.
+    UnexpectedEof,
+    /// The SV7 stream version byte's low nibble was not
+    /// [`framing::SV7_VERSION_NIBBLE`]. The full version byte is
+    /// included so a caller can log which version was rejected.
+    UnsupportedVersion(u8),
+    /// A varint kept its continuation bit set past the maximum
+    /// supported byte length.
+    VarintTooLong,
 }
 
 impl core::fmt::Display for Error {
@@ -53,6 +68,19 @@ impl core::fmt::Display for Error {
         match self {
             Error::NotImplemented => f.write_str(
                 "oxideav-musepack: clean-room rebuild in progress — see crates/oxideav-musepack/README.md",
+            ),
+            Error::InvalidMagic => f.write_str(
+                "oxideav-musepack: input does not start with the SV7 (MP+) or SV8 (MPCK) magic",
+            ),
+            Error::UnexpectedEof => {
+                f.write_str("oxideav-musepack: unexpected end of input while parsing")
+            }
+            Error::UnsupportedVersion(byte) => write!(
+                f,
+                "oxideav-musepack: unsupported SV7 stream version (version byte {byte:#04x})",
+            ),
+            Error::VarintTooLong => f.write_str(
+                "oxideav-musepack: varint exceeded the supported maximum byte length",
             ),
         }
     }

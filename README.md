@@ -63,14 +63,60 @@ Round 191 lands the `requant` module against the structural spec
 12 unit tests cover length, spot-value, and the §2.6 product
 relation; `cargo test` is green.
 
+## Round 194 — SV7 / SV8 container magic + SV8 packet walker
+
+Round 194 lands the `framing` module against the structural spec
+§2.1 (SV7 identification), §3.1 (SV8 packet outer frame), and §3.2
+(SV8 packet vocabulary), reading only `docs/audio/musepack/`:
+
+- `SV7_MAGIC = b"MP+"` + `SV7_VERSION_NIBBLE = 7`, recognised by
+  `SV7Header::parse_magic(&[u8])`. Returns the version byte and a
+  slice over the still-GAP rest of the fixed header without
+  interpreting any internal fields.
+- `SV8_MAGIC = b"MPCK"`, recognised by `parse_sv8_magic(&[u8])`.
+- `PacketKey` enum covering `SH` / `RG` / `EI` / `SO` / `ST` /
+  `AP` / `SE` plus an `Unknown([u8; 2])` catch-all; round-trips
+  through `from_bytes` / `as_bytes`.
+- `PacketHeader` + `parse_packet_header` walking the
+  `[2-byte key][varint size][payload]` SV8 outer frame plus a
+  `parse_varint` decoder for the continuation-bit big-endian shape.
+  The "is the size inclusive of the header?" convention is GAP per
+  §3.1, so the parsed header exposes both `payload_len_inclusive()`
+  and `payload_len_exclusive()` and the caller picks once the
+  observer trace lands.
+- `StreamKind` + `identify_stream` for magic-bytes-only dispatch
+  between SV7 and SV8 streams.
+- Crate `Error` extended with `InvalidMagic`, `UnexpectedEof`,
+  `UnsupportedVersion(u8)`, and `VarintTooLong` variants.
+
+22 new unit tests (`framing::tests::*`) cover the magic round-trips
+for both versions, the full §3.2 packet-key vocabulary, varint
+single / two / three-byte values + truncation + overlong rejection,
+packet header parsing for `SH` / `AP` / `SE`, and a synthetic SV8
+stream end-to-end walk reconstructing the packet sequence. Total
+crate test count `12 → 34`; `cargo test` / `cargo clippy
+-- -D warnings` / `cargo fmt --check` all clean.
+
 ### Still gapped
 
-- **SV7 header field map** (the 20-bit per-frame length prefix
-  encoding details + fixed-header layout). The structural spec
-  defers this to the project's Trac wiki page, which is link-only
-  per the clean-room policy.
-- **SV8 packet field map** for SH / RG / EI / SO / ST payload
-  bodies (the packet KEY / SIZE varint frame is documented).
+- **SV7 fixed-header field map** — sample count, intensity / MS
+  flags, `max_band`, encoder profile / quality, gapless trailing-
+  sample count, ReplayGain title / album gain + peak. The
+  structural spec §2.1 defers all of this to the project's walled
+  Trac `SV7Specification` page. **Blocked on workspace task
+  #1263** (Musepack observer-trace round).
+- **SV7 frame container** — the per-frame 20-bit length prefix and
+  the "read in 32-LSB units" bitstream packing (§2.2) belong to the
+  frame-body decoder, not the header parser, and are not wired yet.
+- **SV8 packet payload field maps** — SH stream header, RG
+  replaygain, EI encoder info, SO seek offset, ST seek table. Per
+  §3.2 these are GAP and likewise blocked on task #1263. The
+  packet outer frame is implemented this round; the inner bytes
+  are returned as opaque slices.
+- **SV8 varint convention** — whether the size field is inclusive
+  of the key + size header. Both interpretations are exposed on
+  `PacketHeader`; the choice will be made once the observer trace
+  lands.
 - **Huffman codebooks** — staged in `tables/` (SV7
   `sv7-huffman-*`, SV8 `sv8-canonical-*` + `sv8-symbols-*`) but
   not yet wired here.
