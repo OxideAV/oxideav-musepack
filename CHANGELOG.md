@@ -6,55 +6,77 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 191** — `requant` module exposing the SV7 / SV8
+  requantiser constants against
+  `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.5 / §2.6:
+  - `RES_BITS: [u8; 18]` — bits per quantised sample per
+    `band_type` 0..=17 (0 for the entropy-coded ladder, 7..=16 for
+    the linear-PCM escape ladder), transcribed from
+    `docs/audio/musepack/tables/requant-res-bits.csv`.
+  - `QUANTIZER_OFFSET_D: [i16; 19]` — offset `D` per indexed band
+    entry (number of quantiser steps = `2 * D + 1`; index 0 = CNS /
+    noise band entry), transcribed from
+    `docs/audio/musepack/tables/requant-quantizer-offset-Dc.csv`.
+  - `DEQUANT_COEFFICIENT_C: [f64; 19]` — dequant coefficient
+    (`C = 65536 / (2 * D + 1)` for normal entries; index 0 carries
+    the CNS / noise dequant constant), transcribed from
+    `docs/audio/musepack/tables/requant-coefficient-Cc.csv`.
+  - `SCF_STEP_RATIO: f64` — geometric ratio between adjacent
+    scalefactor-index gains (downward direction), transcribed from
+    `docs/audio/musepack/tables/scf-step-ratio.csv`.
+  - `band_type_index` / `band_type_to_res_bits` helpers.
+  - 8 unit tests exercising lengths, the §2.6 product relation
+    `C * (2D + 1) == 65536` (max round-trip error `< 1e-6` across
+    all 18 non-CNS entries), boundary values, and the helper
+    mapping; total crate test count 12 lib tests, all green.
+
 ### Changed
 
-- Clean-room rebuild from a fresh orphan `master`. The previous
-  implementation was retired by the OxideAV docs audit dated
-  2026-05-06; the prior history is preserved on the `old` branch.
-  See `README.md` for the rebuild scope and the strict-isolation
-  workspace the Implementer rounds will draw from.
-- Round 186 README refresh — restated the docs-blocker against the
-  2026-05-25 docs staging round (workspace docs commit `78e2487`).
-  The staging round added `docs/audio/musepack/wikipedia-musepack.html`
-  (CC-BY-SA) and an explicit project-shipped-docs policy decision
-  declaring `trac.musepack.net/musepack/wiki/SV8Specification`,
-  Mutagen Specs SV8, and libmpcdec source link-only / off-limits for
-  Implementer agents; documented the *Feist v. Rural* tables-as-data
-  unblock path mirroring `docs/audio/g729/tables/`.
+- **Round 191** — README "Status" + "Docs status" sections rewritten
+  against the docs-staging round that closed `#927`. The crate's
+  module-level docs now point at the staged structural spec at
+  `docs/audio/musepack/musepack-sv7-sv8-spec.md` and the
+  Feist-extracted tables at `docs/audio/musepack/tables/` as the
+  source-of-record for further work, with the project-shipped
+  reference material remaining link-only / off-limits to
+  Implementer rounds.
 
-### Blocked
+### Pending (next-round candidates)
 
-- Round 84 (round 1 of the rebuild) targeted a foundational SV8
-  stream-header parser and confirmed `docs/audio/musepack/` then
-  contained only the multimedia.cx wiki overview.
-- Round 186 reassessment against the 2026-05-25 docs staging
-  (workspace `78e2487`):
-  - **What was staged:** the Wikipedia article (CC-BY-SA,
-    high-level overview), the explicit project-shipped-docs policy
-    notice, and the link-only reference list for the Trac wiki +
-    Mutagen Specs + libmpcdec source.
-  - **What is still missing under the wall:**
-    - SV7 header field map (magic, sample-frequency / max-band /
-      max-level / title / VBR fields, 20-bit per-frame length prefix
-      encoding).
-    - SV8 packet field map (`MPCK` magic, SH / RG / EI / SO / ST /
-      CT packet taxonomy, varint key/size framing; SH packet's
-      sample-count / beginning-silence / sample-freq-index /
-      max-used-bands / channel-count / ms-used / audio-block-frames
-      field layout).
-    - SV7 VLC tables — SCFI, DSCF, header, the seven quant-VLC sets
-      (band-types 1, 2, 3–7, 8–17 dispatch).
-    - SV8 VLC tables — band, scfi, dscf, res, q1 / q2 / q3 / q4 /
-      q5..q8 / q9up plus the CNS Pascal-grid / `huffq2[125]` /
-      `CC[19]` / `SCF[256]` constants.
-  - **Unblock paths:** either (a) commission an observer-trace
-    session per `docs/CLEANROOM-MANUAL.md` §6 + §10 to produce
-    `docs/audio/musepack/musepack-observer-spec.md`, or (b)
-    docs-collaborator round transcribing libmpcdec's numeric
-    tables to `docs/audio/musepack/tables/` under the
-    *Feist v. Rural* data-extraction exception (CSV + `.meta`
-    sidecars mirroring `docs/audio/g729/tables/`). Implementer
-    code for SV7 or SV8 cannot land until at least (b) is in place
-    for the table content and either (a) or paraphrased
-    structural notes derived from non-project-shipped sources
-    cover the field maps.
+- **SV7 header field map** — the 20-bit per-frame length-prefix
+  encoding and the fixed-header layout (sample-frequency /
+  max-band / max-level / title / VBR fields). The structural spec
+  at `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.1 defers
+  this to the project's Trac wiki page, which is link-only per the
+  clean-room policy; a clean-room observer-trace round is the
+  recommended unblock.
+- **SV8 packet payload field maps** — the KEY / SIZE varint
+  packet framing is documented in the structural spec §3, but
+  the per-packet payload bodies (SH stream header, RG replaygain,
+  EI encoder info, SO seek offset, ST seek table) need a
+  clean-room observer-trace round to map.
+- **Huffman codebooks** — fully staged under
+  `docs/audio/musepack/tables/` (SV7 `sv7-huffman-*`, SV8
+  `sv8-canonical-*` + `sv8-symbols-*`) but not yet wired into
+  Rust modules.
+- **CNS / noise-substitution generator** — staged under
+  `docs/audio/musepack/tables/cns-prng-*` (LFSR taps / seeds +
+  256-byte `Parity` table) but not yet wired.
+- **Frame driver + 32-band polyphase synthesis filter** — the
+  ISO/IEC 11172-3 Annex B Table 3-B.3 synthesis window and
+  matrix `N_ik` live under `docs/audio/mp3/` and are reusable.
+- **Encoder.** Out of scope for the early Implementer rounds.
+
+### Historical
+
+- **Round 0** — clean-room rebuild from a fresh orphan `master`;
+  the previous implementation was retired by the OxideAV docs
+  audit dated 2026-05-06.
+- **Round 84** — targeted a foundational SV8 stream-header parser
+  and confirmed `docs/audio/musepack/` then contained only the
+  multimedia.cx wiki overview; deferred to a future docs round.
+- **Round 186** — README refresh restating the docs-blocker against
+  the 2026-05-25 staging (workspace docs commit `78e2487`).
+- **Round 191** — this round. See "Added" / "Changed" above.

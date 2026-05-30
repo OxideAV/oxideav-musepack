@@ -1,13 +1,15 @@
 //! Pure-Rust Musepack audio codec.
 //!
-//! **Round 0 — clean-room rebuild scaffold.** This is a fresh orphan
-//! `master`; the previous implementation was retired alongside the
-//! OxideAV docs audit dated 2026-05-06. See `README.md` for the
-//! rebuild scope, the round-186 reassessment of the docs blocker,
-//! and the strict-isolation clean-room workspace the Implementer
-//! rounds will draw from.
+//! **Clean-room rebuild in progress** (orphan `master` post the
+//! 2026-05-06 docs audit). The crate is being grown back up against
+//! the staged structural spec at
+//! `docs/audio/musepack/musepack-sv7-sv8-spec.md` plus the numeric
+//! tables under `docs/audio/musepack/tables/` (CSV + `.meta`
+//! sidecars, extracted under the *Feist v. Rural* (1991) facts-only
+//! exception by a walled extraction round — see
+//! `docs/audio/musepack/provenance/01-musepack-table-extraction.md`).
 //!
-//! ## Format outline (overview-level, from staged `docs/audio/musepack/`)
+//! ## Format outline (overview-level)
 //!
 //! Musepack ships in two incompatible stream-format generations:
 //!
@@ -24,23 +26,19 @@
 //! Both targets are ReplayGain-tagged by default. Stream-format level
 //! 3 (8 channels) is supported in principle though almost never used.
 //!
-//! ## Why this crate is a stub
+//! ## Module surface so far
 //!
-//! The byte-level field maps for both stream versions and the
-//! Huffman / CNS / SCF numeric tables live on the project-shipped
-//! `trac.musepack.net` wiki and the libmpcdec / mpcenc reference
-//! source. Per the workspace clean-room policy
-//! (`docs/audio/musepack/README.md`), project-shipped docs from
-//! copyrighted-but-permissive licences are link-only — Implementer
-//! agents do not read them. The unblock path is either a clean-room
-//! observer-trace session or a docs-collaborator round that
-//! transcribes the numeric tables from libmpcdec to
-//! `docs/audio/musepack/tables/` under the *Feist v. Rural* (1991)
-//! data-extraction exception (mirroring `docs/audio/g729/tables/`).
-//! See `CHANGELOG.md` `[Unreleased]` "Blocked" for the field-by-field
-//! gap list.
+//! - [`requant`] — SV7 §2.5 / §2.6 requantiser constants:
+//!   `RES_BITS[18]`, `QUANTIZER_OFFSET_D[19]`,
+//!   `DEQUANT_COEFFICIENT_C[19]`, and `SCF_STEP_RATIO`.
+//!
+//! Header parsing, frame body walking, Huffman decoding, CNS noise
+//! substitution, and the synthesis filterbank are still pending.
+//! See `CHANGELOG.md` `[Unreleased]` for the gap list.
 
 #![forbid(unsafe_code)]
+
+pub mod requant;
 
 /// Crate-local error type. Concrete variants land as the Implementer
 /// rounds populate the codec pipeline.

@@ -5,86 +5,81 @@ Pure-Rust Musepack audio codec for the
 
 ## Status
 
-**Round 0 — clean-room rebuild scaffold.** This `master` branch is a
-fresh orphan. The previous implementation was retired alongside the
-docs audit dated 2026-05-06 (see
-[`AUDIT-2026-05-06.md`](https://github.com/OxideAV/docs/blob/master/AUDIT-2026-05-06.md)),
+**Clean-room rebuild in progress.** This `master` branch is a fresh
+orphan; the previous implementation was retired alongside the docs
+audit dated 2026-05-06
+([`AUDIT-2026-05-06.md`](https://github.com/OxideAV/docs/blob/master/AUDIT-2026-05-06.md)),
 which found that the source-of-record trace document for this codec
 was authored with a methodology that did not satisfy clean-room
 separation. The prior history is preserved on the `old` branch for
 archival but is forbidden input for the rebuild.
 
-A strict-isolation clean-room workspace at `docs/` is being assembled
-before the rebuild's Implementer rounds can run; this orphan `master`
-is a placeholder pending that workspace.
+The `oxideav_core::CodecResolver` registration this crate will
+expose through a future `register(ctx)` function is not wired yet;
+the public API today surfaces the crate-local
+`Error::NotImplemented` placeholder plus the new `requant` module
+(see below).
 
-The `oxideav_core::CodecResolver` registration this crate's
-`register(ctx)` function provides will be wired up by the
-Implementer round; until then the public API surfaces only the
-crate-local `Error::NotImplemented` placeholder.
+## Docs status (round 191 — NEWLY UNBLOCKED)
 
-## Docs status (round 186 reassessment)
+A docs round closed `#927`, staging under `docs/audio/musepack/`:
 
-A docs staging round on 2026-05-25 (workspace docs commit `78e2487`)
-added `docs/audio/musepack/wikipedia-musepack.html` (CC-BY-SA
-Wikipedia article) alongside the existing `wiki/Musepack.wiki`
-(CC-BY-SA multimedia.cx snapshot from 2026-04). The staging round
-also published an explicit project-shipped-docs policy decision in
-`docs/audio/musepack/README.md`:
+- `musepack-sv7-sv8-spec.md` — a clean-room **structural / framing**
+  spec authored in-repo from independent sources only (the
+  multimedia.cx wiki snapshot, the Wikipedia article, the in-repo
+  ISO/IEC 11172-3 Layer-II PDF, and general DSP knowledge). It
+  establishes the Layer-II heritage, the SV7 frame container,
+  band-type loop, SCF coding-method, per-band-type quantiser
+  switch, SV8 KEY / SIZE / PAYLOAD packet vocabulary, and the SV8
+  first-order-context quantiser switch.
+- `tables/` — the SV7 / SV8 **entropy-coding, quantiser, CNS, and
+  scalefactor numeric tables** extracted as Feist-v.-Rural-style
+  facts (numeric initialisers only) by a walled extraction round
+  documented in `provenance/01-musepack-table-extraction.md`. CSV
+  + `.meta` sidecar per table, mirroring the
+  `docs/audio/g729/tables/` convention.
 
-- The canonical SV7 / SV8 format documentation lives on
-  `trac.musepack.net/musepack/wiki/SV8Specification` and is
-  **project-shipped** (authored by the maintainers of the
-  libmpcdec / mpcenc reference implementation). Under this repo's
-  clean-room policy, project-shipped docs from copyrighted-but-
-  permissive licences are **not** mirrored — link-only.
-- The Mutagen Specs SV8 archive is verbatim mirrored from the same
-  upstream and inherits the same project-shipped status.
-- The libmpcdec / mpcenc source itself is BSD-3-Clause but
-  off-limits to Implementer agents for the same project-shipped
-  reason.
-- **Fixed numeric tables** (Huffman codebooks for SV7 / SV8, CNS
-  Pascal-grid, `huffq2[125]`, `CC[19]`, `SCF[256]`, psychoacoustic-
-  model constants) are facts, not creative expression, and per
-  *Feist v. Rural* (1991) are extractable as data to
-  `docs/audio/musepack/tables/` from libmpcdec by a future
-  docs-collaborator round.
+## Round 191 — requantiser constants wired
 
-The staged material is sufficient to recognise the high-level
-codec shape (32-band polyphase subband filter inherited from
-MPEG-1 Layer 2; SV7 packet framing with 20-bit per-frame length
-prefix; SV8 KEY / SIZE / PAYLOAD packet taxonomy with `MPCK`
-magic; SV7 / SV8 band-type and quantiser branching as sketched in
-the multimedia.cx wiki overview) but is **insufficient for a
-bit-exact decoder implementation**. Specifically still missing
-under the wall:
+Round 191 lands the `requant` module against the structural spec
+§2.5 (frame body — quantised subband samples) and §2.6
+(reconstruction), reading only `docs/audio/musepack/`:
 
-- **SV7 header field map** (magic, sample-frequency / max-band /
-  max-level / title / VBR fields, the 20-bit per-frame length
-  prefix encoding).
-- **SV8 packet field map** (file magic `MPCK`, SH / RG / EI / SO
-  / ST / CT packet taxonomy, varint key/size framing; SH packet's
-  sample-count / beginning-silence / sample-freq-index /
-  max-used-bands / channel-count / ms-used / audio-block-frames
-  field layout).
-- **SV7 VLC tables** — SCFI, DSCF, header, the seven quant-VLC
-  sets (band types 1, 2, 3–7, 8–17 dispatch).
-- **SV8 VLC tables** — band, scfi, dscf, res, q1 / q2 / q3 / q4 /
-  q5..q8 / q9up plus the CNS Pascal-grid / `huffq2[125]` / `CC[19]`
-  / `SCF[256]` constants.
+- `RES_BITS: [u8; 18]` — bits per quantised sample per `band_type`
+  in `0..=17`. Entropy-coded band types (`0..=7`) carry their
+  sample width inside the Huffman codebook, so this array reports
+  `0` for them; the linear-PCM escape ladder (`8..=17`) carries
+  `band_type − 1` raw bits per sample.
+- `QUANTIZER_OFFSET_D: [i16; 19]` — quantiser offset `D` per
+  indexed band entry (number of distinct levels = `2 * D + 1`).
+- `DEQUANT_COEFFICIENT_C: [f64; 19]` — dequant coefficient. The
+  spec's relation `C = 65536 / (2 * D + 1)` is enforced as a unit
+  test (max round-trip error `< 1e-6`) for all 18 non-CNS entries.
+- `SCF_STEP_RATIO: f64` — geometric ratio between adjacent
+  scalefactor-index gains (downward; upward is the reciprocal).
+- `band_type_index(signed)` + `band_type_to_res_bits(unsigned)`
+  helper functions.
 
-Implementer code for SV7 or SV8 cannot land without violating the
-clean-room wall until either (a) a clean-room observer-trace
-session (per `docs/CLEANROOM-MANUAL.md` §6 + §10) produces
-`docs/audio/musepack/musepack-observer-spec.md`, or (b) a
-docs-collaborator round transcribes the libmpcdec numeric tables
-to `docs/audio/musepack/tables/` under the *Feist v. Rural*
-data-extraction exception (mirroring `docs/audio/g729/tables/`
-layout: CSV with spec-role-named filenames + `.meta` provenance
-sidecars).
+12 unit tests cover length, spot-value, and the §2.6 product
+relation; `cargo test` is green.
 
-See `CHANGELOG.md` `[Unreleased]` "Blocked" for the round-by-round
-gap tracker.
+### Still gapped
+
+- **SV7 header field map** (the 20-bit per-frame length prefix
+  encoding details + fixed-header layout). The structural spec
+  defers this to the project's Trac wiki page, which is link-only
+  per the clean-room policy.
+- **SV8 packet field map** for SH / RG / EI / SO / ST payload
+  bodies (the packet KEY / SIZE varint frame is documented).
+- **Huffman codebooks** — staged in `tables/` (SV7
+  `sv7-huffman-*`, SV8 `sv8-canonical-*` + `sv8-symbols-*`) but
+  not yet wired here.
+- **CNS / noise-substitution generator** — staged in
+  `tables/cns-prng-*` but not yet wired.
+- **Frame driver + synthesis subband filter** — the ISO Layer-II
+  filterbank tables live in `docs/audio/mp3/` and are reusable.
+
+See `CHANGELOG.md` `[Unreleased]` for the per-round gap tracker.
 
 ## Codec category
 
