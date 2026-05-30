@@ -6,6 +6,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-musepack/releases/tag/v0.0.2) - 2026-05-30
+
+### Other
+
+- Round 191 — wire SV7/SV8 requantiser constants
+- Round 186 — refresh docs-blocker assessment against 2026-05-25 staging
+- Round 84 — file docs gap blocking SV7/SV8 header parse
+- Round 0 — clean-room rebuild scaffold (orphan master)
+
 ### Added
 
 - **Round 191** — `requant` module exposing the SV7 / SV8
