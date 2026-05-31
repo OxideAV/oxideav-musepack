@@ -24,27 +24,48 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // The docs submodule lives at <workspace>/docs/. The workspace
-    // root is two `..` up from CARGO_MANIFEST_DIR (crates/oxideav-X/).
+    // Source-of-truth for the CSVs is the staged docs collaborator's
+    // `docs/audio/musepack/tables/` directory. Because the crate
+    // publishes / CIs standalone (no docs submodule on the runner),
+    // a *vendored snapshot* of the exact subset consumed here also
+    // lives under `<manifest>/tables/`. The build script picks the
+    // first available source from this priority list:
     //
-    // `OXIDEAV_MUSEPACK_DOCS_DIR` overrides the resolved path; useful
-    // for sandboxed builds that don't have the umbrella checked out.
-    let tables_dir: PathBuf = match std::env::var("OXIDEAV_MUSEPACK_DOCS_DIR") {
-        Ok(s) => PathBuf::from(s).join("audio/musepack/tables"),
-        Err(_) => {
-            let manifest_dir = PathBuf::from(env_var("CARGO_MANIFEST_DIR"));
-            let workspace_root = manifest_dir
-                .parent()
-                .and_then(Path::parent)
-                .expect("workspace root above crates/oxideav-musepack/")
-                .to_path_buf();
-            workspace_root.join("docs/audio/musepack/tables")
-        }
-    };
-    assert!(
-        tables_dir.is_dir(),
-        "expected docs tables directory at {} (set OXIDEAV_MUSEPACK_DOCS_DIR to override)",
-        tables_dir.display()
+    //   1. `OXIDEAV_MUSEPACK_DOCS_DIR/audio/musepack/tables/` —
+    //      explicit env-var override (used by sandboxed builds that
+    //      want to point at an arbitrary docs checkout).
+    //   2. `<workspace-root>/docs/audio/musepack/tables/` — the live
+    //      docs submodule, when the crate is built from inside the
+    //      umbrella workspace.
+    //   3. `<manifest>/tables/` — the vendored snapshot; this is
+    //      what CI / crates.io consumers see.
+    //
+    // The snapshot under `<manifest>/tables/` must stay byte-equal
+    // with the umbrella's `docs/audio/musepack/tables/`; refreshing
+    // it is a manual step when the docs collaborator restages.
+    let manifest_dir = PathBuf::from(env_var("CARGO_MANIFEST_DIR"));
+    let env_override = std::env::var("OXIDEAV_MUSEPACK_DOCS_DIR")
+        .ok()
+        .map(|s| PathBuf::from(s).join("audio/musepack/tables"));
+    let workspace_docs = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("docs/audio/musepack/tables"));
+    let vendored = manifest_dir.join("tables");
+
+    let tables_dir = [
+        env_override.as_ref(),
+        workspace_docs.as_ref(),
+        Some(&vendored),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| p.is_dir())
+    .cloned()
+    .expect(
+        "no Musepack tables directory found: tried \
+             $OXIDEAV_MUSEPACK_DOCS_DIR, <workspace>/docs/audio/musepack/tables/, \
+             and <crate>/tables/ — none exist",
     );
     println!("cargo:rerun-if-env-changed=OXIDEAV_MUSEPACK_DOCS_DIR");
 

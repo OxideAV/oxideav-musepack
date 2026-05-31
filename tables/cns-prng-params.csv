@@ -1,0 +1,6 @@
+r1_seed,1
+r2_seed,1
+r1_tap_mask,0xF5
+r2_shift,25
+r2_tap_mask,0x63
+noise_sample_byte_sum_bias,-510

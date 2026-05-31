@@ -1,0 +1,15 @@
+spec_name: sv7-huffman-dscf
+spec_role: SV7 spec §2.4 delta-scalefactor (DSCF) VLC: codes the per-granule scalefactor deltas
+c_identifier: mpc_table_HuffDSCF
+c_type: mpc_huffman
+raw_dims: [16]
+resolved_dims: [16]
+element_count: 16
+columns: code_left_adjusted_hex,length_bits,value
+value_encoding: mpc_huffman = {Code:uint16 left-adjusted, Length:uint8, Value:int8}; decoder table sorted by Code descending
+source_file: libmpcdec/huffman.c
+source_sha256: 4c0456464d5a4b0a842c049a00c04193e8c147b7ad5363605460d8b7ddbd338c
+repo_url: https://github.com/tatsuz/musepack
+repo_commit: 15feced545c3fce808b00b184b2361d53825e159
+extractor: extract.py (pure numeric extraction; decode tables, no algorithm read)
+notes: For [2][N] tables the CSV concatenates context 0 then context 1 (each N rows); split at element_count/2.

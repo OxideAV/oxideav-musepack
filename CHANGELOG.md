@@ -74,8 +74,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   follow-up round.
 - The `build.rs` accepts an `OXIDEAV_MUSEPACK_DOCS_DIR` env-var
   override pointing at the `docs/` root, so the crate can be
-  built outside the umbrella checkout (handy for CI sandboxes
-  that don't pull the docs submodule).
+  built outside the umbrella checkout. For standalone / CI /
+  crates.io builds the script falls back to a vendored snapshot
+  of the consumed CSV+`.meta` subset shipped at
+  `<crate>/tables/`; the snapshot must stay byte-equal with the
+  umbrella's `docs/audio/musepack/tables/` and is refreshed
+  manually whenever the docs collaborator restages.
 
 - **Round 194** — `framing` module covering the parts of the
   Musepack container that are *structurally* specified by

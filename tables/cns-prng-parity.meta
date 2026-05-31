@@ -1,0 +1,15 @@
+spec_name: cns-prng-parity
+spec_role: SV7 §2.5 case -1 / SV8 §3.4 case -1 noise-substitution PRNG: byte-parity lookup table used by the two-LFSR generator
+c_identifier: Parity
+c_type: mpc_uint8_t
+raw_dims: [256]
+resolved_dims: [256]
+element_count: 256
+columns: parity_bit
+value_encoding: 0/1 = parity (popcount mod 2) of the byte index
+source_file: libmpcdec/synth_filter.c
+source_sha256: f5a4aa9ebe291be5cb28f1ff5644e477066a0650c9d0b3de004fcbe76d189541
+repo_url: https://github.com/tatsuz/musepack
+repo_commit: 15feced545c3fce808b00b184b2361d53825e159
+extractor: extract.py (pure numeric extraction)
+notes: Used by mpc_random_int(): two coprime-period polycounters r1 (right-rotate, tap mask 0xF5) and r2 (left-rotate, tap mask 0x63 after >>25), XORed. Seeds r1=r2=1. Noise sample q[k] = sum of the 4 bytes of one PRNG word - 510 (range -510..510).

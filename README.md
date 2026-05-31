@@ -105,8 +105,14 @@ invariants. Total crate test count `34 → 56`. `cargo test`,
 
 The `build.rs` reads only the `.csv` numeric initialisers (the
 Feist facts of the format) and emits typed `Sv7Entry` arrays
-into `OUT_DIR`. An `OXIDEAV_MUSEPACK_DOCS_DIR` env-var override
-lets the crate build outside the workspace checkout.
+into `OUT_DIR`. The script tries three input locations in order:
+`$OXIDEAV_MUSEPACK_DOCS_DIR/audio/musepack/tables/`, the
+umbrella's live `docs/audio/musepack/tables/` (when built inside
+the workspace), and the vendored snapshot at `<crate>/tables/`
+which ships in the crate for standalone / CI / crates.io
+builds. The vendored snapshot must stay byte-equal with the
+umbrella's `docs/` staging; refreshing it is a manual step when
+the docs collaborator restages.
 
 ### Still gapped (post round 197)
 

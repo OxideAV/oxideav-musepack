@@ -1,0 +1,15 @@
+spec_name: cns-prng-params
+spec_role: SV7/SV8 case -1 noise-substitution PRNG scalar parameters (two-LFSR generator + per-sample mapping)
+c_identifier: (literals in mpc_random_int / mpc_decoder reset + Q-decode)
+c_type: mixed (int seeds / hex tap masks / shift / bias)
+raw_dims: [6][2]
+resolved_dims: [6][2]
+element_count: 6
+columns: parameter,value
+value_encoding: see per-row; masks in hex, others decimal
+source_file: libmpcdec/synth_filter.c + libmpcdec/mpc_decoder.c
+source_sha256: f5a4aa9ebe291be5cb28f1ff5644e477066a0650c9d0b3de004fcbe76d189541
+repo_url: https://github.com/tatsuz/musepack
+repo_commit: 15feced545c3fce808b00b184b2361d53825e159
+extractor: extract.py (pure numeric extraction)
+notes: r1=(r1>>1)|(Parity[r1&0xF5]<<31); r2=(r2<<1)|Parity[(r2>>25)&0x63]; word=r1^r2; noise q = (b0+b1+b2+b3) - 510 over the 4 bytes of word. Seeds set to 1 at decoder reset.
