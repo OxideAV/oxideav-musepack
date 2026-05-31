@@ -33,14 +33,28 @@
 //!   `DEQUANT_COEFFICIENT_C[19]`, and `SCF_STEP_RATIO`.
 //! - [`framing`] — SV7 / SV8 stream-magic identification and the
 //!   SV8 packet outer-frame walker (key + varint size).
+//! - [`huffman`] — SV7 `mpc_huffman`-shape entropy tables
+//!   (`sv7-huffman-bandtype-header` / `sv7-huffman-scfi` /
+//!   `sv7-huffman-dscf` / `sv7-huffman-q{1..=7}`) plus a
+//!   left-justified-code linear decoder and an MSB-first bit
+//!   reader. The `[2][N]` quantiser tables are exposed both as the
+//!   full concatenated array and as per-context slices.
+//! - [`cns`] — CNS / noise-substitution two-LFSR PRNG and the
+//!   256-byte parity-of-popcount lookup that drives it
+//!   (`cns-prng-parity` + `cns-prng-params`).
 //!
-//! Per-field header decoding, frame body walking, Huffman decoding,
-//! CNS noise substitution, and the synthesis filterbank are still
-//! pending. See `CHANGELOG.md` `[Unreleased]` for the gap list.
+//! Per-field header decoding, the SV7 per-frame 20-bit length
+//! prefix + "read in 32-LSB units" packing, the SV8 canonical-
+//! huffman entropy layer (`sv8-canonical-*` + `sv8-symbols-*`),
+//! the SCF base-index decode, and the synthesis filterbank are
+//! still pending. See `CHANGELOG.md` `[Unreleased]` for the gap
+//! list.
 
 #![forbid(unsafe_code)]
 
+pub mod cns;
 pub mod framing;
+pub mod huffman;
 pub mod requant;
 
 /// Crate-local error type. Concrete variants land as the Implementer
@@ -61,6 +75,10 @@ pub enum Error {
     /// A varint kept its continuation bit set past the maximum
     /// supported byte length.
     VarintTooLong,
+    /// The peeked 16-bit code window did not match any row of the
+    /// supplied SV7 Huffman table — a malformed bitstream or a
+    /// wrong-context table for the current sample.
+    HuffmanNoMatch,
 }
 
 impl core::fmt::Display for Error {
@@ -81,6 +99,9 @@ impl core::fmt::Display for Error {
             ),
             Error::VarintTooLong => f.write_str(
                 "oxideav-musepack: varint exceeded the supported maximum byte length",
+            ),
+            Error::HuffmanNoMatch => f.write_str(
+                "oxideav-musepack: no SV7 Huffman table entry matched the peeked code window",
             ),
         }
     }

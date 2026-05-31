@@ -16,8 +16,8 @@ archival but is forbidden input for the rebuild.
 
 The `oxideav_core::CodecResolver` registration this crate will
 expose through a future `register(ctx)` function is not wired yet;
-the public API today surfaces the crate-local
-`Error::NotImplemented` placeholder plus the new `requant` module
+the public API today surfaces the crate-local `Error` placeholder
+plus the wired `requant`, `framing`, `huffman`, and `cns` modules
 (see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
@@ -62,6 +62,67 @@ Round 191 lands the `requant` module against the structural spec
 
 12 unit tests cover length, spot-value, and the §2.6 product
 relation; `cargo test` is green.
+
+## Round 197 — SV7 Huffman entropy tables + CNS PRNG
+
+Round 197 ingests the freshly-staged
+`docs/audio/musepack/tables/` SV7 Huffman + CNS PRNG
+CSVs into typed Rust tables via a new `build.rs` driver:
+
+- New `huffman` module exposes the 10 SV7 `mpc_huffman`-shape
+  tables (`SV7_BANDTYPE_HEADER_TABLE` / `SV7_SCFI_TABLE` /
+  `SV7_DSCF_TABLE` / `SV7_Q1_TABLE` .. `SV7_Q7_TABLE`) as
+  `[Sv7Entry; N]` constants. The `[2][N]` quantiser tables
+  also offer a `sv7_q{1..=7}_ctx(ctx)` accessor returning the
+  context-0 or context-1 half-slice per the staged sidecars'
+  `notes:` line.
+- `huffman::Sv7BitReader<'_>` is a small MSB-first bit reader
+  over `&[u8]`; `huffman::decode(&mut reader, &table)` runs the
+  staged "table sorted by Code descending, walk for first row
+  with `code <= peek16()`" convention end-to-end. The SV7
+  per-frame 20-bit length prefix + "read in 32-LSB units" outer
+  packing per spec §2.2 is intentionally NOT here (it belongs
+  to the frame-driver round).
+- New `cns` module wires the CNS / noise-substitution PRNG
+  from `cns-prng-{parity,params}.csv`: the 256-byte `PARITY`
+  table plus six scalar constants drive a `CnsPrng` two-LFSR
+  state machine whose step is transcribed verbatim from the
+  `.meta` `notes:` line. The first step from the reset state
+  is verified against a hand-cranked walk (samples bounded to
+  `-510..=510`).
+- `Error::HuffmanNoMatch` variant added for unmatched 16-bit
+  windows.
+
+22 new unit tests cover the bit reader, the per-table entry
+count + last-entry assertion (one per staged CSV against its
+`.meta` `resolved_dims` line), the context-pair split, the
+end-to-end decode walk against three hand-traced
+`bandtype-header` rows, the CNS parity table (full
+popcount-mod-2 cross-check across all 256 bytes), and the
+generator's first step / determinism / sample-range
+invariants. Total crate test count `34 → 56`. `cargo test`,
+`cargo clippy -- -D warnings`, `cargo fmt --check` all green.
+
+The `build.rs` reads only the `.csv` numeric initialisers (the
+Feist facts of the format) and emits typed `Sv7Entry` arrays
+into `OUT_DIR`. An `OXIDEAV_MUSEPACK_DOCS_DIR` env-var override
+lets the crate build outside the workspace checkout.
+
+### Still gapped (post round 197)
+
+- **SV8 canonical-Huffman entropy** —
+  `docs/audio/musepack/tables/sv8-canonical-*.csv` (length
+  tables) + `sv8-symbols-*.csv` (symbol maps) are staged but
+  unwired. They're a different decoder shape (canonical length
+  table + parallel symbol map, not the SV7 left-justified
+  walker), and folding them in cleanly needs a canonical-Huffman
+  builder that's the natural next round.
+- **SV7 fixed-header field map** — same blocker as round 194.
+- **SV7 frame container** — the per-frame 20-bit length prefix
+  and the "read in 32-LSB units" bitstream packing (§2.2).
+- **SV8 packet payload field maps** — SH / RG / EI / SO / ST.
+- **Frame driver + synthesis subband filter** — ISO Layer-II
+  tables live under `docs/audio/mp3/` and are reusable.
 
 ## Round 194 — SV7 / SV8 container magic + SV8 packet walker
 

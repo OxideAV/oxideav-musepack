@@ -8,6 +8,75 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 197** — `huffman` module wiring the SV7
+  `mpc_huffman`-shape entropy tables staged under
+  `docs/audio/musepack/tables/sv7-huffman-*.csv` through a
+  `build.rs`-driven CSV-to-Rust generator. The script reads only
+  the `.csv` numeric initialisers (the Feist facts of the format)
+  and emits typed `Sv7Entry` arrays into `OUT_DIR`. Generated /
+  exposed tables, all keyed by the staged `.meta`
+  `resolved_dims`:
+  - `SV7_BANDTYPE_HEADER_TABLE` (10 entries) — band-type / header
+    VLC per spec §2.3.
+  - `SV7_SCFI_TABLE` (4 entries) — SCF coding-method selector per
+    spec §2.4.
+  - `SV7_DSCF_TABLE` (16 entries) — delta-scalefactor VLC per spec
+    §2.4.
+  - `SV7_Q1_TABLE` .. `SV7_Q7_TABLE` (54 / 50 / 14 / 18 / 30 / 62
+    / 126 entries) — per-quantiser sample VLCs per spec §2.5,
+    each a `[2][N]` context-pair with the two contexts
+    concatenated. A `sv7_q{1..=7}_ctx(ctx)` accessor returns the
+    requested half-slice per the `.meta` notes line.
+  - A `Sv7Entry { code, length, value }` struct mirroring the
+    sidecar's `mpc_huffman = {Code:uint16 left-adjusted,
+    Length:uint8, Value:int8}` shape, with the canonical-code
+    `code <= peek16()` decode loop driving `huffman::decode`.
+  - A standalone `Sv7BitReader<'a>` over an in-memory `&[u8]`
+    slice, MSB-first, with `peek16`, `consume_bits(1..=32)`, and
+    `read_bits(1..=16)` for the spec §2.5 case 8..=17 linear-PCM
+    escape ladder. The SV7 per-frame 20-bit length prefix and the
+    "read in 32-LSB units" word packing per spec §2.2 are *not*
+    handled here — they belong to a later frame-driver round.
+- **Round 197** — `cns` module wiring the noise-substitution
+  generator from `docs/audio/musepack/tables/cns-prng-{parity,
+  params}.csv` via the same `build.rs`. The 256-byte `PARITY`
+  table is generated from `cns-prng-parity.csv`; the six scalar
+  parameters (`R1_SEED` / `R2_SEED` / `R1_TAP_MASK` /
+  `R2_TAP_MASK` / `R2_SHIFT` / `NOISE_SAMPLE_BYTE_SUM_BIAS`) are
+  generated from `cns-prng-params.csv`. The `CnsPrng` two-LFSR
+  state machine implements the generator step transcribed from
+  the staged `.meta` `notes:` line: `r1 = (r1 >> 1) | (Parity[r1
+  & 0xF5] << 31); r2 = (r2 << 1) | Parity[(r2 >> 25) & 0x63];
+  word = r1 ^ r2; q = byte_sum(word) - 510`. The first step from
+  the reset state is verified against a hand-cranked walk
+  (`r1' = 0x8000_0000`, `r2' = 2`, `word = 0x8000_0002`, first
+  sample = `-380`).
+- **Round 197** — `Error::HuffmanNoMatch` variant covering the
+  case where no row of the supplied SV7 Huffman table matches the
+  peeked 16-bit code window.
+- **Round 197** — 22 new unit tests across `huffman::tests` (10)
+  and `cns::tests` (6) plus shape assertions on each of the 10
+  Huffman tables and the parity table (each test pins the entry
+  count from the `.meta` `resolved_dims` line plus the last
+  entry of the CSV). Total crate test count `34 → 56`; `cargo
+  build`, `cargo test`, `cargo clippy -- -D warnings` and `cargo
+  fmt --check` all clean.
+
+### Notes
+
+- The SV8 canonical-Huffman entropy tables
+  (`sv8-canonical-*` length tables + `sv8-symbols-*` symbol
+  maps) and the SV7/SV8 quantiser/CNS-related constants beyond
+  the four wired in round 191 (`requant-*`) remain staged but
+  unwired this round — they need a length-table-to-code-table
+  builder (canonical-Huffman) that's a different decoder shape
+  from the SV7 `mpc_huffman` linear walk and is queued for a
+  follow-up round.
+- The `build.rs` accepts an `OXIDEAV_MUSEPACK_DOCS_DIR` env-var
+  override pointing at the `docs/` root, so the crate can be
+  built outside the umbrella checkout (handy for CI sandboxes
+  that don't pull the docs submodule).
+
 - **Round 194** — `framing` module covering the parts of the
   Musepack container that are *structurally* specified by
   independent sources in `docs/audio/musepack/musepack-sv7-sv8-spec.md`:
