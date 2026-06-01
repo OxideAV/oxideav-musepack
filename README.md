@@ -63,6 +63,76 @@ Round 191 lands the `requant` module against the structural spec
 12 unit tests cover length, spot-value, and the §2.6 product
 relation; `cargo test` is green.
 
+## Round 201 — SV7 §2.5 per-band sample-decode dispatcher
+
+Round 201 wires the SV7 frame-body inner loop (`switch (band_type)`
+per spec §2.5) as a new `sv7_band_decode` module on top of the
+already-staged Huffman / CNS / requant tables, reading only
+`docs/audio/musepack/`:
+
+- `BandDecodeCase` classifier enum covers every spec case:
+  `Cns` (-1), `Empty` (0), `Grouped3` (1), `Grouped2` (2),
+  `HuffmanPerSample` (3..=7), `PcmEscape` (8..=17), `OutOfRange`
+  (everything else). `band_type_case(i8) -> BandDecodeCase` is a
+  pure `const fn` dispatch — no bit-stream access.
+- `fill_zero_band(out)` — case 0, fills 36 zero samples.
+- `fill_cns_band(prng, out)` — case -1, pass-through to the
+  already-wired `CnsPrng::fill_samples`; each sample in `-510..=510`.
+- `decode_huffman_band(reader, band_type, ctx, out)` — cases
+  3..=7. Selects the right `Q{band_type}` table and the right half
+  of the staged `[2][N]` context-pair (via `sv7_q{3..=7}_ctx`),
+  then reads 36 Huffman codewords into the supplied `[i8; 36]`
+  buffer. Returns `Error::UnsupportedBandType(bt)` for out-of-range
+  `band_type` or `ctx`.
+- `decode_linear_pcm_band(reader, band_type, out)` — cases
+  8..=17. Reads `band_type - 1` (= 7..=16) unsigned bits per
+  sample MSB-first via the existing `Sv7BitReader::read_bits` and
+  stores raw pre-centring levels in `[i32; 36]`. The §2.6
+  reconstruction step centres them by subtracting
+  `D = QUANTIZER_OFFSET_D[band_type + 1]`; this round leaves the
+  dequant arithmetic to the caller.
+- New crate-level `Error::UnsupportedBandType(i8)` variant carries
+  the offending `band_type` value (for both the structurally-
+  documented-but-unimplemented grouped cases and the out-of-range
+  default).
+
+11 new unit tests cover the classifier across `-2..=18` plus
+i8 extremes, the zero / CNS fill paths, both Huffman context halves
+(3 + 7), an explicit ramp-pattern round-trip for PCM-escape cases 8
+(7 bits/sample) and 17 (16 bits/sample), the `UnsupportedBandType`
+rejection edges for every dispatcher, and EOF propagation through
+the PCM-escape reader. Total crate test count `56 → 67`. `cargo
+test`, `cargo clippy --all-targets --no-deps -- -D warnings`, and
+`cargo fmt --check` are all green.
+
+### Still gapped (post round 201)
+
+- **SV7 §2.5 grouped codewords** — cases 1 (3 samples/codeword) and
+  2 (2 samples/codeword): the per-codeword sample-unpack convention
+  is not in the structural prose; the classifier knows the cases
+  and the dispatcher fails loudly with `UnsupportedBandType`.
+- **§2.6 reconstruction** — centring (subtract `D`) and dequant
+  multiply (`* C / 65536`) and SCF scaling and synthesis filterbank
+  are downstream of the per-band level decode; left to a later
+  round once an end-to-end frame driver is in place.
+- **SV8 canonical-Huffman entropy walk** — the staged
+  `sv8-canonical-*` + `sv8-symbols-*` CSVs are present but the
+  exact decode-walk convention (how the matched length-table row's
+  `cumulative_index` + `code` map to a symbol-map offset) is
+  underspecified in the staged prose. The cum-deltas suggest more
+  codes per length than the strict prefix-free assignment allows
+  for some rows; the structural spec doesn't disambiguate. Treated
+  as DOCS-GAP this round; needs a one-paragraph addendum spelling
+  out the offset arithmetic.
+- **SV7 fixed-header field map** — same blocker as round 194
+  (workspace task #1263 observer trace).
+- **SV7 32-LSB word packing** — bit-within-word ordering of the
+  per-frame 20-bit length prefix is underspecified in §2.2.
+- **SV8 packet payload field maps** — SH / RG / EI / SO / ST,
+  blocked on #1263.
+- **Synthesis subband filter** — ISO Layer-II `D_i` window +
+  `N_ik` matrix transcription deferred to a later round.
+
 ## Round 197 — SV7 Huffman entropy tables + CNS PRNG
 
 Round 197 ingests the freshly-staged

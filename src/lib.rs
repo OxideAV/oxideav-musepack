@@ -42,6 +42,12 @@
 //! - [`cns`] — CNS / noise-substitution two-LFSR PRNG and the
 //!   256-byte parity-of-popcount lookup that drives it
 //!   (`cns-prng-parity` + `cns-prng-params`).
+//! - [`sv7_band_decode`] — SV7 §2.5 per-band sample-decode dispatch
+//!   for the unambiguous cases (`-1` CNS / `0` empty / `3..=7`
+//!   Huffman-per-sample / `8..=17` linear-PCM escape) plus a
+//!   classifier enum covering every spec case (grouped cases `1` /
+//!   `2` are flagged but not wired — their per-codeword sample-
+//!   unpack convention is GAP in the structural prose).
 //!
 //! Per-field header decoding, the SV7 per-frame 20-bit length
 //! prefix + "read in 32-LSB units" packing, the SV8 canonical-
@@ -56,6 +62,7 @@ pub mod cns;
 pub mod framing;
 pub mod huffman;
 pub mod requant;
+pub mod sv7_band_decode;
 
 /// Crate-local error type. Concrete variants land as the Implementer
 /// rounds populate the codec pipeline.
@@ -79,6 +86,15 @@ pub enum Error {
     /// supplied SV7 Huffman table — a malformed bitstream or a
     /// wrong-context table for the current sample.
     HuffmanNoMatch,
+    /// A per-band sample-decode dispatcher was called with a
+    /// `band_type` value that is either outside the structurally-
+    /// documented range or in a case that is not yet wired
+    /// (currently SV7 §2.5 cases 1 / 2 — grouped codewords — whose
+    /// per-codeword sample-unpack convention is DOCS-GAP, plus an
+    /// invalid `ctx` value for the cases that take one). The
+    /// out-of-range value is reported so callers can log which
+    /// `band_type` was rejected.
+    UnsupportedBandType(i8),
 }
 
 impl core::fmt::Display for Error {
@@ -102,6 +118,10 @@ impl core::fmt::Display for Error {
             ),
             Error::HuffmanNoMatch => f.write_str(
                 "oxideav-musepack: no SV7 Huffman table entry matched the peeked code window",
+            ),
+            Error::UnsupportedBandType(bt) => write!(
+                f,
+                "oxideav-musepack: unsupported or out-of-range band_type {bt} for the sample-decode dispatcher",
             ),
         }
     }

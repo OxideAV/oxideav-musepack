@@ -8,6 +8,39 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 201** — `sv7_band_decode` module wiring the SV7 §2.5
+  per-band sample-decode `switch (band_type)` dispatch on top of the
+  already-staged Huffman / CNS / requant tables:
+  - `BandDecodeCase` enum classifies every spec case (`Cns`,
+    `Empty`, `Grouped3`, `Grouped2`, `HuffmanPerSample`, `PcmEscape`,
+    `OutOfRange`); `band_type_case(i8) -> BandDecodeCase` is a pure
+    `const fn` dispatch.
+  - `fill_zero_band(out)` — case 0, fills 36 zero samples.
+  - `fill_cns_band(prng, out)` — case -1, passes through to the
+    already-wired `CnsPrng::fill_samples`.
+  - `decode_huffman_band(reader, band_type, ctx, out)` — cases
+    3..=7, one Q`band_type` Huffman codeword per sample,
+    context-selected via `sv7_q{3..=7}_ctx(ctx)`.
+  - `decode_linear_pcm_band(reader, band_type, out)` — cases
+    8..=17, `band_type - 1` unsigned bits per sample read MSB-first
+    into an `[i32; 36]` raw-level buffer.
+  - `SAMPLES_PER_BAND = 36` shared by all four decoders (Layer-II
+    heritage per spec §1).
+- **Round 201** — `Error::UnsupportedBandType(i8)` variant for the
+  per-band-decode dispatcher's fail-loud channel: triggered by the
+  structurally-documented-but-unimplemented grouped cases (1, 2)
+  and by any out-of-range `band_type` or `ctx`.
+- **Round 201** — 11 new unit tests across `sv7_band_decode::tests`
+  covering: the classifier across `-2..=18` plus `i8` extremes; the
+  zero / CNS fill paths (CNS round-trip vs a directly-driven PRNG
+  walk with matching state); the Huffman path on band_type 3 (ctx
+  0, shortest-code 36×) and band_type 7 (both contexts, signed-level
+  range `-31..=31` invariant); the PCM-escape path on band_type 8
+  (7 bits/sample, ramp round-trip) and band_type 17 (16 bits/sample,
+  distinct-pattern round-trip); explicit `UnsupportedBandType`
+  rejection edges for every dispatcher; EOF propagation through the
+  PCM-escape reader. Total crate test count `56 → 67`.
+
 - **Round 197** — `huffman` module wiring the SV7
   `mpc_huffman`-shape entropy tables staged under
   `docs/audio/musepack/tables/sv7-huffman-*.csv` through a
