@@ -48,6 +48,12 @@
 //!   classifier enum covering every spec case (grouped cases `1` /
 //!   `2` are flagged but not wired — their per-codeword sample-
 //!   unpack convention is GAP in the structural prose).
+//! - [`reconstruct`] — SV7 §2.6 per-sample reconstruction
+//!   primitives (centring of PCM-escape raw levels by subtracting
+//!   `D`; per-band dequant multiply by `C / 65536`; CNS dequant
+//!   path keyed off `DEQUANT_COEFFICIENT_C[0]`). The downstream SCF
+//!   multiply, M/S undo, and synthesis filterbank are out of scope
+//!   here.
 //!
 //! Per-field header decoding, the SV7 per-frame 20-bit length
 //! prefix + "read in 32-LSB units" packing, the SV8 canonical-
@@ -61,6 +67,7 @@
 pub mod cns;
 pub mod framing;
 pub mod huffman;
+pub mod reconstruct;
 pub mod requant;
 pub mod sv7_band_decode;
 

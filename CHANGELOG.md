@@ -8,6 +8,46 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 206** — `reconstruct` module wiring the SV7 §2.6
+  per-sample reconstruction primitives on top of the round-191
+  requantiser constants and the round-201 per-band level decode:
+  - `DEQUANT_DIVISOR: f64 = 65536.0` constant tied to the
+    requantiser relation `C = 65536 / (2D + 1)`.
+  - `centre_pcm_level(band_type, raw_unsigned) -> Result<i32>` and
+    `centre_pcm_band(band_type, &mut [i32; 36]) -> Result<()>` —
+    PCM-escape centring (subtract `D = QUANTIZER_OFFSET_D[band_type
+    + 1]`) for band_types 8..=17.
+  - `dequantise_sample(band_type, centred_level) -> Result<f64>` —
+    single-sample dequant via `centred_level * C / 65536`, covering
+    both the CNS / noise band (`-1`) and the normal `0..=17`
+    range.
+  - `dequantise_band(band_type, &centred, &mut out) -> Result<()>` —
+    whole-band variant for `0..=17`.
+  - `dequantise_huffman_band(band_type, &huffman_i8, &mut out) ->
+    Result<()>` — convenience wrapper accepting the `[i8; 36]`
+    shape returned by `decode_huffman_band` for band_types 3..=7.
+  - `dequantise_cns_band(&cns_levels, &mut out)` — CNS-specific
+    wrapper keyed off `DEQUANT_COEFFICIENT_C[0]` (the
+    `32768/2/255*sqrt(3)` anchor per the
+    `cns-prng-params.meta` notes line).
+  - `pcm_escape_d(band_type) -> Option<i32>` helper.
+- **Round 206** — 18 new unit tests across `reconstruct::tests`
+  covering: single-sample PCM-centring at band_types 8 and 17
+  (boundary inputs `0`, `D`, `2D`), full-band in-place centring,
+  out-of-range rejection for both centring functions;
+  single-sample dequant for band_type 0 (identity scaling),
+  band_type 3 (`d / (2d + 1)`), band_type 17 (`d / (2d + 1)`,
+  large-`D` floating-point sanity), and the CNS band (`-1`); whole-
+  band dequant against the single-sample path; Huffman-band
+  dequant for band_type 3 with a signed i8 ramp; CNS dequant
+  magnitude bound check against the PRNG's `-510..=510` range; the
+  `pcm_escape_d` helper across the PCM-escape range; out-of-range
+  rejection for whole-band paths; and a cross-module integration
+  test that wires the PCM-escape Sv7BitReader, the round-201
+  PCM-escape decoder, the round-206 centring step, and the
+  round-206 dequant multiply end-to-end against a known synthetic
+  input. Total crate test count `67 → 85`.
+
 - **Round 201** — `sv7_band_decode` module wiring the SV7 §2.5
   per-band sample-decode `switch (band_type)` dispatch on top of the
   already-staged Huffman / CNS / requant tables:

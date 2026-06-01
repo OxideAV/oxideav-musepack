@@ -63,6 +63,66 @@ Round 191 lands the `requant` module against the structural spec
 12 unit tests cover length, spot-value, and the §2.6 product
 relation; `cargo test` is green.
 
+## Round 206 — SV7 §2.6 per-sample reconstruction primitives
+
+Round 206 lands a new `reconstruct` module wiring the per-sample
+dequantisation step that follows the per-band level decode of round
+201, reading only `docs/audio/musepack/`:
+
+- `DEQUANT_DIVISOR: f64 = 65536.0` constant tied to the requantiser
+  relation `C = 65536 / (2D + 1)`.
+- `centre_pcm_level(band_type, raw_unsigned) -> i32` — single-sample
+  centring of a PCM-escape raw level (band_type 8..=17), subtracting
+  `D = QUANTIZER_OFFSET_D[band_type + 1]`. Returns
+  `Error::UnsupportedBandType` outside the PCM-escape range.
+- `centre_pcm_band(band_type, &mut [i32; 36])` — same step applied
+  in place to a full 36-sample band buffer.
+- `dequantise_sample(band_type, centred_level) -> f64` — single-sample
+  dequantise via `centred_level * C / 65536`, covering both the CNS
+  / noise band (`-1`) and the normal `0..=17` range.
+- `dequantise_band(band_type, &centred, &mut out)` — whole-band
+  variant; the entropy-coded path (band_types 3..=7) feeds the
+  function with the i8 → i32 widened Q-table values directly via the
+  `dequantise_huffman_band` wrapper.
+- `dequantise_cns_band(&cns_levels, &mut out)` — CNS-specific
+  wrapper keyed off `DEQUANT_COEFFICIENT_C[0]` (the
+  `32768/2/255*sqrt(3)` constant per the `cns-prng-params.meta`
+  notes).
+- `pcm_escape_d(band_type) -> Option<i32>` helper returning the `D`
+  associated with a PCM-escape band_type, for callers that need to
+  bounds-check raw input before centring.
+
+18 new unit tests cover: PCM-centring at band_types 8 and 17
+(boundaries `0`, `D`, `2D`), full-band centring in place,
+out-of-range rejection for centring; single-sample dequant for
+band_types 0 (identity scaling), 3, 17 (= `D / (2D + 1)`), and CNS
+(`-1`); whole-band dequant against the single-sample path for
+band_type 5; Huffman-band dequant for band_type 3 (signed i8 round
+trip); CNS dequant magnitude bound check against the `-510..=510`
+PRNG range; the `pcm_escape_d` helper across 8..=17; and a
+cross-module integration test that wires the PCM-escape Sv7 reader,
+the round-201 PCM-escape decoder, the round-206 centring step, and
+the round-206 dequant multiply end-to-end against a known synthetic
+input. Total crate test count `67 → 85`. `cargo test`,
+`cargo clippy --all-targets --no-deps -- -D warnings`, and
+`cargo fmt --check` are all green.
+
+### Still gapped (post round 206)
+
+- **SCF base-index gain table.** §2.6 needs a 256-entry SCF
+  index → gain mapping; the geometric step ratio
+  `SCF_STEP_RATIO ≈ 0.8330` is wired but the *anchor point*
+  (gain at the reference index) is not specified by the structural
+  prose. Treated as a follow-up that needs a one-paragraph spec
+  addendum pinning the reference index and its gain value.
+- **SV7 §2.5 grouped codewords** — cases 1 / 2 — same as round 201.
+- **SV8 canonical-Huffman entropy walk** — same as round 201.
+- **SV7 fixed-header field map** — same blocker as round 194.
+- **SV7 32-LSB word packing** — same blocker as round 201.
+- **SV8 packet payload field maps** — same blocker as round 194.
+- **M/S undo + 32-band polyphase synthesis filter** — downstream
+  of per-band sample reconstruction; deferred.
+
 ## Round 201 — SV7 §2.5 per-band sample-decode dispatcher
 
 Round 201 wires the SV7 frame-body inner loop (`switch (band_type)`
