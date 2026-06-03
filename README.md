@@ -123,6 +123,75 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 223 — SV7 §2.3 band-type header loop
+
+Round 223 wires the §2.3 per-band header loop — the structural
+iteration block that drives `band_type` VLC + conditional `msflag`
+across `0..=max_band` — into a new `sv7_band_header` module on top of
+the round-197 `SV7_BANDTYPE_HEADER_TABLE` Huffman table and the
+`Sv7BitReader`, reading only `docs/audio/musepack/`:
+
+- `SV7_SUBBAND_COUNT = 32` + `SV7_MAX_BAND_INCLUSIVE = 31` constants
+  pinning the Layer-II 32-subband geometry inherited per spec §1
+  lines 53-71.
+- `RawBandTypeVlc(i8)` typed wrapper around the raw `i8` value
+  produced by one invocation of the `sv7-huffman-bandtype-header`
+  VLC. The wrapper exposes `as_i8()` and `is_nonzero()` but not
+  arithmetic; it keeps the (still-DOCS-GAP) §2.3-VLC-symbol →
+  §2.5-dispatcher-case remap honest by preventing accidental
+  composition with the [`sv7_band_decode`] dispatchers.
+- `BandHeader { band_type: [RawBandTypeVlc; 2], ms_flag:
+  Option<bool> }` — one entry per band, with `ms_flag == None`
+  when §2.3's conditional suppressed the flag (both channels'
+  `band_type == 0`) and `ms_flag == Some(true|false)` otherwise
+  (true = M/S, false = L/R). `has_samples()` short-cuts the §2.5
+  inner loop's "for non-zero bands" predicate.
+- `decode_band_header(reader, nch) -> Result<BandHeader>` — one
+  band's read: `nch` (1 or 2) bandtype-header VLCs followed by the
+  conditional 1-bit `msflag`. Mono treats the single channel's VLC
+  as occupying both slots so the predicate fires the same way.
+- `decode_header_loop(reader, max_band, nch) ->
+  Result<Vec<BandHeader>>` — the full §2.3 outer loop walking
+  `i = 0..=max_band`. Returns `max_band as usize + 1` entries.
+- New crate-level `Error::MaxBandOutOfRange(u8)` and
+  `Error::ChannelCountInvalid(u8)` variants for the structural
+  parameter-validation surface.
+
+19 new unit tests cover: the Layer-II 32-subband geometry constants;
+`RawBandTypeVlc` round-trip + `is_nonzero` across `-5..=4`;
+`BandHeader::has_samples` across the four channel-zero-pattern
+combinations; `decode_band_header` for stereo both-zero (no msflag),
+stereo left-non-zero (msflag=1 read), stereo right-non-zero
+(msflag=0 read), mono both-zero (no msflag), and mono non-zero
+(msflag-consumed); rejection of `nch` outside `{1, 2}` (`0`, `3`,
+`8`, `255`); `UnexpectedEof` propagation in the left-VLC phase and
+the msflag phase; `decode_header_loop` rejection of `max_band > 31`
+(values `32`, `200`); rejection of `nch` outside `{1, 2}` in the
+loop entry point; `max_band == 0` returning a single-band vector;
+a three-band stereo walk covering all three msflag outcomes; the
+maximally-wide stereo frame (`max_band == 31` → 32 bands, 64 bits
+all-zero); and mid-loop `UnexpectedEof` propagation. Total crate
+test count `101 → 120`. `cargo test`, `cargo clippy --all-targets
+--no-deps -- -D warnings`, and `cargo fmt --check` all green.
+
+### Still gapped (post round 223)
+
+- **§2.3 VLC-symbol → §2.5-case remap**. The bandtype-header VLC's
+  symbol alphabet (`-5..=4` per the staged
+  `sv7-huffman-bandtype-header.csv`) does not cover §2.5's
+  dispatcher domain (`-1..=17`). The structural §2.5 prose uses
+  `band_type` directly in its `switch`, so an upstream remap is
+  implied — but the **shape** of that remap (delta-from-previous,
+  context-keyed transform, lookup table) is unspecified in the
+  structural prose. Tracked as DOCS-GAP alongside the §2.5
+  grouped-case unpack and the §2.2 word-packing.
+- **Per-band SCF anchor**, **SCF base-index gain table**, **SV7
+  §2.5 grouped codewords**, **SV8 canonical-Huffman entropy
+  walk**, **SV7 fixed-header field map**, **SV7 32-LSB word
+  packing**, **SV8 packet payload field maps**, **M/S undo +
+  32-band polyphase synthesis filter** — all unchanged from round
+  214.
+
 ## Round 214 — SV7 §2.4 SCF coding-method decoder
 
 Round 214 lands the `scf` module wiring the per-non-zero-band SCF

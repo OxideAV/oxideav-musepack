@@ -59,6 +59,15 @@
 //!   granule-coverage schedule (mirroring Layer-II SCFSI per §1
 //!   lines 79-82), then reads N DSCF deltas and reconstructs the
 //!   three per-granule SCF indices given a per-band base anchor.
+//! - [`sv7_band_header`] — SV7 §2.3 per-band header loop walker:
+//!   reads the `band_type` Huffman VLC per channel (stereo: left
+//!   first, then right) and the conditional 1-bit `msflag` that
+//!   follows iff at least one channel's `band_type` is non-zero,
+//!   over `0..=max_band`. Returns a `BandHeader { band_type:
+//!   [RawBandTypeVlc; 2], ms_flag: Option<bool> }` sequence. The
+//!   raw VLC value is wrapped in [`sv7_band_header::RawBandTypeVlc`]
+//!   to keep the §2.3-VLC-symbol → §2.5-dispatcher-case remap
+//!   honest (the remap shape is DOCS-GAP and not yet wired).
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
@@ -77,6 +86,7 @@ pub mod reconstruct;
 pub mod requant;
 pub mod scf;
 pub mod sv7_band_decode;
+pub mod sv7_band_header;
 
 /// Crate-local error type. Concrete variants land as the Implementer
 /// rounds populate the codec pipeline.
@@ -113,6 +123,17 @@ pub enum Error {
     /// structurally-documented `0..=3` range. The offending raw
     /// value is included for diagnostic logging.
     InvalidScfCodingMethod(i8),
+    /// The §2.3 band-type header loop was driven with a `max_band`
+    /// parameter above the Layer-II 32-subband heritage's inclusive
+    /// upper bound (`SV7_MAX_BAND_INCLUSIVE == 31`). The offending
+    /// value is included for diagnostic logging.
+    MaxBandOutOfRange(u8),
+    /// A per-band decoder was driven with a `nch` (channel count)
+    /// other than 1 or 2. The offending value is included for
+    /// diagnostic logging. Multi-channel streams (the SH-packet
+    /// "level 3 = 8 channels" SV8 upgrade) need a separate decode
+    /// path that is not wired this round.
+    ChannelCountInvalid(u8),
 }
 
 impl core::fmt::Display for Error {
@@ -144,6 +165,14 @@ impl core::fmt::Display for Error {
             Error::InvalidScfCodingMethod(raw) => write!(
                 f,
                 "oxideav-musepack: SCFI VLC produced value {raw} outside the spec §2.4 0..=3 range",
+            ),
+            Error::MaxBandOutOfRange(value) => write!(
+                f,
+                "oxideav-musepack: max_band {value} exceeds the spec §1 Layer-II 32-subband inclusive bound 31",
+            ),
+            Error::ChannelCountInvalid(nch) => write!(
+                f,
+                "oxideav-musepack: channel count {nch} is not 1 (mono) or 2 (stereo) at the §2.3 band-header layer",
             ),
         }
     }

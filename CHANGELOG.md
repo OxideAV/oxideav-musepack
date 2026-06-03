@@ -8,6 +8,57 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 223** — `sv7_band_header` module wiring the SV7 §2.3
+  per-band header loop on top of the round-197
+  `SV7_BANDTYPE_HEADER_TABLE` Huffman table and the `Sv7BitReader`,
+  reading only `docs/audio/musepack/`:
+  - `SV7_SUBBAND_COUNT = 32` + `SV7_MAX_BAND_INCLUSIVE = 31`
+    constants pinning the Layer-II 32-subband geometry inherited
+    per spec §1 lines 53-71.
+  - `RawBandTypeVlc(i8)` typed wrapper around the raw `i8` value
+    produced by one invocation of the `sv7-huffman-bandtype-header`
+    VLC. `from_raw(i8)` / `as_i8()` / `is_nonzero()` are the only
+    accessors; the type intentionally does not expose arithmetic
+    so the still-DOCS-GAP §2.3-VLC-symbol → §2.5-dispatcher-case
+    remap cannot be implicitly composed with the
+    `sv7_band_decode` dispatchers.
+  - `BandHeader { band_type: [RawBandTypeVlc; 2], ms_flag:
+    Option<bool> }` — one entry per band. `ms_flag` is `None`
+    when §2.3's conditional suppressed the flag (both channels'
+    `band_type == 0`) and `Some(true|false)` otherwise (true =
+    M/S, false = L/R). `has_samples()` short-cuts the §2.5 inner
+    loop's "for non-zero bands" predicate.
+  - `decode_band_header(reader, nch) -> Result<BandHeader>` —
+    one band's read: `nch` (1 or 2) bandtype-header VLCs followed
+    by the conditional 1-bit `msflag`. Mono is treated as the
+    single channel's VLC occupying both slots so the predicate
+    fires the same way.
+  - `decode_header_loop(reader, max_band, nch) ->
+    Result<Vec<BandHeader>>` — the full §2.3 outer loop walking
+    `i = 0..=max_band`, returning `max_band as usize + 1`
+    entries.
+  - New crate-level `Error::MaxBandOutOfRange(u8)` variant
+    rejecting `max_band > 31`, and
+    `Error::ChannelCountInvalid(u8)` variant rejecting `nch`
+    outside `{1, 2}`.
+- **Round 223** — 19 new unit tests across `sv7_band_header::tests`
+  covering: the Layer-II 32-subband geometry constants;
+  `RawBandTypeVlc` round-trip through `from_raw` + `is_nonzero`
+  across `-5..=4`; `BandHeader::has_samples` across the four
+  channel-zero-pattern combinations; `decode_band_header` for
+  stereo both-zero (no msflag), stereo left-non-zero (msflag=1
+  read), stereo right-non-zero (msflag=0 read), mono both-zero
+  (no msflag), and mono non-zero (msflag consumed); rejection of
+  `nch` outside `{1, 2}` (`0`, `3`, `8`, `255`);
+  `UnexpectedEof` propagation in the left-VLC phase and the
+  msflag phase; `decode_header_loop` rejection of `max_band > 31`
+  (`32`, `200`); rejection of `nch` outside `{1, 2}` in the loop
+  entry point; `max_band == 0` returning a single-band vector;
+  a three-band stereo walk covering all three msflag outcomes;
+  the maximally-wide stereo frame (`max_band == 31` → 32 bands,
+  64 bits all-zero); and mid-loop `UnexpectedEof` propagation.
+  Total crate test count `101 → 120`.
+
 - **Round 214** — `scf` module wiring the SV7 §2.4 SCF
   coding-method decoder on top of the round-197 SCFI / DSCF
   Huffman tables, reading only `docs/audio/musepack/`:
