@@ -68,6 +68,14 @@
 //!   raw VLC value is wrapped in [`sv7_band_header::RawBandTypeVlc`]
 //!   to keep the §2.3-VLC-symbol → §2.5-dispatcher-case remap
 //!   honest (the remap shape is DOCS-GAP and not yet wired).
+//! - [`packet_stream`] — SV8 §3.1/§3.2 packet-stream walker on top
+//!   of [`framing::parse_packet_header`]. `PacketStream::new` takes
+//!   the post-`MPCK` slice plus a [`packet_stream::PacketSizeConvention`]
+//!   pick (the GAP varint convention) and yields one
+//!   [`packet_stream::PacketRef`] per call until the `SE`
+//!   terminator. Payload bytes are surfaced as opaque borrows
+//!   over the input slice — the per-payload field maps (`SH` /
+//!   `RG` / `EI` / `SO` / `ST`) remain GAP per §3.2.
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
@@ -82,11 +90,22 @@
 pub mod cns;
 pub mod framing;
 pub mod huffman;
+pub mod packet_stream;
 pub mod reconstruct;
 pub mod requant;
 pub mod scf;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+
+/// Total subband samples per frame per channel, inherited from
+/// MPEG-1 Layer II (32 polyphase subbands × 36 samples per band).
+///
+/// Per `docs/audio/musepack/musepack-sv7-sv8-spec.md` §1 lines 65-71
+/// ("One frame contains 36 × 32 = 1152 subband samples") this value
+/// is identical for SV7 and SV8 — only the entropy / framing layer
+/// differs between the two stream versions; the underlying sample
+/// geometry is shared.
+pub const SAMPLES_PER_FRAME_PER_CHANNEL: usize = 1152;
 
 /// Crate-local error type. Concrete variants land as the Implementer
 /// rounds populate the codec pipeline.
@@ -220,5 +239,15 @@ mod tests {
         let err: Result<u32> = Err(Error::NotImplemented);
         assert_eq!(ok, Ok(7));
         assert_eq!(err, Err(Error::NotImplemented));
+    }
+
+    #[test]
+    fn samples_per_frame_per_channel_matches_layer_two_heritage() {
+        // §1 lines 65-71: 32 subbands × 36 samples = 1152.
+        assert_eq!(SAMPLES_PER_FRAME_PER_CHANNEL, 1152);
+        assert_eq!(
+            SAMPLES_PER_FRAME_PER_CHANNEL,
+            sv7_band_header::SV7_SUBBAND_COUNT * sv7_band_decode::SAMPLES_PER_BAND,
+        );
     }
 }

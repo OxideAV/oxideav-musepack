@@ -17,8 +17,9 @@ archival but is forbidden input for the rebuild.
 The `oxideav_core::CodecResolver` registration this crate will
 expose through a future `register(ctx)` function is not wired yet;
 the public API today surfaces the crate-local `Error` placeholder
-plus the wired `requant`, `framing`, `huffman`, and `cns` modules
-(see below).
+plus the wired `requant`, `framing`, `huffman`, `cns`,
+`sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`, and
+`packet_stream` modules (see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
 
@@ -122,6 +123,70 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **SV8 packet payload field maps** — same blocker as round 194.
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
+
+## Round 228 — SV8 packet-stream walker
+
+Round 228 lands the `packet_stream` module on top of the round-194
+SV8 packet outer-frame parser (`framing::parse_packet_header`),
+reading only `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 +
+§3.2:
+
+- `PacketSizeConvention { Inclusive, Exclusive }` — explicit pick
+  for the still-GAP varint convention (spec §3.1 flags as GAP
+  whether `raw_size` counts the key + size header bytes or only the
+  payload). Callers stand a walker up against one interpretation;
+  the pending observer-trace round will pin one as the only valid
+  reading.
+- `PacketRef<'a> { key, header, payload: &'a [u8] }` — one decoded
+  packet, with `payload` borrowed from the underlying byte slice
+  (no allocation per packet).
+- `PacketStream<'a>` — walker built from the post-`MPCK`-magic
+  slice plus a `PacketSizeConvention` pick. `next_packet() ->
+  Result<Option<PacketRef<'a>>>` yields one packet per call,
+  returns `Ok(None)` after the §3.2 `SE` terminator or an empty
+  input, propagates `UnexpectedEof` / `VarintTooLong` from the
+  outer-frame parser, and locks into a stopped state on either an
+  `SE` or a hard error so subsequent calls quietly return
+  `Ok(None)`.
+- Crate-root `SAMPLES_PER_FRAME_PER_CHANNEL = 1152` constant pinning
+  the Layer-II 32-subband × 36-samples-per-band frame geometry per
+  §1 lines 65-71, cross-checked by a unit test against
+  `SV7_SUBBAND_COUNT * SAMPLES_PER_BAND`.
+
+15 new unit tests across `packet_stream::tests` cover: the
+`Inclusive` / `Exclusive` convention round-trip; empty input
+yielding `None` and stopping; single-`SE` terminator path; a
+three-packet stereo walk (`SH` + `AP` + `SE`); stop-at-`SE` with
+trailing garbage in the buffer (the walker leaves the stream
+exhausted without erroring on the leftover bytes); the inclusive
+convention with a synthetic packet whose `raw_size` includes the
+3-byte header; inclusive-mode rejection of a sub-header `raw_size`
+with `Error::VarintTooLong`; `UnexpectedEof` propagation on a
+declared-but-truncated payload; malformed-header `UnexpectedEof`;
+the `remaining_bytes()` cursor shrinking on each successful read;
+forward-compat surfacing of unknown 2-byte keys via
+`PacketKey::Unknown`; full-walk count of a five-packet synthetic
+stream; the post-error stopped-state invariant (the walker does
+not re-emit the same error on subsequent calls); and the lifetime
+guarantee that `PacketRef::payload` borrows from the input slice
+rather than copying. Plus one new crate-root test pinning the
+`SAMPLES_PER_FRAME_PER_CHANNEL` constant. Total crate test count
+`120 → 135`. `cargo test`, `cargo clippy --all-targets --no-deps
+-- -D warnings`, and `cargo fmt --check` all green.
+
+### Still gapped (post round 228)
+
+- **§3.1 varint convention** — inclusive vs exclusive of the
+  header bytes — still DOCS-GAP per the structural spec; the new
+  walker takes both interpretations as a `PacketSizeConvention`
+  knob so it can wire up either reading the moment the observer
+  trace pins one.
+- **§2.3 VLC-symbol → §2.5-case remap**, **per-band SCF anchor**,
+  **SCF base-index gain table**, **SV7 §2.5 grouped codewords**,
+  **SV8 canonical-Huffman entropy walk**, **SV7 fixed-header field
+  map**, **SV7 32-LSB word packing**, **SV8 packet payload field
+  maps** (SH / RG / EI / SO / ST), **M/S undo + 32-band polyphase
+  synthesis filter** — all unchanged from round 223.
 
 ## Round 223 — SV7 §2.3 band-type header loop
 

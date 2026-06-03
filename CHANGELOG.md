@@ -8,6 +8,52 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 228** — `packet_stream` module wiring an SV8 packet-stream
+  walker on top of the round-194 outer-frame parser, reading only
+  `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:
+  - `PacketSizeConvention { Inclusive, Exclusive }` — explicit pick
+    for the still-GAP §3.1 varint convention. `Inclusive` reads
+    the literal "total packet length (key + size + payload)"
+    sentence; `Exclusive` treats `raw_size` as the payload byte
+    count alone. The pending observer-trace round (#1263) is
+    expected to pin one as correct.
+  - `PacketRef<'a> { key, header, payload: &'a [u8] }` — one
+    decoded packet. `payload` is borrowed from the underlying
+    slice; no per-packet allocation.
+  - `PacketStream<'a>` — walker built from the post-`MPCK`-magic
+    slice plus a `PacketSizeConvention`. `next_packet() ->
+    Result<Option<PacketRef<'a>>>` yields one packet per call,
+    returns `Ok(None)` after the §3.2 `SE` terminator (or an empty
+    input), propagates `UnexpectedEof` / `VarintTooLong` errors
+    on malformed input, and locks into a stopped state so
+    post-error / post-`SE` calls quietly return `Ok(None)`.
+  - `remaining_bytes()` / `is_stopped()` / `convention()`
+    accessors.
+- **Round 228** — crate-root `SAMPLES_PER_FRAME_PER_CHANNEL: usize
+  = 1152` constant pinning the Layer-II 32-subband × 36-sample
+  frame geometry per spec §1 lines 65-71. The constant is
+  cross-checked at the lib-tests layer against
+  `SV7_SUBBAND_COUNT * SAMPLES_PER_BAND`.
+- **Round 228** — 15 new unit tests in `packet_stream::tests`
+  covering: `Inclusive` / `Exclusive` accessor round-trip; empty
+  input yielding `Ok(None)` and stopping; single-`SE` terminator
+  path; a three-packet stereo walk (`SH` + `AP` + `SE`); stop-at-
+  `SE` with trailing garbage in the buffer (the walker leaves the
+  stream exhausted without erroring on the leftover bytes); the
+  inclusive convention with `raw_size` covering the 3-byte header;
+  inclusive-mode rejection of a sub-header `raw_size` with
+  `Error::VarintTooLong`; `UnexpectedEof` propagation on a
+  declared-but-truncated payload; malformed-header
+  `UnexpectedEof`; the `remaining_bytes()` cursor shrinking on
+  each successful read; forward-compat surfacing of unknown 2-byte
+  keys via `PacketKey::Unknown`; full-walk count of a five-packet
+  synthetic stream; the post-error stopped-state invariant; and
+  the lifetime guarantee that `PacketRef::payload` borrows from
+  the input slice rather than copying. Plus one new crate-root
+  test pinning `SAMPLES_PER_FRAME_PER_CHANNEL` against the
+  `SV7_SUBBAND_COUNT * SAMPLES_PER_BAND` invariant. Total crate
+  test count `120 → 135`.
+
 - **Round 223** — `sv7_band_header` module wiring the SV7 §2.3
   per-band header loop on top of the round-197
   `SV7_BANDTYPE_HEADER_TABLE` Huffman table and the `Sv7BitReader`,
