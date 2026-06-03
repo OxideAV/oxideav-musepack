@@ -123,6 +123,69 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 214 — SV7 §2.4 SCF coding-method decoder
+
+Round 214 lands the `scf` module wiring the per-non-zero-band SCF
+VLC loop documented in `docs/audio/musepack/musepack-sv7-sv8-spec.md`
+§2.4 ("Frame body — scalefactor (SCF) coding") on top of the
+round-197 staged `sv7-huffman-scfi` selector + `sv7-huffman-dscf`
+delta tables. The new module:
+
+- `ScfCodingMethod` typed wrapper around the `0..=3` SCFI value;
+  `from_raw(i8)` validates the decoded SCFI VLC value and rejects
+  anything outside that range with a new
+  `Error::InvalidScfCodingMethod(i8)` carrying the offending value.
+- `GranuleSchedule { deltas_to_read(), granule_to_slot() }` —
+  classifies each SCFI value into the (count, per-granule
+  delta-slot) pair specified by the Layer-II SCFSI convention
+  §1 lines 79-82 ("scfsi==0: three SCFs, one per granule";
+  "scfsi==1: two — first for granules 0+1, second for 2"; "scfsi==2:
+  one shared across all three"; "scfsi==3: two — first for granule
+  0, second for granules 1+2").
+- `reconstruct_scf_from_deltas(reader, base, schedule)` — reads
+  `1..=3` DSCF deltas, accumulates them against `base` (the §2.4
+  "delta-coded against the previous one" rule), and projects
+  through the granule mapping into the three per-granule SCF
+  indices.
+- `decode_band_scf(reader, base)` — end-to-end per-band entry:
+  one SCFI VLC followed by N DSCF VLCs; returns the recovered
+  method alongside the three SCF indices.
+- `SCF_GRANULES_PER_BAND = 3` + `SCF_MAX_DISTINCT = 3` constants
+  pinning the Layer-II-inherited band geometry.
+
+The base anchor is sourced upstream (SV7 fixed-header field map,
+GAP per §2.1); this module never touches the band-type header
+VLC nor the per-sample quantiser VLC.
+
+16 new unit tests cover: SCFI round-trip + reject-out-of-range
+across `-1..=4` plus `i8` extremes; the four granule schedules
+against their §1 source rows; delta reconstruction for all four
+methods against hand-packed DSCF bit streams; end-to-end
+`decode_band_scf` for method 2; `UnexpectedEof` propagation in
+both phases; the invariant that every schedule's mapping
+references only valid transmitted slots; and the
+`SCF_GRANULES_PER_BAND == 3` constant sanity. Total crate test
+count `85 → 101`. `cargo test`, `cargo clippy --all-targets
+--no-deps -- -D warnings`, and `cargo fmt --check` are all green.
+
+### Still gapped (post round 214)
+
+- **Per-band SCF anchor**. The per-band base index the `scf`
+  module accepts is sourced upstream — the SV7 fixed-header
+  field map (`max_band`, etc.) and the per-band-vs-per-frame
+  anchor convention are both DOCS-GAP under §2.1 / §2.2 and
+  blocked on workspace task #1263.
+- **SCF base-index gain table.** §2.6 still needs a 256-entry
+  SCF index → gain mapping; the geometric `SCF_STEP_RATIO` is
+  wired but the gain at the reference index is unspecified.
+- **SV7 §2.5 grouped codewords** — cases 1 / 2 — same as round 201.
+- **SV8 canonical-Huffman entropy walk** — same as round 201.
+- **SV7 fixed-header field map** — same blocker as round 194.
+- **SV7 32-LSB word packing** — same blocker as round 201.
+- **SV8 packet payload field maps** — same blocker as round 194.
+- **M/S undo + 32-band polyphase synthesis filter** — downstream
+  of per-band sample reconstruction; deferred.
+
 ## Round 201 — SV7 §2.5 per-band sample-decode dispatcher
 
 Round 201 wires the SV7 frame-body inner loop (`switch (band_type)`

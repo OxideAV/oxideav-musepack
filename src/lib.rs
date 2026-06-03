@@ -54,13 +54,19 @@
 //!   path keyed off `DEQUANT_COEFFICIENT_C[0]`). The downstream SCF
 //!   multiply, M/S undo, and synthesis filterbank are out of scope
 //!   here.
+//! - [`scf`] — SV7 §2.4 SCF coding-method decoder: reads the
+//!   per-non-zero-band SCFI selector VLC, classifies it into a
+//!   granule-coverage schedule (mirroring Layer-II SCFSI per §1
+//!   lines 79-82), then reads N DSCF deltas and reconstructs the
+//!   three per-granule SCF indices given a per-band base anchor.
 //!
-//! Per-field header decoding, the SV7 per-frame 20-bit length
-//! prefix + "read in 32-LSB units" packing, the SV8 canonical-
-//! huffman entropy layer (`sv8-canonical-*` + `sv8-symbols-*`),
-//! the SCF base-index decode, and the synthesis filterbank are
-//! still pending. See `CHANGELOG.md` `[Unreleased]` for the gap
-//! list.
+//! Per-field header decoding (including the per-band SCF anchor
+//! the [`scf`] module currently takes as an argument), the SV7
+//! per-frame 20-bit length prefix + "read in 32-LSB units"
+//! packing, the SV8 canonical-huffman entropy layer
+//! (`sv8-canonical-*` + `sv8-symbols-*`), the SCF index → gain
+//! anchor for §2.6, and the synthesis filterbank are still
+//! pending. See `CHANGELOG.md` `[Unreleased]` for the gap list.
 
 #![forbid(unsafe_code)]
 
@@ -69,6 +75,7 @@ pub mod framing;
 pub mod huffman;
 pub mod reconstruct;
 pub mod requant;
+pub mod scf;
 pub mod sv7_band_decode;
 
 /// Crate-local error type. Concrete variants land as the Implementer
@@ -102,6 +109,10 @@ pub enum Error {
     /// out-of-range value is reported so callers can log which
     /// `band_type` was rejected.
     UnsupportedBandType(i8),
+    /// The SV7 §2.4 SCFI VLC decoded a value outside the
+    /// structurally-documented `0..=3` range. The offending raw
+    /// value is included for diagnostic logging.
+    InvalidScfCodingMethod(i8),
 }
 
 impl core::fmt::Display for Error {
@@ -129,6 +140,10 @@ impl core::fmt::Display for Error {
             Error::UnsupportedBandType(bt) => write!(
                 f,
                 "oxideav-musepack: unsupported or out-of-range band_type {bt} for the sample-decode dispatcher",
+            ),
+            Error::InvalidScfCodingMethod(raw) => write!(
+                f,
+                "oxideav-musepack: SCFI VLC produced value {raw} outside the spec §2.4 0..=3 range",
             ),
         }
     }

@@ -8,6 +8,57 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 214** — `scf` module wiring the SV7 §2.4 SCF
+  coding-method decoder on top of the round-197 SCFI / DSCF
+  Huffman tables, reading only `docs/audio/musepack/`:
+  - `SCF_GRANULES_PER_BAND = 3` and `SCF_MAX_DISTINCT = 3`
+    constants pinning the Layer-II-inherited band geometry
+    (1152 samples / 32 bands / 12-sample granules; spec §1
+    lines 65-71).
+  - `ScfCodingMethod` typed wrapper around the `0..=3` SCFI
+    selector value, with `from_raw(i8)` validating that the
+    decoded SCFI VLC value is in range and
+    `Error::InvalidScfCodingMethod(i8)` carrying the offending
+    value on rejection.
+  - `GranuleSchedule` exposing `deltas_to_read()` (number of
+    distinct DSCFs the band transmits, `1..=3`) and
+    `granule_to_slot()` (the granule → stored-delta-index
+    mapping). The four schedules are transcribed verbatim from
+    §1 lines 79-82 (the Layer-II SCFSI convention restated in
+    the Musepack structural spec):
+    - method 0: 3 SCFs, mapping `[0, 1, 2]`.
+    - method 1: 2 SCFs, mapping `[0, 0, 1]`.
+    - method 2: 1 SCF, mapping `[0, 0, 0]`.
+    - method 3: 2 SCFs, mapping `[0, 1, 1]`.
+  - `reconstruct_scf_from_deltas(reader, base, schedule) ->
+    Result<[i32; 3]>` — reads `schedule.deltas_to_read()` DSCF
+    VLCs, runs the §2.4 "delta-coded against the previous one"
+    accumulation against the caller-supplied `base` anchor,
+    and projects the running transmitted values through the
+    granule mapping into the three per-granule SCF indices.
+  - `decode_band_scf(reader, base) -> Result<BandScf>` — full
+    per-band entry point: reads the SCFI VLC, classifies it,
+    then drives the DSCF loop. Returns the recovered
+    `ScfCodingMethod` alongside the three SCF indices.
+  - New crate-level `Error::InvalidScfCodingMethod(i8)`
+    variant. The base anchor is sourced upstream (SV7
+    fixed-header field map, currently GAP per §2.1) and is not
+    decided by this module.
+- **Round 214** — 16 new unit tests across `scf::tests`
+  covering: SCFI `0..=3` round-trip through `from_raw`;
+  rejection of `-1`, `-2`, `4`, `5`, `7`, `i8::MAX`, `i8::MIN`;
+  the four granule-schedule shapes against their §1 lines
+  79-82 source rows; delta reconstruction for methods 0, 1,
+  2, 3 driven through the real `Sv7BitReader` against
+  hand-packed DSCF bit streams (covering single-shared,
+  three-distinct running-sum, two-pair-mappings); end-to-end
+  `decode_band_scf` for method 2 against a 16-bit packed
+  stream; `UnexpectedEof` propagation in both the SCFI and
+  the DSCF phase; the geometric invariant that every
+  schedule's mapping references only valid transmitted slots;
+  the constant `SCF_GRANULES_PER_BAND == 3`; and a zero-base
+  reconstruction reducing the function to a pure running-sum
+  walker. Total crate test count `85 → 101`.
 - **Round 206** — `reconstruct` module wiring the SV7 §2.6
   per-sample reconstruction primitives on top of the round-191
   requantiser constants and the round-201 per-band level decode:
