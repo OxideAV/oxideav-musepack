@@ -8,6 +8,48 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 232** — `typed_packet` module wiring a typed §3.2 packet
+  surface on top of the round-228 `PacketStream` walker, reading
+  only `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:
+  - Per-kind borrowed newtypes covering the full §3.2 vocabulary —
+    `StreamHeaderPacket<'a>` (`SH`), `ReplayGainPacket<'a>` (`RG`),
+    `EncoderInfoPacket<'a>` (`EI`),
+    `SeekTableOffsetPacket<'a>` (`SO`), `SeekTablePacket<'a>` (`ST`),
+    `AudioPacket<'a>` (`AP`), `StreamEndPacket<'a>` (`SE`). Each
+    newtype carries the opaque payload slice the upstream walker
+    emitted and exposes a single `payload_bytes() -> &'a [u8]`
+    accessor; per-field maps remain GAP per the §3.2 "Field layout"
+    column.
+  - `TypedPacket<'a>` sum routing each known key to its per-kind
+    newtype plus an `Unknown { key: [u8; 2], payload: &'a [u8] }`
+    catch-all that preserves the raw bytes of any 2-byte key
+    outside the §3.2 vocabulary (forward-compat for the pending
+    observer-trace round).
+  - `TypedPacket::classify(PacketRef<'a>) -> TypedPacket<'a>` — pure
+    infallible classification of one walker-surfaced packet.
+  - `TypedPacket::key()` / `payload_bytes()` accessors plus
+    `is_stream_end()` / `is_audio()` / `is_metadata()` predicates
+    for log / filter loops without re-matching every variant. The
+    three predicates are mutually exclusive (and all `false` for
+    `Unknown`).
+- **Round 232** — 10 new unit tests across `typed_packet::tests`
+  covering: routing of every known §3.2 key into the matching
+  typed variant + the three-predicate truth table; `Unknown`
+  preservation of raw key bytes and payload; a seven-packet
+  end-to-end walk (`SH` + `RG` + `EI` + `SO` + `ST` + `AP` + `SE`)
+  through `PacketStream::next_packet` + `TypedPacket::classify`;
+  metadata-only filter counting on a mixed `SH` / `AP` / `RG` /
+  `AP` / `SE` stream; the `payload_bytes()` accessor agreeing
+  with the inner newtype's accessor across every variant
+  (including `Unknown`); empty-payload round-trip across every
+  variant; an unknown 2-byte key (`ZQ`) traversing the walker into
+  `TypedPacket::Unknown` without an error; the `Copy` / `Eq`
+  invariants on both `TypedPacket` and its inner newtypes;
+  classification independence from `PacketHeader::raw_size` and
+  `header_len` (only key + payload are consulted); and the
+  mutual-exclusion property of `is_metadata` / `is_audio` /
+  `is_stream_end`. Total crate test count `135 → 145`.
+
 - **Round 228** — `packet_stream` module wiring an SV8 packet-stream
   walker on top of the round-194 outer-frame parser, reading only
   `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:

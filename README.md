@@ -18,8 +18,8 @@ The `oxideav_core::CodecResolver` registration this crate will
 expose through a future `register(ctx)` function is not wired yet;
 the public API today surfaces the crate-local `Error` placeholder
 plus the wired `requant`, `framing`, `huffman`, `cns`,
-`sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`, and
-`packet_stream` modules (see below).
+`sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`,
+`packet_stream`, and `typed_packet` modules (see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
 
@@ -123,6 +123,64 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **SV8 packet payload field maps** — same blocker as round 194.
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
+
+## Round 232 — typed SV8 packet surface
+
+Round 232 lands the `typed_packet` module on top of the round-228
+`PacketStream` walker, reading only
+`docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:
+
+- Per-kind borrowed newtypes covering the full §3.2 packet
+  vocabulary: `StreamHeaderPacket<'a>` (`SH`),
+  `ReplayGainPacket<'a>` (`RG`), `EncoderInfoPacket<'a>` (`EI`),
+  `SeekTableOffsetPacket<'a>` (`SO`), `SeekTablePacket<'a>` (`ST`),
+  `AudioPacket<'a>` (`AP`), `StreamEndPacket<'a>` (`SE`). Each
+  newtype carries the opaque payload slice the upstream walker
+  emitted and exposes a single `payload_bytes() -> &'a [u8]`
+  accessor; per-field maps remain GAP per the §3.2 "Field layout"
+  column.
+- `TypedPacket<'a>` sum routing each known key to its per-kind
+  newtype plus an `Unknown { key: [u8; 2], payload: &'a [u8] }`
+  catch-all that preserves the raw bytes of any 2-byte key outside
+  the §3.2 vocabulary (forward-compat for the pending observer-
+  trace round).
+- `TypedPacket::classify(PacketRef<'a>) -> TypedPacket<'a>` — pure
+  infallible classification of one walker-surfaced packet.
+- `TypedPacket::key()` / `payload_bytes()` accessors plus
+  `is_stream_end()` / `is_audio()` / `is_metadata()` predicates for
+  log / filter loops; the three predicates are mutually exclusive
+  (and all `false` for `Unknown`).
+
+10 new unit tests across `typed_packet::tests` cover: routing of
+every known §3.2 key into its matching typed variant; `Unknown`
+preservation of raw key bytes and payload; a seven-packet
+end-to-end walk (`SH` + `RG` + `EI` + `SO` + `ST` + `AP` + `SE`)
+through `PacketStream::next_packet` + `TypedPacket::classify`;
+metadata-only filter counting on a mixed `SH` / `AP` / `RG` /
+`AP` / `SE` stream; the `payload_bytes()` accessor agreeing with
+the inner newtype's accessor across every variant; empty-payload
+round-trip across every variant; an unknown 2-byte key (`ZQ`)
+traversing the walker into `TypedPacket::Unknown` without an
+error; the `Copy` / `Eq` invariants on both `TypedPacket` and its
+inner newtypes; classification independence from
+`PacketHeader::raw_size` / `header_len`; and the mutual-exclusion
+property of `is_metadata` / `is_audio` / `is_stream_end`. Total
+crate test count `135 → 145`. `cargo test`, `cargo clippy
+--all-targets --no-deps -- -D warnings`, and `cargo fmt --check`
+all green.
+
+### Still gapped (post round 232)
+
+- **§3.2 packet payload field maps** — SH / RG / EI / SO / ST
+  inner-byte layouts are still DOCS-GAP per the structural spec's
+  "Field layout" column; this round adds typed wrappers but does
+  not introduce any field decode.
+- **§3.1 varint convention**, **§2.3 VLC-symbol → §2.5-case
+  remap**, **per-band SCF anchor**, **SCF base-index gain table**,
+  **SV7 §2.5 grouped codewords**, **SV8 canonical-Huffman entropy
+  walk**, **SV7 fixed-header field map**, **SV7 32-LSB word
+  packing**, **M/S undo + 32-band polyphase synthesis filter** —
+  all unchanged from round 228.
 
 ## Round 228 — SV8 packet-stream walker
 

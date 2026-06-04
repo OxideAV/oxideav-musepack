@@ -76,6 +76,15 @@
 //!   terminator. Payload bytes are surfaced as opaque borrows
 //!   over the input slice — the per-payload field maps (`SH` /
 //!   `RG` / `EI` / `SO` / `ST`) remain GAP per §3.2.
+//! - [`typed_packet`] — typed §3.2 packet surface: each known
+//!   2-byte key maps to a per-kind borrowed newtype
+//!   ([`typed_packet::StreamHeaderPacket`] / `ReplayGainPacket` /
+//!   `EncoderInfoPacket` / `SeekTableOffsetPacket` /
+//!   `SeekTablePacket` / `AudioPacket` / `StreamEndPacket`), all
+//!   wrapped in a [`typed_packet::TypedPacket`] sum that callers can
+//!   `match` instead of re-validating raw `PacketKey` strings.
+//!   Payload bytes remain opaque borrows over the input — field
+//!   maps continue to be GAP per §3.2.
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
@@ -96,6 +105,7 @@ pub mod requant;
 pub mod scf;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from
 /// MPEG-1 Layer II (32 polyphase subbands × 36 samples per band).
