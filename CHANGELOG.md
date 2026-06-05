@@ -8,6 +8,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 239** — `stream_shape` module wiring an SV8 stream-shape
+  observer on top of the round-228 `PacketStream` walker and the
+  round-232 `TypedPacket` classifier, reading only
+  `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:
+  - `StreamShape` — structural summary carrying per-§3.2-kind
+    counters (`sh_count` / `rg_count` / `ei_count` / `so_count` /
+    `st_count` / `ap_count` / `se_count` / `unknown_count`),
+    cumulative opaque payload bytes (`total_payload_bytes`), and
+    `first_kind` / `last_kind` classified packet keys.
+  - `scan_sv8_stream(input, convention) -> Result<StreamShape>` —
+    pure observer entry point. Validates `MPCK` magic, drives a
+    `PacketStream` with the caller-supplied `PacketSizeConvention`
+    pick (still-GAP varint convention), classifies each emitted
+    `PacketRef` via `TypedPacket::classify`, and accumulates the
+    shape. No payload field interpretation; no ordering check.
+  - `StreamShape::total_packets()` / `is_empty()` /
+    `saw_stream_end()` / `count_for(PacketKey)` accessors plus
+    `Default` / `Copy` / `Eq`.
+- **Round 239** — 15 new unit tests in `stream_shape::tests`
+  covering: rejection of non-`MPCK` magic + short input; empty
+  post-magic slice yielding the all-zero shape; single-`SE`
+  terminator path; full §3.2 vocabulary walk with correct first /
+  last kinds and payload-byte tally; repeated-`AP` aggregation;
+  multiple unknown 2-byte keys aggregated into `unknown_count`
+  while `first_kind` / `last_kind` preserve the raw bytes / known
+  kind; `count_for` routing for every §3.2 key and the `Unknown`
+  catch-all; truncated-payload `UnexpectedEof` propagation;
+  trailing-garbage-after-`SE` ignored by the walker; `SE`-less
+  stream still reporting `first_kind` / `last_kind` for what was
+  seen; `total_payload_bytes` payload-only (header bytes excluded);
+  inclusive-convention scan with `raw_size = header_len +
+  payload_len`; default shape all-zero / empty; `Copy` / `Eq`
+  invariants on `StreamShape`; and `first_kind` first-wins lock-in
+  (a later packet must not overwrite it). Total crate test count
+  `145 → 160`.
+
 - **Round 232** — `typed_packet` module wiring a typed §3.2 packet
   surface on top of the round-228 `PacketStream` walker, reading
   only `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 + §3.2:

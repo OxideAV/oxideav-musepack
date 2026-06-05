@@ -85,6 +85,13 @@
 //!   `match` instead of re-validating raw `PacketKey` strings.
 //!   Payload bytes remain opaque borrows over the input — field
 //!   maps continue to be GAP per §3.2.
+//! - [`stream_shape`] — SV8 stream-shape observer: walks a complete
+//!   `MPCK`-prefixed byte buffer via [`framing::parse_sv8_magic`] +
+//!   [`packet_stream::PacketStream`] + [`typed_packet::TypedPacket`]
+//!   and surfaces a [`stream_shape::StreamShape`] summary of
+//!   per-§3.2-kind counts, cumulative opaque payload bytes, and
+//!   first/last seen packet kinds. Pure observer — no payload
+//!   interpretation, no ordering enforcement.
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
@@ -103,6 +110,7 @@ pub mod packet_stream;
 pub mod reconstruct;
 pub mod requant;
 pub mod scf;
+pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod typed_packet;

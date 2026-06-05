@@ -124,6 +124,72 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 239 — SV8 stream-shape observer
+
+Round 239 lands the `stream_shape` module on top of the round-228
+`PacketStream` walker and the round-232 `TypedPacket` classifier,
+reading only `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 +
+§3.2:
+
+- `StreamShape { sh_count, rg_count, ei_count, so_count, st_count,
+  ap_count, se_count, unknown_count, total_payload_bytes,
+  first_kind, last_kind }` — structural summary of one SV8 byte
+  stream. Per-§3.2-kind counters cover the full vocabulary; the
+  `Unknown` aggregator absorbs every 2-byte key outside the
+  vocabulary; `total_payload_bytes` is the cumulative opaque payload
+  byte tally (header bytes excluded); `first_kind` / `last_kind`
+  record the classified key of the first and last emitted packet.
+- `scan_sv8_stream(input, convention) -> Result<StreamShape>` —
+  pure observer entry point. Validates the leading `MPCK` magic via
+  `framing::parse_sv8_magic`, drives a `PacketStream` over the
+  post-magic slice with the caller-supplied
+  `PacketSizeConvention` pick (the still-GAP §3.1 varint
+  convention), classifies each emitted `PacketRef` via
+  `TypedPacket::classify`, and accumulates the shape until the
+  walker reports `Ok(None)`.
+- `StreamShape::total_packets()`, `is_empty()`, `saw_stream_end()`,
+  and `count_for(PacketKey)` accessors. `count_for` routes the
+  `Unknown` variant to the single `unknown_count` aggregator
+  regardless of the raw 2-byte key value.
+- No payload field interpretation, no ordering enforcement: the
+  shape simply records what the upstream walker emitted in the
+  order it emitted it. SH-first / SE-last invariants stay GAP per
+  the structural prose.
+
+15 new unit tests across `stream_shape::tests` cover: rejection of
+non-`MPCK` magic and short input; empty post-magic slice yielding
+the all-zero shape; single-`SE` terminator path; full §3.2
+vocabulary walk (`SH` + `RG` + `EI` + `SO` + `ST` + `AP` + `SE`) in
+spec-table order with correct first/last; repeated `AP` packet
+aggregation into a single counter; multiple unknown 2-byte keys
+aggregated into `unknown_count` while `first_kind` / `last_kind`
+preserve the actual raw bytes / known kind; `count_for` routing for
+every §3.2 key plus the `Unknown` catch-all; `UnexpectedEof`
+propagation on a truncated payload; trailing-garbage-after-`SE`
+ignored by the walker so it does not contribute to the shape;
+`se`-less stream still reporting `first_kind` / `last_kind` for
+what was actually seen; `total_payload_bytes` measuring payload
+only (header bytes excluded); inclusive-convention scan with
+`raw_size` matching `header_len + payload_len`; default shape
+all-zero / empty; `Copy` + `Eq` invariants on `StreamShape`; and
+`first_kind` locking in on the first packet only (not overwritten
+by later packets). Total crate test count `145 → 160`. `cargo
+test`, `cargo clippy --all-targets --no-deps -- -D warnings`, and
+`cargo fmt --check` all green.
+
+### Still gapped (post round 239)
+
+- **§3.2 packet payload field maps** — SH / RG / EI / SO / ST
+  inner-byte layouts are still DOCS-GAP per the structural spec's
+  "Field layout" column; the stream-shape observer aggregates
+  payload byte counts only.
+- **§3.1 varint convention**, **§2.3 VLC-symbol → §2.5-case
+  remap**, **per-band SCF anchor**, **SCF base-index gain table**,
+  **SV7 §2.5 grouped codewords**, **SV8 canonical-Huffman entropy
+  walk**, **SV7 fixed-header field map**, **SV7 32-LSB word
+  packing**, **M/S undo + 32-band polyphase synthesis filter** —
+  all unchanged from round 232.
+
 ## Round 232 — typed SV8 packet surface
 
 Round 232 lands the `typed_packet` module on top of the round-228
