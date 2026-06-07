@@ -68,6 +68,18 @@
 //!   raw VLC value is wrapped in [`sv7_band_header::RawBandTypeVlc`]
 //!   to keep the §2.3-VLC-symbol → §2.5-dispatcher-case remap
 //!   honest (the remap shape is DOCS-GAP and not yet wired).
+//! - [`sv8_band_decode`] — SV8 §3.4 per-band sample-decode case
+//!   classifier mirroring [`sv7_band_decode::BandDecodeCase`] for
+//!   the SV8 ladder shape (`Cns` / `Empty` / `SparseBand` /
+//!   `Grouped3` / `Grouped2` / `ContextHuffmanPerSample` /
+//!   `LargeCoeffEscape` / `OutOfRange`). Pure structural dispatch:
+//!   one `const fn` plus two predicate helpers
+//!   ([`sv8_band_decode::case_emits_samples`],
+//!   [`sv8_band_decode::case_uses_first_order_context`]) routing
+//!   `band_type` to its §3.4 `switch` arm. The per-case sample
+//!   decoders live downstream of the SV8 canonical-Huffman entropy
+//!   layer (`sv8-canonical-*` + `sv8-symbols-*` tables, staged
+//!   under `docs/audio/musepack/tables/`).
 //! - [`packet_stream`] — SV8 §3.1/§3.2 packet-stream walker on top
 //!   of [`framing::parse_packet_header`]. `PacketStream::new` takes
 //!   the post-`MPCK` slice plus a [`packet_stream::PacketSizeConvention`]
@@ -113,6 +125,7 @@ pub mod scf;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod sv8_band_decode;
 pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from

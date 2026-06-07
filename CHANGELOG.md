@@ -8,6 +8,46 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 245** — `sv8_band_decode` module wiring the SV8 §3.4
+  per-band sample-decode case classifier, reading only
+  `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.4:
+  - `Sv8BandDecodeCase` enum routing each `band_type` to its §3.4
+    `switch` arm (`Cns`, `Empty`, `SparseBand`, `Grouped3`,
+    `Grouped2`, `ContextHuffmanPerSample`, `LargeCoeffEscape`,
+    `OutOfRange`). Mirrors the SV7 sibling
+    [`sv7_band_decode::BandDecodeCase`] shape with the SV8-specific
+    ladder differences (sparse-band insertion at `case 1`, grouped
+    cases shifted up by one, first-order context arm at
+    `case 5..=8`, large-coefficient-escape `default` arm at
+    `band_type >= 9`).
+  - `sv8_band_type_case(band_type: i8) -> Sv8BandDecodeCase` —
+    pure `const fn` dispatch, total over the full `i8` range.
+  - `case_emits_samples(case)` predicate isolating the §3.4 outer
+    loop's "for each non-zero band" arms (every variant except
+    `Empty` / `OutOfRange`).
+  - `case_uses_first_order_context(case)` predicate isolating the
+    SV8-specific `case 5..=8` first-order context-modelled per-
+    sample Huffman path — the "table chosen by the previously
+    decoded sample" highlight per §3.4 prose.
+- **Round 245** — 16 new unit tests across `sv8_band_decode::tests`
+  covering: classification of `band_type == -1` (Cns), `0` (Empty),
+  `1` (SparseBand), `2` (Grouped3), `3` / `4` (Grouped2), `5..=8`
+  (ContextHuffmanPerSample), `9..=64` and `i8::MAX`
+  (LargeCoeffEscape), and `-2 / -10 / -100 / i8::MIN` (OutOfRange);
+  full-`i8`-range totality of the classifier; the
+  `case_emits_samples` truth table per §3.4 arm; the
+  `case_uses_first_order_context` truth table; the band_type-range
+  cross-check of `case_uses_first_order_context` against
+  `5..=8`; const-evaluation sanity at five representative band
+  types; the SV7-vs-SV8 ladder divergence on the grouped-case
+  indices (SV7 case 1 = Grouped3, SV8 case 1 = SparseBand; SV7
+  case 2 = Grouped2, SV8 case 2 = Grouped3; SV7 case 3 =
+  HuffmanPerSample, SV8 case 3 = Grouped2; SV7 case 5 =
+  HuffmanPerSample, SV8 case 5 = ContextHuffmanPerSample); the
+  shared-arm agreement on `case -1` (Cns) and `case 0` (Empty);
+  and the `Copy` / `Eq` / `Debug` invariants. Total crate test
+  count `160 → 176`.
+
 - **Round 239** — `stream_shape` module wiring an SV8 stream-shape
   observer on top of the round-228 `PacketStream` walker and the
   round-232 `TypedPacket` classifier, reading only

@@ -124,6 +124,73 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 245 — SV8 §3.4 per-band sample-decode case classifier
+
+Round 245 lands the `sv8_band_decode` module: a pure structural
+case classifier mirroring [`sv7_band_decode::BandDecodeCase`] for
+the SV8 §3.4 audio-packet frame-body `switch (band_type)` ladder,
+reading only `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.4:
+
+- `Sv8BandDecodeCase` — eight-variant enum routing each `band_type`
+  to its §3.4 `switch` arm: `Cns` (`-1`), `Empty` (`0`),
+  `SparseBand` (`1`), `Grouped3` (`2`), `Grouped2` (`3` / `4`),
+  `ContextHuffmanPerSample` (`5..=8`), `LargeCoeffEscape`
+  (`band_type >= 9`, the `default` arm), and `OutOfRange` (every
+  value below `-1`).
+- `sv8_band_type_case(band_type: i8) -> Sv8BandDecodeCase` — pure
+  `const fn` dispatch, total over the full `i8` range. Sibling of
+  [`sv7_band_decode::band_type_case`]; the SV8 classifier captures
+  the §3.4 ladder shifts relative to the §2.5 ladder (sparse band
+  insertion at `case 1`, grouped cases shifted up by one,
+  first-order context arm at `case 5..=8`, large-coefficient escape
+  at `band_type >= 9`).
+- `case_emits_samples(case) -> bool` predicate isolating the §3.4
+  outer-loop "for each non-zero band" arms (every variant except
+  `Empty` / `OutOfRange`).
+- `case_uses_first_order_context(case) -> bool` predicate isolating
+  the §3.4 SV8-specific first-order context-modelled per-sample
+  Huffman arm (`band_type` in `5..=8`) — the "Huffman table chosen
+  by the previously decoded sample" detail the §3.4 prose
+  highlights as the heart of the "2% smaller files / faster
+  decoding" Wikipedia note.
+
+16 new unit tests across `sv8_band_decode::tests` cover:
+classification of `band_type == -1` (Cns), `0` (Empty), `1`
+(SparseBand), `2` (Grouped3), `3` / `4` (Grouped2), `5..=8`
+(ContextHuffmanPerSample), `9..=64` and `i8::MAX`
+(LargeCoeffEscape), and `-2 / -10 / -100 / i8::MIN` (OutOfRange);
+full-`i8`-range classifier totality; the `case_emits_samples`
+truth table per §3.4 arm; the `case_uses_first_order_context`
+truth table; band_type-range cross-check of
+`case_uses_first_order_context` against `5..=8`; const-evaluation
+sanity at five representative band types; the SV7-vs-SV8 ladder
+divergence on the grouped-case indices (SV7 case 1 = Grouped3,
+SV8 case 1 = SparseBand; SV7 case 2 = Grouped2, SV8 case 2 =
+Grouped3; SV7 case 3 = HuffmanPerSample, SV8 case 3 = Grouped2;
+SV7 case 5 = HuffmanPerSample, SV8 case 5 =
+ContextHuffmanPerSample); the shared-arm agreement on `case -1`
+(Cns) and `case 0` (Empty) between the two sibling classifiers;
+and the `Copy` / `Eq` / `Debug` invariants. Total crate test
+count `160 → 176`. `cargo test`, `cargo clippy --all-targets
+--no-deps -- -D warnings`, and `cargo fmt --check` all green.
+
+### Still gapped (post round 245)
+
+- **SV8 §3.4 per-case sample decoders** — the actual sparse-band
+  flag VLC read, grouped-codeword sample unpack, first-order-
+  context table selection, and large-coefficient escape raw-bit
+  count live downstream of the SV8 canonical-Huffman entropy layer
+  (`sv8-canonical-*` length tables + `sv8-symbols-*` symbol maps
+  under `docs/audio/musepack/tables/`, GAP per the structural
+  spec's §4 caveat until the length-table-to-code-table builder
+  lands).
+- **§3.2 packet payload field maps**, **§3.1 varint convention**,
+  **§2.3 VLC-symbol → §2.5-case remap**, **per-band SCF anchor**,
+  **SCF base-index gain table**, **SV7 §2.5 grouped codewords**,
+  **SV8 canonical-Huffman entropy walk**, **SV7 fixed-header
+  field map**, **SV7 32-LSB word packing**, **M/S undo + 32-band
+  polyphase synthesis filter** — all unchanged from round 239.
+
 ## Round 239 — SV8 stream-shape observer
 
 Round 239 lands the `stream_shape` module on top of the round-228
