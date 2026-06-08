@@ -8,6 +8,77 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 260** — `sv8_huffman` module wiring the 21 staged SV8
+  canonical Huffman length-tables and 21 paired int8 symbol maps
+  from `docs/audio/musepack/tables/` into typed Rust statics,
+  reading only the staged spec
+  (`musepack-sv7-sv8-spec.md` §3.4 / §4) and provenance
+  (`provenance/01-musepack-table-extraction.md` §6):
+  - `Sv8CanonicalEntry { code: u16, length: u8, cum_index: i16 }`
+    row of an SV8 canonical length table. `cum_index` widens to
+    `i16` to accommodate the `q9up` large-coefficient escape
+    map's signed-int8 cumulative-index wrap.
+  - `Sv8CanonicalTable { lengths, symbols, name }` paired
+    (length-table, symbol-map) view carrying the staged CSV stem
+    as a diagnostic `name` field.
+  - 21 catalogue tables wired as `pub static` arrays under
+    identifier prefixes `SV8_BANDS`, `SV8_RES_{1,2}`,
+    `SV8_SCFI_{1,2}`, `SV8_DSCF_{1,2}`, `SV8_Q1`,
+    `SV8_Q2_{1,2}`, `SV8_Q3`, `SV8_Q4`, `SV8_Q5_{1,2}` ..
+    `SV8_Q8_{1,2}`, and `SV8_Q9UP`. `SV8_CANONICAL_CATALOGUE`
+    exposes the 21 tables as a single ordered slice.
+  - `Sv8TableRole` enum + `table_for_role(role, ctx) ->
+    Option<&Sv8CanonicalTable>` dispatcher mapping a §3.4 / §3.5
+    spec role plus a first-order context bit (0 or 1) into the
+    matching physical table. Context-pair roles return `None`
+    for `ctx >= 2`; non-pair roles ignore `ctx`.
+- **Round 260** — `build.rs` grows a third emitter
+  (`emit_sv8_canonical_tables`) parsing each
+  `sv8-canonical-<stem>.csv` length-table and its companion
+  `sv8-symbols-<stem>.csv` symbol map, emitting a
+  `Sv8CanonicalEntry` array + paired `[i8; N]` symbol array per
+  pair plus a `Sv8CanonicalTable` paired-view static.
+- **Round 260** — vendored snapshot of the 21 staged
+  `sv8-canonical-*.csv` + `sv8-symbols-*.csv` pairs (with `.meta`
+  sidecars, 84 files total) committed under `<crate>/tables/`
+  so the crate stays buildable standalone for crates.io / CI
+  consumers.
+- **Round 260** — 24 new unit tests in `sv8_huffman::tests`
+  covering: catalogue shape (21 entries, unique
+  `sv8-canonical-`-prefixed names); per-table row counts against
+  every staged `.meta` `resolved_dims` value; `bands` first/last
+  row equality + symbol-map endpoints; data-row code descending +
+  length non-decreasing + length within `1..=16` + zero-low-bits
+  left-justification invariant + terminating at code `0x0000`;
+  cumulative-index progression (strict increase for the 20
+  unsigned-cum tables, modular-256 progression for `q9up`); the
+  `q4` length-0 sentinel row pin (only catalogue entry with such
+  a sentinel); `min_length` / `max_length` helpers;
+  `table_for_role` context-ignore for non-pair tables and
+  context-pair dispatch for all 8 pair roles; `table_for_role`
+  rejecting `ctx >= 2`; the catalogue `name` field carrying the
+  CSV stem; `Sv8CanonicalTable::{len_table_rows, sym_table_rows}`
+  helpers; `bands` symbol map spanning `0..=32`; `q9up`
+  symbol-map endpoints (`-128, ..., -2`). Total crate test count
+  `176 → 200`.
+
+### DOCS-GAP — still standing
+
+- **§3.4 SV8 canonical-Huffman cumulative-index decoder walk**.
+  The structural spec names the layer and pins the row layout
+  but does not pin the arithmetic that maps a peeked 16-bit code
+  window to a symbol index against the `cum_index` column.
+  Kraft-McMillan rules out the naive "one row covers
+  `2^(16 - Length)` peek bins" reading: staged tables routinely
+  skip intermediate lengths (e.g. `q1` rows go 3, 4, 5, 6, … with
+  the length-3 row's `cum_index = 7` exceeding the 5 length-3
+  peek-bins). Two plausible sub-index interpretations
+  (forward-ascending vs descending-from-cum) give incompatible
+  symbol mappings; the choice is not derivable from values alone.
+  Recommend a §3.4 docs patch that pins the cumulative-index
+  walk arithmetic; the typed-table surface this round wires is
+  ready to consume it.
+
 - **Round 245** — `sv8_band_decode` module wiring the SV8 §3.4
   per-band sample-decode case classifier, reading only
   `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.4:

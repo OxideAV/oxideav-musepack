@@ -124,6 +124,116 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 260 — SV8 canonical-Huffman length-tables + symbol maps wired
+
+Round 260 vendors the 21 staged `sv8-canonical-*.csv` length-tables
+and 21 paired `sv8-symbols-*.csv` symbol maps under
+`docs/audio/musepack/tables/` into the crate's `tables/` snapshot
+and wires them as typed Rust statics through a new `sv8_huffman`
+module. Reading material stayed inside
+`docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.4 / §4 plus the
+companion `provenance/01-musepack-table-extraction.md` §6 (the
+21-pair table inventory).
+
+- `Sv8CanonicalEntry` — typed row of an SV8 canonical length
+  table: `(code: u16 left-justified, length: u8, cum_index: i16)`,
+  matching the staged `.meta` `value_encoding` line. The
+  `cum_index` field widens to `i16` to accommodate the `q9up`
+  large-coefficient-escape map's signed-int8 cumulative wrap
+  (`..., 63, 125, -45, -7, -2, -1`).
+- `Sv8CanonicalTable` — paired (length-table, symbol-map) view
+  carrying both slices plus the staged CSV stem (e.g.
+  `"sv8-canonical-bands"`) as a diagnostic `name` field.
+- 21 catalogue tables wired as `pub static` arrays under
+  identifier prefixes `SV8_BANDS`, `SV8_RES_{1,2}`,
+  `SV8_SCFI_{1,2}`, `SV8_DSCF_{1,2}`, `SV8_Q1`, `SV8_Q2_{1,2}`,
+  `SV8_Q3`, `SV8_Q4`, `SV8_Q5_{1,2}`..`SV8_Q8_{1,2}`,
+  `SV8_Q9UP`, each emitted by `build.rs` from the CSV pair. A
+  `SV8_CANONICAL_CATALOGUE` array exposes the 21 tables in a
+  single ordered slice for iteration.
+- `Sv8TableRole` enum + `table_for_role(role, ctx) -> Option<&Sv8CanonicalTable>`
+  dispatcher: maps a §3.4 / §3.5 spec role plus a first-order
+  context bit (0 or 1) into the matching physical table.
+  Context-pair roles (`Res`, `Scfi`, `Dscf`, `Q2`, `Q5`, `Q6`,
+  `Q7`, `Q8`) return `None` for out-of-range `ctx ≥ 2`; non-pair
+  roles ignore `ctx`.
+
+`build.rs` grows a third emitter (`emit_sv8_canonical_tables`)
+that mirrors the existing SV7 `mpc_huffman` walk: parse the
+length-table CSV `(code_hex, length, cum_index)`, parse the
+companion symbol-map CSV (`int8` per row), emit a
+`Sv8CanonicalEntry` array, a `[i8; N]` symbol array, and a single
+`Sv8CanonicalTable` paired-view static per pair. The 21 vendored
+CSV pairs (84 files) are committed under `tables/` to keep the
+crate buildable standalone for crates.io / CI consumers.
+
+The build script tolerates the only anomalous staged row: the
+`sv8-canonical-q4.csv` final `(0x0000, 0, 90)` sentinel that
+follows the real length-10 terminator. The sentinel is preserved
+verbatim in the static array (the CSV is source-of-truth) and
+explicitly pinned + documented by the `q4_sentinel_row_is_documented`
+test.
+
+24 new unit tests under `sv8_huffman::tests` cover: catalogue
+shape (21 entries; all names unique + `sv8-canonical-`
+prefixed); per-table row counts against every staged `.meta`
+`resolved_dims` value (`bands` 12/33; `res-{1,2}` 16/12 + 17/17;
+`scfi-{1,2}` 3/5 + 4/16; `dscf-{1,2}` 12/13 + 64/65; `q1` 10/19;
+`q3` 7/49; `q4` 8/91; `q2-{1,2}` 10/9 + 125/125; `q5..=q8`
+context pairs; `q9up` 6/256); first/last row equality for `bands`;
+data-row code descending; data-row length non-decreasing;
+data-row length within `1..=16`; data-row terminating at code
+`0x0000`; `code` low `16 - length` bits zero (left-justification
+invariant); cumulative-index progression (strict-increase for the
+20 unsigned-cum tables, modular-256 progression for `q9up`); the
+q4 sentinel pin; `min_length` / `max_length` helpers; `table_for_role`
+context-ignore for non-pair tables; `table_for_role` context-pair
+dispatch for all 8 pair roles; `table_for_role` rejecting
+ctx ≥ 2; the catalogue `name` field carrying the CSV stem;
+`Sv8CanonicalTable::{len_table_rows, sym_table_rows}` helpers;
+`bands` symbol map spanning `0..=32`; `q9up` symbol-map endpoints
+(`-128, ..., -2`).
+
+Crate test count `176 → 200`; `cargo test`, `cargo clippy
+--all-targets --no-deps -- -D warnings`, and `cargo fmt --check`
+all green under `CARGO_TARGET_DIR=/tmp/oxideav-musepack-r260-target`.
+
+### Decoder convention — DOCS-GAP (carried forward)
+
+The structural spec names the canonical Huffman layer and pins
+the row layout but does **not** pin the arithmetic that maps a
+peeked 16-bit code window into a symbol index against the
+cumulative-index column. A Kraft-McMillan count check rules out
+the naive "one row covers `2^(16 − Length)` peek bins"
+formulation: the staged tables routinely skip intermediate
+lengths (e.g. `q1` rows go length 3, 4, 5, 6, 7, … with the
+length-3 row's `cum_index = 7` exceeding the 5 length-3
+peek-bins the row's code range admits). Two plausible
+interpretations (forward-ascending vs descending-from-cum
+sub-index assignment within a length class) give incompatible
+symbol mappings, and the choice is not derivable from the table
+values alone. Per the project's "ask for docs, don't fish" rule,
+the decoder walk is left for the round that follows a §3.4 docs
+patch resolving the cumulative-index convention; this round
+stops cleanly at the typed-table surface.
+
+### Still gapped (post round 260)
+
+- **SV8 §3.4 canonical-Huffman cumulative-index decoder walk** —
+  the arithmetic mapping `(peek, code, length, cum_index)` to a
+  symbol-index. Tables now wired; walk semantics DOCS-GAP per
+  §3.4.
+- **SV8 §3.4 per-case sample decoders** — the actual sparse-band
+  flag VLC read, grouped-codeword sample unpack, first-order-
+  context table selection, and large-coefficient escape raw-bit
+  count. Blocked downstream of the cumulative-index walk above.
+- **§3.2 packet payload field maps**, **§3.1 varint convention**,
+  **§2.3 VLC-symbol → §2.5-case remap**, **per-band SCF anchor**,
+  **SCF base-index gain table**, **SV7 §2.5 grouped codewords**,
+  **SV7 fixed-header field map**, **SV7 32-LSB word packing**,
+  **M/S undo + 32-band polyphase synthesis filter** — all
+  unchanged from round 245.
+
 ## Round 245 — SV8 §3.4 per-band sample-decode case classifier
 
 Round 245 lands the `sv8_band_decode` module: a pure structural

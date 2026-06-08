@@ -1,0 +1,15 @@
+spec_name: sv8-symbols-q8-2
+spec_role: SV8 §3.4 quantiser-8 symbol map, context 1
+c_identifier: mpc_sym_Q8_2
+c_type: mpc_int8_t
+raw_dims: [127]
+resolved_dims: [127]
+element_count: 127
+columns: symbol
+value_encoding: signed 8-bit canonical-huffman symbol
+source_file: libmpcdec/huffman.c
+source_sha256: 4c0456464d5a4b0a842c049a00c04193e8c147b7ad5363605460d8b7ddbd338c
+repo_url: https://github.com/tatsuz/musepack
+repo_commit: 15feced545c3fce808b00b184b2361d53825e159
+extractor: extract.py (pure numeric extraction)
+notes: Symbol map paired with the matching sv8-canonical-* length table.

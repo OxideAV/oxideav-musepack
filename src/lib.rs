@@ -104,13 +104,24 @@
 //!   per-§3.2-kind counts, cumulative opaque payload bytes, and
 //!   first/last seen packet kinds. Pure observer — no payload
 //!   interpretation, no ordering enforcement.
+//! - [`sv8_huffman`] — SV8 §3.4 / §3.5 canonical Huffman
+//!   length-tables and paired int8 symbol maps wired as typed
+//!   statics. Exposes 21 [`sv8_huffman::Sv8CanonicalTable`] views
+//!   (`Bands`, `Res-{1,2}`, `Scfi-{1,2}`, `Dscf-{1,2}`, `Q1`,
+//!   `Q2-{1,2}`, `Q3`, `Q4`, `Q5-{1,2}`..`Q8-{1,2}`, `Q9up`) plus
+//!   a [`sv8_huffman::Sv8TableRole`] enum + first-order context
+//!   dispatcher [`sv8_huffman::table_for_role`]. The cumulative-
+//!   index → symbol-index decoder walk is a structural §3.4
+//!   DOCS-GAP and is not wired this round — see the module-level
+//!   docs for the spec gap.
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
-//! packing, the SV8 canonical-huffman entropy layer
-//! (`sv8-canonical-*` + `sv8-symbols-*`), the SCF index → gain
-//! anchor for §2.6, and the synthesis filterbank are still
+//! packing, the SV8 canonical-Huffman cumulative-index decoder
+//! walk (tables now wired via [`sv8_huffman`]; the per-row
+//! sub-index arithmetic remains §3.4 DOCS-GAP), the SCF index →
+//! gain anchor for §2.6, and the synthesis filterbank are still
 //! pending. See `CHANGELOG.md` `[Unreleased]` for the gap list.
 
 #![forbid(unsafe_code)]
@@ -126,6 +137,7 @@ pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod sv8_band_decode;
+pub mod sv8_huffman;
 pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from
