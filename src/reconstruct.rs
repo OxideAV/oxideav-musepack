@@ -44,18 +44,98 @@
 //!
 //! # Where the SCF multiply lives
 //!
-//! §2.6's structural step is `sample * C * scf_gain`, but the
-//! 256-entry scalefactor-index → gain table needs an anchor point
-//! (the gain at the reference index) that the structural prose
-//! does not pin down — only the geometric step ratio
-//! [`crate::requant::SCF_STEP_RATIO`] between adjacent indices is
-//! independently specified. The SCF table construction is therefore
-//! deferred to a later round; this module's output is the
-//! pre-SCF-multiply dequantised sample.
+//! §2.6's structural step is `sample * C * scf_gain`. The full
+//! 256-entry scalefactor-index → *absolute* gain table needs an
+//! anchor point (the absolute gain at the reference index) that the
+//! structural prose does not pin down. What **is** independently
+//! specified — by the `scf-step-ratio.meta` line "SCF table built as
+//! a geometric sequence around index 1: f *= 0.83298066476582673961
+//! per step (... 256 indices)" — is the *geometric* relation between
+//! any two SCF indices: the gain at index `n` over the gain at index
+//! `m` is exactly [`crate::requant::SCF_STEP_RATIO`]`^(n − m)`. That
+//! ratio is **anchor-independent**, so the *relative* SCF gain
+//! between two indices (e.g. between two granules of the same band,
+//! whose SCF indices the [`crate::scf`] decoder reconstructs as
+//! deltas) is fully determined even with the absolute anchor still
+//! GAP.
+//!
+//! This module therefore wires the *relative* SCF gain ladder
+//! ([`scf_relative_gain`], [`scf_gain_relative_to_anchor`],
+//! [`apply_scf_relative`]) but leaves the *absolute* anchored gain
+//! table (which needs the GAP reference-index value) to a later
+//! round. A caller that only needs to equalise granules *within* a
+//! band — applying the per-granule SCF index difference on top of a
+//! shared base — can do so exactly with the relative ladder; the
+//! absolute output then differs from a fully-anchored decode by one
+//! global constant scale.
 
-use crate::requant::{band_type_index, DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D};
+use crate::requant::{band_type_index, DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO};
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::{Error, Result};
+
+/// Number of distinct scalefactor (SCF) indices in the §2.6 geometric
+/// gain ladder.
+///
+/// Pinned by the `scf-step-ratio.meta` notes line: "SCF table built as
+/// a geometric sequence around index 1: f *= 0.83298066476582673961
+/// per step (handles +1.58..-98.41 dB, **256 indices**)". The valid
+/// SCF index range is therefore `0..=255`.
+pub const SCF_INDEX_COUNT: usize = 256;
+
+/// Multiplicative SCF gain at index `to` *relative to* index `from`.
+///
+/// Returns [`crate::requant::SCF_STEP_RATIO`]`^(to − from)`. This is
+/// the **anchor-independent** part of the §2.6 SCF gain table: the
+/// `scf-step-ratio.meta` line fixes the geometric step (downward:
+/// `gain[n] / gain[n − 1] == SCF_STEP_RATIO`; upward: the reciprocal),
+/// so the ratio between any two indices is fully determined even
+/// though the *absolute* gain at the reference index is GAP.
+///
+/// `from == to` yields exactly `1.0`. A higher index than the anchor
+/// (`to > from`) is "downward" in the stored direction, so it yields a
+/// gain **below** `1.0` (`SCF_STEP_RATIO < 1.0` per step); a lower
+/// index yields a gain **above** `1.0` (the reciprocal,
+/// `≈ 1.2005` per step).
+///
+/// Total over the whole `u8 × u8` domain: both indices are `u8`, hence
+/// structurally within the `0..=255` [`SCF_INDEX_COUNT`] ladder, so no
+/// range error is reachable and the function is infallible.
+#[inline]
+pub fn scf_relative_gain(from: u8, to: u8) -> f64 {
+    let exponent = i32::from(to) - i32::from(from);
+    SCF_STEP_RATIO.powi(exponent)
+}
+
+/// Fill `out` with the SCF gains of indices `0..=255` *relative to*
+/// the `anchor` index, i.e. `out[i] == scf_relative_gain(anchor, i)`.
+///
+/// `out[anchor]` is exactly `1.0`. The ladder is monotonically
+/// **decreasing** in `i` (since each upward index step multiplies by
+/// `SCF_STEP_RATIO < 1.0` in the stored "downward" direction — higher
+/// index = quieter), matching the `scf-step-ratio.meta` "+1.58..−98.41
+/// dB" span across the 256 indices.
+pub fn scf_gain_relative_to_anchor(anchor: u8, out: &mut [f64; SCF_INDEX_COUNT]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = scf_relative_gain(anchor, i as u8);
+    }
+}
+
+/// Scale a 36-sample dequantised band in place by the relative SCF
+/// gain moving from `from_index` to `to_index`.
+///
+/// Equivalent to multiplying every sample by
+/// [`scf_relative_gain`]`(from_index, to_index)`. This applies a
+/// per-granule SCF index *difference* (the [`crate::scf`] decoder
+/// reconstructs the three per-granule indices as deltas off a shared
+/// base) without needing the still-GAP absolute anchor: the result is
+/// correct up to the single global constant that the absolute table
+/// would supply.
+pub fn apply_scf_relative(from_index: u8, to_index: u8, band: &mut [f64; SAMPLES_PER_BAND]) {
+    let gain = scf_relative_gain(from_index, to_index);
+    for slot in band.iter_mut() {
+        *slot *= gain;
+    }
+}
 
 /// Divisor in the §2.6 dequant relation `sample = centred_level * C / 65536`.
 ///
@@ -497,6 +577,131 @@ mod tests {
         for i in 0..SAMPLES_PER_BAND {
             let expected = raw[i] as f64 * c / DEQUANT_DIVISOR;
             assert!((out[i] - expected).abs() < 1e-12);
+        }
+    }
+
+    // ─── relative SCF gain ladder (§2.6) ───────────────────
+
+    #[test]
+    fn scf_index_count_is_256() {
+        // scf-step-ratio.meta: "... 256 indices".
+        assert_eq!(SCF_INDEX_COUNT, 256);
+    }
+
+    #[test]
+    fn scf_relative_gain_identity_is_one() {
+        for idx in [0_u8, 1, 50, 128, 200, 255] {
+            assert_eq!(scf_relative_gain(idx, idx), 1.0, "anchor {idx}");
+        }
+    }
+
+    #[test]
+    fn scf_relative_gain_one_step_up_is_step_ratio() {
+        // Index +1 == one "downward" step == multiply by SCF_STEP_RATIO.
+        let g = scf_relative_gain(10, 11);
+        assert!((g - SCF_STEP_RATIO).abs() < 1e-15, "got {g}");
+        assert!(g < 1.0, "higher index is quieter; got {g}");
+    }
+
+    #[test]
+    fn scf_relative_gain_one_step_down_is_reciprocal() {
+        // Index −1 == one upward step == multiply by 1/SCF_STEP_RATIO.
+        let g = scf_relative_gain(11, 10);
+        let want = 1.0 / SCF_STEP_RATIO;
+        assert!((g - want).abs() < 1e-12, "got {g}, want {want}");
+        assert!(g > 1.0, "lower index is louder; got {g}");
+    }
+
+    #[test]
+    fn scf_relative_gain_is_inverse_symmetric() {
+        // gain(a,b) * gain(b,a) == 1 for any pair.
+        for (a, b) in [(0_u8, 255_u8), (37, 200), (128, 64), (1, 2)] {
+            let round_trip = scf_relative_gain(a, b) * scf_relative_gain(b, a);
+            assert!(
+                (round_trip - 1.0).abs() < 1e-9,
+                "pair ({a},{b}) round trip {round_trip}"
+            );
+        }
+    }
+
+    #[test]
+    fn scf_relative_gain_composes_additively_in_exponent() {
+        // gain(a,c) == gain(a,b) * gain(b,c).
+        let (a, b, c) = (20_u8, 40, 90);
+        let direct = scf_relative_gain(a, c);
+        let composed = scf_relative_gain(a, b) * scf_relative_gain(b, c);
+        assert!(
+            (direct - composed).abs() < 1e-9,
+            "direct {direct} vs composed {composed}"
+        );
+    }
+
+    #[test]
+    fn scf_relative_gain_n_steps_equals_ratio_pow_n() {
+        // Moving up by k indices multiplies by SCF_STEP_RATIO^k.
+        for k in [2_u8, 5, 13, 40] {
+            let g = scf_relative_gain(0, k);
+            let want = SCF_STEP_RATIO.powi(i32::from(k));
+            assert!((g - want).abs() < 1e-12, "k={k}: {g} vs {want}");
+        }
+    }
+
+    #[test]
+    fn scf_gain_relative_to_anchor_anchor_is_unity() {
+        let mut tbl = [0.0_f64; SCF_INDEX_COUNT];
+        scf_gain_relative_to_anchor(100, &mut tbl);
+        assert_eq!(tbl[100], 1.0);
+        // Each entry equals scf_relative_gain(anchor, i).
+        for (i, &g) in tbl.iter().enumerate() {
+            assert!((g - scf_relative_gain(100, i as u8)).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn scf_gain_relative_to_anchor_is_monotonically_decreasing() {
+        // Higher index == quieter, so the ladder strictly decreases.
+        let mut tbl = [0.0_f64; SCF_INDEX_COUNT];
+        scf_gain_relative_to_anchor(0, &mut tbl);
+        for i in 1..SCF_INDEX_COUNT {
+            assert!(
+                tbl[i] < tbl[i - 1],
+                "index {i}: {} not < {}",
+                tbl[i],
+                tbl[i - 1]
+            );
+        }
+        // Index 0 anchor is exactly unity.
+        assert_eq!(tbl[0], 1.0);
+    }
+
+    #[test]
+    fn apply_scf_relative_scales_every_sample() {
+        let mut band = [2.0_f64; SAMPLES_PER_BAND];
+        apply_scf_relative(5, 8, &mut band);
+        let gain = scf_relative_gain(5, 8);
+        for &s in band.iter() {
+            assert!((s - 2.0 * gain).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn apply_scf_relative_identity_leaves_band_unchanged() {
+        let mut band = [-3.5_f64; SAMPLES_PER_BAND];
+        apply_scf_relative(77, 77, &mut band);
+        for &s in band.iter() {
+            assert_eq!(s, -3.5);
+        }
+    }
+
+    #[test]
+    fn apply_scf_relative_round_trips_through_inverse() {
+        // Applying (a→b) then (b→a) returns the original band.
+        let original = 4.25_f64;
+        let mut band = [original; SAMPLES_PER_BAND];
+        apply_scf_relative(30, 95, &mut band);
+        apply_scf_relative(95, 30, &mut band);
+        for &s in band.iter() {
+            assert!((s - original).abs() < 1e-9, "got {s}");
         }
     }
 

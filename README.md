@@ -124,6 +124,51 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 272 — §2.6 relative scalefactor (SCF) gain ladder
+
+Round 272 extends the `reconstruct` module with the §2.6 *relative*
+SCF gain ladder, reading only
+`docs/audio/musepack/tables/scf-step-ratio.meta` plus the staged spec
+§2.6. The `.meta` notes line pins both the geometric step ratio
+(`f *= 0.83298066476582673961` per index) and the ladder dimension
+("256 indices"). The *absolute* anchored gain table remains GAP — its
+reference-index gain value is unspecified in the structural prose —
+but the gain *ratio* between any two SCF indices is anchor-independent
+and therefore fully determined:
+
+- `SCF_INDEX_COUNT = 256` — the SCF index ladder size.
+- `scf_relative_gain(from, to) -> f64` — infallible
+  `SCF_STEP_RATIO^(to − from)`; unity at `from == to`, quieter
+  (`< 1.0`) for a higher index, louder (`> 1.0`) for a lower one.
+- `scf_gain_relative_to_anchor(anchor, &mut [f64; 256])` — the full
+  anchor-relative ladder (unity at `anchor`, strictly decreasing).
+- `apply_scf_relative(from, to, &mut [f64; 36])` — scales a
+  dequantised band by the relative gain, applying a per-granule SCF
+  index *difference* off a shared base without needing the GAP
+  absolute anchor (result exact up to one global constant scale).
+
+13 new unit tests cover the 256-index dimension, identity, one-step
+up/down (ratio / reciprocal), inverse symmetry, exponent additivity,
+`n`-step == `ratio^n`, anchor-unity + per-entry agreement, strict
+monotonic decrease, and `apply_scf_relative` scaling / identity /
+inverse round trip. Crate lib test count `199 → 212`. `cargo test`,
+`cargo clippy --all-targets --no-deps -- -D warnings`, and
+`cargo fmt --check` all green under
+`CARGO_TARGET_DIR=/tmp/oxideav-musepack-r272-target`.
+
+### Still gapped (post round 272)
+
+- **SCF absolute anchor.** The relative ladder is now wired; the
+  *absolute* gain at the reference SCF index is still unspecified in
+  the structural prose. A fully-anchored decode needs a one-paragraph
+  spec addendum pinning the reference index and its gain value.
+- **SV8 §3.4 canonical-Huffman cumulative-index decoder walk**,
+  **§3.2 packet payload field maps**, **§3.1 varint convention**,
+  **§2.3 VLC-symbol → §2.5-case remap**, **SV7 §2.5 grouped
+  codewords**, **SV7 fixed-header field map**, **SV7 32-LSB word
+  packing**, **M/S undo + 32-band polyphase synthesis filter** — all
+  unchanged from round 260.
+
 ## Round 260 — SV8 canonical-Huffman length-tables + symbol maps wired
 
 Round 260 vendors the 21 staged `sv8-canonical-*.csv` length-tables

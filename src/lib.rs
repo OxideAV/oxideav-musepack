@@ -51,9 +51,15 @@
 //! - [`reconstruct`] — SV7 §2.6 per-sample reconstruction
 //!   primitives (centring of PCM-escape raw levels by subtracting
 //!   `D`; per-band dequant multiply by `C / 65536`; CNS dequant
-//!   path keyed off `DEQUANT_COEFFICIENT_C[0]`). The downstream SCF
-//!   multiply, M/S undo, and synthesis filterbank are out of scope
-//!   here.
+//!   path keyed off `DEQUANT_COEFFICIENT_C[0]`) plus the §2.6
+//!   *relative* scalefactor gain ladder
+//!   ([`reconstruct::scf_relative_gain`] /
+//!   [`reconstruct::scf_gain_relative_to_anchor`] /
+//!   [`reconstruct::apply_scf_relative`]) — the anchor-independent
+//!   geometric `SCF_STEP_RATIO^(Δindex)` part of the SCF multiply
+//!   over the 256-index ladder. The *absolute* anchored gain table
+//!   (its reference-index gain is DOCS-GAP), the M/S undo, and the
+//!   synthesis filterbank are out of scope here.
 //! - [`scf`] — SV7 §2.4 SCF coding-method decoder: reads the
 //!   per-non-zero-band SCFI selector VLC, classifies it into a
 //!   granule-coverage schedule (mirroring Layer-II SCFSI per §1

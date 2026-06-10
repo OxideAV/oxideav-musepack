@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 272** — `reconstruct` module gains the §2.6 *relative*
+  scalefactor (SCF) gain ladder, reading only
+  `docs/audio/musepack/tables/scf-step-ratio.meta` (the geometric
+  step-ratio fact + the "256 indices" dimension) plus the staged
+  spec §2.6. The *absolute* anchored SCF gain table stays GAP (its
+  reference-index gain is unspecified in the structural prose), but
+  the geometric relation between any two indices is anchor-
+  independent and therefore fully determined:
+  - `SCF_INDEX_COUNT: usize = 256` — the SCF index ladder size,
+    pinned by the `scf-step-ratio.meta` "256 indices" note.
+  - `scf_relative_gain(from: u8, to: u8) -> f64` — infallible
+    `SCF_STEP_RATIO^(to − from)`; the multiplicative gain at index
+    `to` relative to index `from`. Identity at `from == to`; a
+    higher index is quieter (`< 1.0`), a lower index louder
+    (`> 1.0`).
+  - `scf_gain_relative_to_anchor(anchor, &mut [f64; 256])` — fills
+    the full 256-entry gain ladder relative to `anchor` (unity at
+    `anchor`, strictly decreasing in index).
+  - `apply_scf_relative(from_index, to_index, &mut [f64; 36])` —
+    scales a dequantised band in place by the relative SCF gain,
+    applying a per-granule SCF index *difference* off a shared base
+    without needing the GAP absolute anchor (result correct up to
+    one global constant scale).
+  13 new unit tests cover: the 256-index dimension; identity at
+  equal indices; one-step-up == `SCF_STEP_RATIO`; one-step-down ==
+  reciprocal; inverse symmetry `g(a,b)·g(b,a)==1`; exponent
+  additivity `g(a,c)==g(a,b)·g(b,c)`; `n`-step == `ratio^n`;
+  anchor-unity + per-entry agreement of the ladder; ladder strict
+  monotonic decrease; `apply_scf_relative` per-sample scaling,
+  identity no-op, and inverse round trip. Crate test count
+  `199 → 212` (lib).
+
 - **Round 260** — `sv8_huffman` module wiring the 21 staged SV8
   canonical Huffman length-tables and 21 paired int8 symbol maps
   from `docs/audio/musepack/tables/` into typed Rust statics,
