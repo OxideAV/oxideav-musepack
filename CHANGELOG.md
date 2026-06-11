@@ -8,6 +8,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 278** — `sv8_huffman` module gains the SV8 §3.4
+  canonical-Huffman **decoder walk**, closing the round-260
+  cumulative-index DOCS-GAP from the staged facts alone. The
+  round-260 ambiguity between two candidate per-row sub-index
+  assignments is resolved by an exhaustive tiling argument: a
+  complete prefix code paired with an `N`-entry symbol map must
+  map the 2^16 peek windows bijectively onto indices `0..N`, and
+  checking both candidates over all 65536 peeks for all 21 staged
+  tables shows only one satisfies it —
+  `index = (cum_index − (peek16 >> (16 − length))) mod 256`
+  against the first row (code descending) with `code <= peek16`
+  (the alternative leaves holes, e.g. `bands` index 3 and `q1`
+  indices 0/1/18 unreachable). New API:
+  - `Sv8CanonicalTable::decode_symbol_index(reader)` — the walk:
+    16-bit MSB-first peek, descending-code row match (length-0
+    rows, i.e. the staged q4 sentinel, are skipped), mod-256
+    cumulative fold, `length`-bit consume; defensive
+    `Error::HuffmanNoMatch` on an out-of-map index.
+  - `Sv8CanonicalTable::decode(reader) -> Result<i8>` — index walk
+    plus paired symbol-map lookup; SV8 sibling of the SV7
+    `huffman::decode` entry point.
+  The mod-256 fold is exact for `q9up`'s signed-int8 cumulative
+  wrap and the identity for the 20 unsigned-cum tables; `q4`'s
+  rows tile indices `0..=80`, with map entries `81..=90` proven
+  unreachable zero padding. 7 new unit tests: the per-table
+  2^16-peek tiling proof (each reachable index hit exactly
+  `2^(16−length)` times), hand-traced `q1` vectors across four
+  length classes, `q9up` signed-wrap vectors, back-to-back decode
+  chaining with exact bit consumption, the q4 sentinel-skip path,
+  the q4 padding pin, and 16-bit-peek EOF propagation. Crate lib
+  test count `212 → 219`. Downstream §3.4 per-case sample decoders
+  (sparse-band flags, grouped unpack, first-order context
+  selection, escape raw bits) are now unblocked on the entropy
+  side; the grouped-codeword fan-out arithmetic remains GAP in the
+  structural prose.
+
 - **Round 272** — `reconstruct` module gains the §2.6 *relative*
   scalefactor (SCF) gain ladder, reading only
   `docs/audio/musepack/tables/scf-step-ratio.meta` (the geometric

@@ -36,7 +36,7 @@
 //! `case 5..=8` → `Q5..Q8` (each picks `-1` or `-2` from the
 //! first-order context), `default` (`band_type ≥ 9`) → `Q9up`.
 //!
-//! ## Decoder convention — DOCS-GAP
+//! ## Decoder convention — derived from the staged facts
 //!
 //! The structural spec
 //! (`docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.4) names
@@ -49,22 +49,39 @@
 //! symbol map; the Value column is the running symbol index, not
 //! the final symbol."*
 //!
-//! What the structural prose **does not** pin is the exact
-//! arithmetic that maps a peeked 16-bit code window to a symbol
-//! index. Two reasonable interpretations of the cumulative-index
-//! column give incompatible per-row sub-index assignments
-//! (forward-ascending vs descending-from-cum), and the choice is
-//! not derivable from the table values alone (a Kraft-McMillan
-//! count check rules out the naive "one row covers
-//! `2^(16 − Length)` peek bins" formulation: the SV8 length-tables
-//! routinely skip intermediate lengths, so the per-row code count
-//! does **not** equal the peek-bin count).
+//! Round 260 flagged the peek-window → symbol-index arithmetic as
+//! ambiguous between two candidate per-row sub-index assignments.
+//! That ambiguity is in fact resolvable from the staged numeric
+//! facts alone: a complete prefix code paired with an `N`-entry
+//! symbol map must map the 2^16 peek values onto **exactly** the
+//! index range `0..N` (every map entry reachable, none doubly
+//! assigned, Kraft sum 1). Exhaustively checking both candidate
+//! formulas over all 65536 peek values for all 21 staged tables
+//! shows that only one tiles the symbol map bijectively:
 //!
-//! Per the project's "ask for docs, don't fish" rule, this module
-//! deliberately stops at the typed-table surface: the constants,
-//! the `Sv8CanonicalTable` newtype, and shape-only sanity tests.
-//! The decoder walk is left for the round that follows the §3.4
-//! docs patch resolving the cumulative-index convention.
+//! ```text
+//! row    = first entry (code descending) with code <= peek16
+//! bin    = peek16 >> (16 - row.length)
+//! index  = (row.cum_index - bin) mod 256
+//! symbol = symbols[index]
+//! ```
+//!
+//! (the rejected alternative leaves holes — e.g. `bands` index 3
+//! and `q1` indices 0, 1, 18 become unreachable). The `mod 256`
+//! reflects the cumulative counter living in a signed 8-bit cell:
+//! for the 20 tables whose cumulative column stays non-negative
+//! the modulo is the identity, while `q9up`'s late rows wrap
+//! (`..., 63, 125, -45, -7, -2, -1`) and the mod-256 fold lands
+//! every peek on `0..256` — exactly its 256-entry map. The single
+//! anomaly is `q4`: its real rows tile indices `0..=80` and the
+//! ten map entries `81..=90` are unreachable zero padding (the
+//! staged CSV's length-0 sentinel row points at index 90, the
+//! last padding slot, and plays no part in the walk).
+//!
+//! [`Sv8CanonicalTable::decode`] implements this walk;
+//! `decode_tiles_symbol_map_bijectively` re-runs the full
+//! 2^16-peek tiling proof per table as a unit test so any future
+//! re-staging of the CSVs re-validates the derivation.
 //!
 //! ## Source-of-record
 //!
@@ -80,6 +97,9 @@
 //! the staged `docs/` content above and the existing SV7 sibling
 //! modules under `crates/oxideav-musepack/src/`.
 
+use crate::huffman::Sv7BitReader;
+use crate::{Error, Result};
+
 /// One row of an SV8 canonical Huffman **length table**.
 ///
 /// Fields per the staged `.meta` sidecars'
@@ -93,9 +113,9 @@
 ///   matching the staged CSV row order.
 /// - `length` — code length in bits.
 /// - `cum_index` — running symbol-index counter into the paired
-///   `Sv8CanonicalTable::symbols` map. The exact arithmetic that
-///   converts `(peek, code, length, cum_index)` into a symbol
-///   index is **DOCS-GAP**; see the module-level docs.
+///   `Sv8CanonicalTable::symbols` map. The decode arithmetic is
+///   `index = (cum_index - (peek16 >> (16 - length))) mod 256`;
+///   see the module-level docs for the derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sv8CanonicalEntry {
     /// Code word, left-justified into 16 bits.
@@ -148,6 +168,63 @@ impl Sv8CanonicalTable {
     /// Largest code length present in this table.
     pub fn max_length(&self) -> u8 {
         self.lengths.iter().map(|e| e.length).max().unwrap_or(0)
+    }
+
+    /// Decode one canonical-Huffman codeword from `reader` and
+    /// return the **symbol-map index** it selects (without the
+    /// final `symbols[index]` lookup — useful for diagnostics and
+    /// for the exhaustive tiling test).
+    ///
+    /// The walk is the convention derived in the module-level
+    /// docs: peek 16 bits MSB-first, take the first row (rows are
+    /// sorted by `code` descending) whose `code <= peek`, then
+    ///
+    /// ```text
+    /// bin   = peek >> (16 - length)
+    /// index = (cum_index - bin) mod 256
+    /// ```
+    ///
+    /// and consume `length` bits. Length-0 rows (the staged `q4`
+    /// padding sentinel) are skipped: they are not codewords.
+    ///
+    /// Errors:
+    ///
+    /// - [`Error::UnexpectedEof`] if fewer than 16 bits remain in
+    ///   `reader` (the peek window is always 16 bits, mirroring
+    ///   [`crate::huffman::decode`]).
+    /// - [`Error::HuffmanNoMatch`] if no data row matches the peek
+    ///   (unreachable for the staged tables, whose last data row is
+    ///   always `code == 0x0000`) or if the computed index falls
+    ///   outside the paired symbol map (likewise unreachable for
+    ///   the staged tables per the exhaustive tiling test; kept as
+    ///   a defensive bound for tables built from other sources).
+    pub fn decode_symbol_index(&self, reader: &mut Sv7BitReader<'_>) -> Result<usize> {
+        let peek = reader.peek16()?;
+        for entry in self.lengths.iter() {
+            if entry.length == 0 {
+                // Staged q4 padding sentinel — not a codeword.
+                continue;
+            }
+            if entry.code <= peek {
+                let bin = (peek >> (16 - entry.length as u32)) as i32;
+                let index = (entry.cum_index as i32 - bin).rem_euclid(256) as usize;
+                if index >= self.symbols.len() {
+                    return Err(Error::HuffmanNoMatch);
+                }
+                reader.consume_bits(entry.length)?;
+                return Ok(index);
+            }
+        }
+        Err(Error::HuffmanNoMatch)
+    }
+
+    /// Decode one canonical-Huffman symbol from `reader`: the
+    /// [`Sv8CanonicalTable::decode_symbol_index`] walk followed by
+    /// the paired symbol-map lookup. This is the SV8 sibling of
+    /// the SV7 [`crate::huffman::decode`] entry point.
+    pub fn decode(&self, reader: &mut Sv7BitReader<'_>) -> Result<i8> {
+        let index = self.decode_symbol_index(reader)?;
+        Ok(self.symbols[index])
     }
 }
 
@@ -563,9 +640,11 @@ mod tests {
         // The staged CSV's last row is (0x0000, 0, 90); the real
         // length-10 terminator is the row before it. The sentinel
         // carries `cum_index = 90`, matching the 91-entry q4
-        // symbol map's 0-based maximum index. Whether the §3.4
-        // decoder needs this sentinel value (e.g. as a sanity
-        // bound on the cumulative walk) is DOCS-GAP.
+        // symbol map's 0-based maximum index — i.e. it points at
+        // the last entry of the ten-slot zero-padding tail
+        // (indices 81..=90) the decode walk never reaches; see
+        // `q4_padding_tail_is_unreachable_zeros`. The walk itself
+        // skips length-0 rows.
         let last = SV8_Q4_LEN_TABLE.last().unwrap();
         assert_eq!(
             *last,
@@ -714,5 +793,169 @@ mod tests {
         // sign-magnitude ladder the SV8 escape path uses).
         assert_eq!(SV8_Q9UP_SYM_TABLE[0], -128);
         assert_eq!(*SV8_Q9UP_SYM_TABLE.last().unwrap(), -2);
+    }
+
+    // ─── Decoder walk ──────────────────────────────────────
+
+    /// Decode the single codeword at the head of the 16-bit window
+    /// `peek` against `t`, returning `(symbol_index, bits_consumed)`.
+    fn decode_peek(t: &Sv8CanonicalTable, peek: u16) -> (usize, u8) {
+        let bytes = [(peek >> 8) as u8, (peek & 0xFF) as u8];
+        let mut r = Sv7BitReader::new(&bytes);
+        let index = t.decode_symbol_index(&mut r).unwrap();
+        let consumed = 16 - r.bits_remaining() as u8;
+        (index, consumed)
+    }
+
+    #[test]
+    fn decode_tiles_symbol_map_bijectively() {
+        // The full derivation proof from the module docs, re-run
+        // against the wired statics: for every table, walking all
+        // 2^16 peek windows must
+        //   (a) always decode (the last data row is code 0x0000),
+        //   (b) consume a consistent code length per symbol index,
+        //   (c) give each reachable index exactly 2^(16 - length)
+        //       peek windows (one canonical codeword each), and
+        //   (d) tile the symbol map: indices 0..N for every table
+        //       except q4, whose real rows tile 0..=80 and whose
+        //       map entries 81..=90 are unreachable zero padding.
+        for t in SV8_CANONICAL_CATALOGUE.iter() {
+            let n = t.symbols.len();
+            // Per-index (length, peek-window count) accumulator.
+            let mut seen: Vec<Option<(u8, u32)>> = vec![None; n];
+            for peek in 0..=0xFFFFu16 {
+                let (index, consumed) = decode_peek(t, peek);
+                assert!(index < n, "{}: index {} out of map", t.name, index);
+                match &mut seen[index] {
+                    None => seen[index] = Some((consumed, 1)),
+                    Some((len, count)) => {
+                        assert_eq!(
+                            *len, consumed,
+                            "{}: index {} matched two lengths",
+                            t.name, index,
+                        );
+                        *count += 1;
+                    }
+                }
+            }
+            let reachable = if t.name == "sv8-canonical-q4" { 81 } else { n };
+            for (index, slot) in seen.iter().enumerate() {
+                if index < reachable {
+                    let (len, count) =
+                        slot.unwrap_or_else(|| panic!("{}: index {index} unreachable", t.name));
+                    assert_eq!(
+                        count,
+                        1u32 << (16 - len),
+                        "{}: index {index} peek-window count off for length {len}",
+                        t.name,
+                    );
+                } else {
+                    assert!(
+                        slot.is_none(),
+                        "{}: padding index {index} should be unreachable",
+                        t.name,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decode_q1_hand_traced_vectors() {
+        // Hand-traced against the staged sv8-canonical-q1.csv /
+        // sv8-symbols-q1.csv: first row (0x6000, 3, 7) covers the
+        // five length-3 windows 011..111 mapping to indices 4..=0,
+        // i.e. symbols 3, 4, 5, 6, 7.
+        for (peek, want) in [
+            (0xE000u16, 7i8), // 111 -> index 0
+            (0xC000, 6),      // 110 -> index 1
+            (0xA000, 5),      // 101 -> index 2
+            (0x8000, 4),      // 100 -> index 3
+            (0x6000, 3),      // 011 -> index 4
+            (0x5000, 10),     // 0101 -> index 5 (row 0x1000,4,10)
+            (0x1000, 1),      // 0001 -> index 9
+            (0x0010, 18),     // len-12 row, second window -> index 17
+            (0x0000, 17),     // len-12 row, zero window -> index 18
+        ] {
+            let bytes = [(peek >> 8) as u8, (peek & 0xFF) as u8];
+            let mut r = Sv7BitReader::new(&bytes);
+            assert_eq!(
+                SV8_Q1_TABLE.decode(&mut r).unwrap(),
+                want,
+                "q1 peek {peek:#06x}",
+            );
+        }
+    }
+
+    #[test]
+    fn decode_q9up_signed_cumulative_wrap() {
+        // q9up's cumulative column wraps the signed-int8 space; the
+        // mod-256 fold must land each peek on the 256-entry map.
+        for (peek, want_index, want_sym) in [
+            // Row (0xf800, 6, 63): peek 0xFFFF -> bin 63 -> index 0.
+            (0xFFFFu16, 0usize, -128i8),
+            // Row (0x2600, 8, -45): peek 0x8000 -> bin 128 ->
+            // (-45 - 128) mod 256 = 83.
+            (0x8000, 83, -87),
+            // Same row, bin 64: (-45 - 64) mod 256 = 147.
+            (0x4000, 147, 65),
+            // Last row (0x0000, 11, -1): zero window -> index 255.
+            (0x0000, 255, -2),
+        ] {
+            let (index, _) = decode_peek(&SV8_Q9UP_TABLE, peek);
+            assert_eq!(index, want_index, "q9up peek {peek:#06x} index");
+            assert_eq!(
+                SV8_Q9UP_SYM_TABLE[index], want_sym,
+                "q9up peek {peek:#06x} symbol",
+            );
+        }
+    }
+
+    #[test]
+    fn decode_consumes_exact_length_and_chains() {
+        // Two bands codewords back to back: "1" (length 1, symbol
+        // 0) then "01" (length 2, symbol 32), packed MSB-first as
+        // 101x_xxxx; trailing zero bytes keep the second 16-bit
+        // peek satisfiable.
+        let mut r = Sv7BitReader::new(&[0b1010_0000, 0x00, 0x00]);
+        assert_eq!(SV8_BANDS_TABLE.decode(&mut r).unwrap(), 0);
+        assert_eq!(r.bits_remaining(), 23);
+        assert_eq!(SV8_BANDS_TABLE.decode(&mut r).unwrap(), 32);
+        assert_eq!(r.bits_remaining(), 21);
+    }
+
+    #[test]
+    fn decode_skips_q4_sentinel_row() {
+        // An all-zero peek against q4 must match the real length-10
+        // terminator (0x0000, 10, 80) — index 80 — and not the
+        // length-0 sentinel that follows it in the static array.
+        let (index, consumed) = decode_peek(&SV8_Q4_TABLE, 0x0000);
+        assert_eq!((index, consumed), (80, 10));
+        assert_eq!(SV8_Q4_SYM_TABLE[80], -52);
+    }
+
+    #[test]
+    fn q4_padding_tail_is_unreachable_zeros() {
+        // The ten q4 symbol-map entries past the last reachable
+        // index (80) are zero padding; the tiling test proves they
+        // are unreachable, this pins their staged values.
+        assert!(SV8_Q4_SYM_TABLE[81..].iter().all(|&s| s == 0));
+        assert_eq!(SV8_Q4_SYM_TABLE[81..].len(), 10);
+    }
+
+    #[test]
+    fn decode_eof_on_short_input() {
+        // The peek window is 16 bits; anything shorter is EOF, as
+        // with the SV7 decode entry point.
+        let mut r = Sv7BitReader::new(&[0xFF]);
+        assert!(matches!(
+            SV8_BANDS_TABLE.decode(&mut r),
+            Err(Error::UnexpectedEof),
+        ));
+        let mut empty = Sv7BitReader::new(&[]);
+        assert!(matches!(
+            SV8_BANDS_TABLE.decode_symbol_index(&mut empty),
+            Err(Error::UnexpectedEof),
+        ));
     }
 }

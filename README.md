@@ -124,6 +124,70 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 278 — SV8 §3.4 canonical-Huffman decoder walk
+
+Round 278 closes the round-260 cumulative-index DOCS-GAP and lands
+the SV8 canonical-Huffman **decoder walk** in the `sv8_huffman`
+module, reading only `docs/audio/musepack/` (spec §3.4/§4, the
+provenance §6 "running cumulative index into the paired symbol map"
+sentence, and the staged `sv8-canonical-*` / `sv8-symbols-*` CSV
+facts):
+
+- The round-260 ambiguity ("two plausible sub-index assignments,
+  not derivable from the table values alone") turned out to be
+  resolvable from the staged numeric facts after all: a complete
+  prefix code paired with an `N`-entry symbol map must tile the
+  2^16 peek windows onto **exactly** the index range `0..N`.
+  Exhaustively checking both candidate formulas over all 65536
+  peeks for all 21 staged tables shows only one is a bijection:
+  `index = (cum_index − (peek16 >> (16 − length))) mod 256`
+  against the first row (code descending) with `code <= peek16`.
+  The rejected alternative leaves holes (e.g. `bands` index 3 and
+  `q1` indices 0, 1, 18 unreachable).
+- `Sv8CanonicalTable::decode_symbol_index(reader) -> Result<usize>`
+  — the walk itself: 16-bit MSB-first peek, descending-code row
+  match (length-0 rows — the staged q4 sentinel — are skipped),
+  mod-256 cumulative fold, `length`-bit consume. Defensive
+  `HuffmanNoMatch` on an out-of-map index (unreachable for the
+  staged tables).
+- `Sv8CanonicalTable::decode(reader) -> Result<i8>` — index walk +
+  paired symbol-map lookup; the SV8 sibling of the SV7
+  `huffman::decode` entry point.
+- The mod-256 fold is exact for `q9up`'s signed-int8 cumulative
+  wrap (`..., 63, 125, -45, -7, -2, -1` → indices spanning the
+  full 256-entry map) and the identity for the 20 unsigned-cum
+  tables. The lone anomaly is `q4`: its rows tile indices
+  `0..=80`; map entries `81..=90` are unreachable zero padding
+  (the staged length-0 sentinel points at padding slot 90 and
+  plays no part in the walk).
+
+7 new unit tests cover: the full 2^16-peek tiling proof re-run per
+table as `decode_tiles_symbol_map_bijectively` (every index
+reachable exactly `2^(16−length)` times, q4 padding unreachable);
+hand-traced `q1` decode vectors across four length classes; the
+`q9up` signed-wrap vectors (`0xFFFF → −128`, `0x8000 → −87`,
+`0x4000 → 65`, `0x0000 → −2`); back-to-back decode chaining with
+exact bit consumption on `bands`; the q4 sentinel-skip path; the
+q4 zero-padding pin; and 16-bit-peek EOF propagation. Crate lib
+test count `212 → 219`. `cargo test`, `cargo clippy --all-targets
+--no-deps -- -D warnings`, and `cargo fmt --check` all green under
+`CARGO_TARGET_DIR=/tmp/oxideav-musepack-r278-target`.
+
+### Still gapped (post round 278)
+
+- **SV8 §3.4 per-case sample decoders** — now UNBLOCKED by the
+  decoder walk: the sparse-band flag VLC read, grouped-codeword
+  sample unpack, first-order-context table selection, and
+  large-coefficient escape raw-bit count are the natural next
+  rounds (the grouped-codeword *unpack arithmetic* — how one
+  symbol fans out into 2 or 3 samples — is still unspecified in
+  the structural prose, as for SV7 §2.5).
+- **SCF absolute anchor**, **§3.2 packet payload field maps**,
+  **§3.1 varint convention**, **§2.3 VLC-symbol → §2.5-case
+  remap**, **SV7 §2.5 grouped codewords**, **SV7 fixed-header
+  field map**, **SV7 32-LSB word packing**, **M/S undo + 32-band
+  polyphase synthesis filter** — all unchanged from round 272.
+
 ## Round 272 — §2.6 relative scalefactor (SCF) gain ladder
 
 Round 272 extends the `reconstruct` module with the §2.6 *relative*
