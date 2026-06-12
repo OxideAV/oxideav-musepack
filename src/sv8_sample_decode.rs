@@ -46,6 +46,36 @@
 //!   exact permutation of `-D..=D` for `D = 7 / 15 / 31 / 63`, so
 //!   the decoded symbol IS the centred sample level directly (one
 //!   VLC per sample, 36 reads).
+//! - **Default arm (`LargeCoeffEscape`, table `sv8-canonical-q9up`,
+//!   `band_type` 9..=17)** — "for each sample, read a VLC plus a
+//!   fixed number of raw bits" (§3.4). Three staged facts pin the
+//!   composition completely:
+//!   1. the `sv8-symbols-q9up` map is an exact permutation of
+//!      `-128..=127` — the full **signed-byte** alphabet, one table
+//!      for the whole 9-and-up range (the `.meta` `spec_role` says
+//!      "quantiser case-9-and-up");
+//!   2. `requant-res-bits.meta`'s `spec_role` scopes the
+//!      bits-per-sample ladder to **"SV7 §2.5 / SV8 §3.4"**, so the
+//!      total coded sample width for `band_type` ≥ 9 is
+//!      `RES_BITS[band_type] = band_type - 1` bits in SV8 too;
+//!   3. `requant-quantizer-offset-Dc` pins the level range `-D..=D`
+//!      with `D = 2^(band_type - 2) - 1`.
+//!
+//!   The only composition consistent with all three is: the VLC
+//!   symbol carries the **sign-bearing top 8 bits** and the
+//!   `n = RES_BITS[band_type] - 8 = band_type - 9` raw bits carry
+//!   the low bits, i.e. `sample = symbol · 2ⁿ + raw` — as `symbol`
+//!   ranges over the signed-byte alphabet and `raw` over `0..2ⁿ`,
+//!   the composed values tile exactly the `(band_type - 1)`-bit
+//!   two's-complement range `[-(D + 1), D]`, covering `-D..=D` (the
+//!   single extremum `-(D + 1)` is the usual two's-complement
+//!   asymmetry; like the SV7 §2.5 escape's one out-of-range level
+//!   it is passed through, encoder never emits it). Were the raw
+//!   bits the *high* part instead, the sign would live in the raw
+//!   field and the symbol alphabet would have to be unsigned digit
+//!   values — contradicting the staged signed map. `band_type` 9
+//!   degenerates to `n = 0` (the VLC alone spans `-128..=127` ⊇
+//!   `-127..=127 = -D..=D`).
 //!
 //! # Conventions the staged material does NOT pin
 //!
@@ -69,20 +99,33 @@
 //!   predicate mapping that sample to the `{ctx0, ctx1}` pick;
 //!   [`decode_sv8_context_band`] takes the rule as a caller-supplied
 //!   closure.
+//! - **Raw-bit field read order (escape arm).** The §3.4 prose
+//!   pins the per-sample read order ("a VLC plus a fixed number of
+//!   raw bits" — VLC first), but not the bit-significance order
+//!   *within* the raw field. [`decode_sv8_escape_band`] reads the
+//!   field MSB-first as one `n`-bit unsigned integer via
+//!   [`Sv7BitReader::read_bits`] — the same primitive and
+//!   convention the SV7 §2.5 escape ladder
+//!   ([`crate::sv7_band_decode::decode_linear_pcm_band`]) uses,
+//!   backed by §3.6's lossless SV7↔SV8 relationship (identical
+//!   quantised-coefficient payload, only the entropy layer
+//!   differs).
 //!
-//! # Cases NOT implemented (DOCS-GAP, fail-loud)
+//! # Case NOT implemented (DOCS-GAP, fail-loud)
 //!
 //! - **Case 1 (`SparseBand`)** — the staged `sv8-symbols-q1` map is
 //!   a 19-symbol alphabet (`0..=18`), which cannot literally carry
 //!   the "flags for 18 samples" the §3.4 prose describes (an 18-flag
-//!   bitmap needs 2¹⁸ symbols); the symbol → flag-pattern semantics
-//!   are underdetermined by the staged material.
-//! - **Default arm (`LargeCoeffEscape`, `sv8-canonical-q9up`)** —
-//!   the §3.4 prose says "a VLC plus a *fixed number* of raw bits"
-//!   but does not pin that number (nor its `band_type` dependence).
+//!   bitmap needs 2¹⁸ symbols), and the prose covers 18 samples
+//!   while the band has 36. What IS grounded:
+//!   `requant-quantizer-offset-Dc` pins `D = 1` for `band_type` 1,
+//!   so sparse-band samples are levels in `{-1, 0, +1}` and the
+//!   per-set-flag raw bit is presumably the ±1 sign — but the
+//!   symbol → flag-pattern mapping and the per-band codeword count
+//!   stay underdetermined by the staged material.
 //!
-//! Both are reachable through [`crate::sv8_band_decode`]'s
-//! classifier; asking this module to decode them is answered with
+//! The case is reachable through [`crate::sv8_band_decode`]'s
+//! classifier; asking this module to decode it is answered with
 //! [`Error::UnsupportedBandType`] — fail-loud, not silently-wrong.
 //! Cases `-1` (CNS) and `0` (empty) are shared arms with SV7 (the
 //! round-245 classifier tests pin the agreement) and reuse
@@ -90,6 +133,7 @@
 //! [`crate::sv7_band_decode::fill_zero_band`] unchanged.
 
 use crate::huffman::Sv7BitReader;
+use crate::requant::RES_BITS;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv8_huffman::{table_for_role, Sv8TableRole};
 use crate::{Error, Result};
@@ -101,6 +145,35 @@ pub const GROUPED3_CODEWORDS_PER_BAND: usize = 12;
 /// Number of grouped codewords per band for §3.4 cases 3..=4
 /// ("read 18 VLCs to produce the 36 samples").
 pub const GROUPED2_CODEWORDS_PER_BAND: usize = 18;
+
+/// Number of sample bits the §3.4 default-arm escape VLC itself
+/// carries: the staged `sv8-symbols-q9up` map is an exact
+/// permutation of `-128..=127` — the full signed-byte alphabet —
+/// so each codeword fixes the sign-bearing top **8** bits of the
+/// sample (see the module-level escape grounding note).
+pub const ESCAPE_VLC_SYMBOL_BITS: u8 = 8;
+
+/// Fixed raw-bit count per sample for the §3.4 default-arm
+/// large-coefficient escape, for `band_type` in `9..=17`.
+///
+/// `requant-res-bits.meta` scopes its bits-per-sample ladder to
+/// "SV7 §2.5 / SV8 §3.4", so the total coded width of an escape
+/// sample is [`RES_BITS`]`[band_type] = band_type - 1` bits; the
+/// q9up VLC covers the top [`ESCAPE_VLC_SYMBOL_BITS`] of them,
+/// leaving `band_type - 9` raw bits (0 for `band_type` 9, up to 8
+/// for `band_type` 17).
+///
+/// Returns `None` outside `9..=17`: the §3.4 ladder routes every
+/// `band_type >= 9` to the escape arm, but the staged requant
+/// tables (`requant-res-bits`, `requant-quantizer-offset-Dc`)
+/// define quantisers only through `band_type` 17, so larger values
+/// have no defined sample width.
+pub const fn escape_raw_bits(band_type: i8) -> Option<u8> {
+    match band_type {
+        9..=17 => Some(RES_BITS[band_type as usize] - ESCAPE_VLC_SYMBOL_BITS),
+        _ => None,
+    }
+}
 
 /// Sign-extend the low 4 bits of `n` as a two's-complement nibble.
 const fn sign_extend_nibble(n: u8) -> i8 {
@@ -249,13 +322,66 @@ where
     Ok(())
 }
 
+/// Decode 36 samples for an SV8 band with `band_type` in `9..=17`
+/// (§3.4 `default` arm,
+/// [`crate::sv8_band_decode::Sv8BandDecodeCase::LargeCoeffEscape`]):
+/// per sample, one canonical-Huffman codeword from
+/// `sv8-canonical-q9up` followed by [`escape_raw_bits`]`(band_type)`
+/// raw bits, composed as
+///
+/// ```text
+/// sample = (symbol << n) | raw      # n = band_type - 9
+/// ```
+///
+/// i.e. the signed-byte VLC symbol carries the sign-bearing top 8
+/// bits and the raw field the low `n` bits of a
+/// `(band_type - 1)`-bit two's-complement level — the composition
+/// the staged q9up alphabet + `requant-res-bits` +
+/// `requant-quantizer-offset-Dc` facts pin (module-level escape
+/// grounding note). The raw field is read MSB-first via
+/// [`Sv7BitReader::read_bits`], mirroring the SV7 §2.5 escape
+/// ladder per the §3.6 lossless SV7↔SV8 relationship (module-level
+/// "Conventions" note).
+///
+/// Output samples are already-centred levels in
+/// `[-(D + 1), D]` with `D = 2^(band_type - 2) - 1` (the lone
+/// `-(D + 1)` extremum is the two's-complement asymmetry, passed
+/// through like the SV7 escape's one out-of-range level), so `out`
+/// is `i32` — the levels exceed `i8` for every escape `band_type`.
+/// Unlike [`crate::sv7_band_decode::decode_linear_pcm_band`] (which
+/// emits raw *uncentred* levels for the caller to centre by `D`),
+/// the staged q9up map is signed, so no caller-side centring
+/// applies here.
+///
+/// A `band_type` outside `9..=17` yields
+/// [`Error::UnsupportedBandType`] (the staged requant tables define
+/// quantisers only through `band_type` 17; see
+/// [`escape_raw_bits`]).
+pub fn decode_sv8_escape_band(
+    reader: &mut Sv7BitReader<'_>,
+    band_type: i8,
+    out: &mut [i32; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let raw_bits = escape_raw_bits(band_type).ok_or(Error::UnsupportedBandType(band_type))?;
+    let table =
+        table_for_role(Sv8TableRole::Q9up, 0).ok_or(Error::UnsupportedBandType(band_type))?;
+    for slot in out.iter_mut() {
+        let symbol = table.decode(reader)? as i32;
+        // read_bits(0) is a defined no-op returning 0 (band_type 9).
+        let raw = reader.read_bits(raw_bits)? as i32;
+        *slot = (symbol << raw_bits) | raw;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::requant::QUANTIZER_OFFSET_D;
     use crate::sv8_huffman::{
         Sv8CanonicalTable, SV8_Q2_1_TABLE, SV8_Q2_2_TABLE, SV8_Q3_TABLE, SV8_Q4_TABLE,
         SV8_Q5_1_TABLE, SV8_Q5_2_TABLE, SV8_Q6_1_TABLE, SV8_Q6_2_TABLE, SV8_Q7_1_TABLE,
-        SV8_Q7_2_TABLE, SV8_Q8_1_TABLE, SV8_Q8_2_TABLE,
+        SV8_Q7_2_TABLE, SV8_Q8_1_TABLE, SV8_Q8_2_TABLE, SV8_Q9UP_TABLE,
     };
     use std::collections::BTreeSet;
 
@@ -775,6 +901,176 @@ mod tests {
         ));
     }
 
+    // ─── decode_sv8_escape_band (default arm, 9..=17) ──────
+
+    #[test]
+    fn q9up_symbol_map_is_full_signed_byte_permutation() {
+        // The escape composition's keystone fact: the alphabet is
+        // exactly the 256 signed-byte values, i.e. the VLC carries
+        // the sign-bearing top 8 bits of the sample.
+        assert_eq!(SV8_Q9UP_TABLE.symbols.len(), 256);
+        let mut values: Vec<i8> = SV8_Q9UP_TABLE.symbols.to_vec();
+        values.sort_unstable();
+        let expected: Vec<i8> = (i8::MIN..=i8::MAX).collect();
+        assert_eq!(values, expected);
+    }
+
+    #[test]
+    fn escape_raw_bits_ladder_matches_res_bits_minus_vlc_width() {
+        // raw = RES_BITS[band_type] - 8 = band_type - 9 across the
+        // whole escape range; None everywhere else.
+        for bt in 9..=17_i8 {
+            assert_eq!(escape_raw_bits(bt), Some(bt as u8 - 9), "band_type {bt}");
+            assert_eq!(
+                escape_raw_bits(bt),
+                Some(RES_BITS[bt as usize] - ESCAPE_VLC_SYMBOL_BITS),
+                "band_type {bt}"
+            );
+        }
+        for bt in [i8::MIN, -1, 0, 1, 5, 8, 18, 19, 64, i8::MAX] {
+            assert_eq!(escape_raw_bits(bt), None, "band_type {bt}");
+        }
+    }
+
+    #[test]
+    fn escape_composition_tiles_the_dc_pinned_level_range() {
+        // For every escape band_type, the composed value range
+        // [-(D+1), D] must cover the Dc-pinned -D..=D, with the
+        // maximum landing exactly on D = 2^(band_type-2) - 1.
+        for bt in 9..=17_i8 {
+            let n = escape_raw_bits(bt).unwrap() as u32;
+            let d = QUANTIZER_OFFSET_D[(bt + 1) as usize] as i32;
+            let max = (127_i32 << n) | ((1 << n) - 1);
+            let min = (-128_i32) << n;
+            assert_eq!(max, d, "band_type {bt}: composed max must equal D");
+            assert_eq!(
+                min,
+                -(d + 1),
+                "band_type {bt}: composed min is the two's-complement extremum"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_band_type_nine_is_pure_vlc_per_sample() {
+        // n = 0: the codeword alone is the sample; no raw bits are
+        // consumed.
+        let table = &SV8_Q9UP_TABLE;
+        let entry = table.lengths[0];
+        let expected = symbol_for_row(table, 0) as i32;
+
+        let mut p = BitPacker::new();
+        for _ in 0..SAMPLES_PER_BAND {
+            p.push(entry.code, entry.length);
+        }
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let before = reader.bits_remaining();
+        let mut out = [99_i32; SAMPLES_PER_BAND];
+        decode_sv8_escape_band(&mut reader, 9, &mut out).expect("decode");
+        assert!(out.iter().all(|&s| s == expected));
+        assert_eq!(before - reader.bits_remaining(), 36 * entry.length as u64);
+    }
+
+    #[test]
+    fn escape_band_composes_vlc_high_bits_with_raw_low_bits() {
+        // band_type 13 → n = 4 raw bits. Alternate a negative- and
+        // a positive-symbol codeword, each followed by a distinct
+        // 4-bit raw pattern; every sample must equal
+        // symbol * 16 + raw.
+        let table = &SV8_Q9UP_TABLE;
+        let (neg_pat, neg_len, neg_sym) =
+            find_codeword(table, |s| s < 0).expect("q9up has a negative-symbol codeword");
+        let (pos_pat, pos_len, pos_sym) =
+            find_codeword(table, |s| s > 0).expect("q9up has a positive-symbol codeword");
+
+        // Raw patterns chosen so an LSB-first misread would produce
+        // a different value (0b1010 reversed is 0b0101).
+        let raw_for = |i: usize| [0b1010_u16, 0b0001, 0b1111, 0b0000][i % 4];
+        let mut p = BitPacker::new();
+        for i in 0..SAMPLES_PER_BAND {
+            if i % 2 == 0 {
+                p.push(neg_pat, neg_len);
+            } else {
+                p.push(pos_pat, pos_len);
+            }
+            p.push(raw_for(i) << 12, 4); // left-justify the 4-bit raw field
+        }
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let before = reader.bits_remaining();
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        decode_sv8_escape_band(&mut reader, 13, &mut out).expect("decode");
+        for (i, &s) in out.iter().enumerate() {
+            let sym = if i % 2 == 0 { neg_sym } else { pos_sym } as i32;
+            let expected = (sym << 4) | raw_for(i) as i32;
+            assert_eq!(s, expected, "sample {i}");
+        }
+        let codeword_bits = 18 * (neg_len as u64 + pos_len as u64);
+        assert_eq!(
+            before - reader.bits_remaining(),
+            codeword_bits + 36 * 4,
+            "every sample must consume its codeword plus exactly 4 raw bits"
+        );
+    }
+
+    #[test]
+    fn escape_band_widest_raw_field_reads_msb_first() {
+        // band_type 17 → n = 8: a full raw byte per sample. Use one
+        // fixed codeword and a per-sample raw byte equal to the
+        // sample index; MSB-first composition means
+        // sample = (symbol << 8) | i exactly.
+        let table = &SV8_Q9UP_TABLE;
+        let entry = table.lengths[0];
+        let symbol = symbol_for_row(table, 0) as i32;
+
+        let mut p = BitPacker::new();
+        for i in 0..SAMPLES_PER_BAND {
+            p.push(entry.code, entry.length);
+            p.push((i as u16) << 8, 8);
+        }
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        decode_sv8_escape_band(&mut reader, 17, &mut out).expect("decode");
+        for (i, &s) in out.iter().enumerate() {
+            assert_eq!(s, (symbol << 8) | i as i32, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn escape_band_rejects_band_type_outside_9_17() {
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        for bt in [i8::MIN, -1, 0, 1, 2, 5, 8, 18, 19, 64, i8::MAX] {
+            let mut reader = Sv7BitReader::new(&[0xFF; 128]);
+            assert!(matches!(
+                decode_sv8_escape_band(&mut reader, bt, &mut out),
+                Err(Error::UnsupportedBandType(v)) if v == bt,
+            ));
+        }
+    }
+
+    #[test]
+    fn escape_band_propagates_eof_at_codeword_and_inside_raw_field() {
+        // Far too short for any codeword: EOF at the VLC peek.
+        let mut reader = Sv7BitReader::new(&[0xFF]);
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv8_escape_band(&mut reader, 17, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+        // Exactly 16 bits of zeros: the all-zero peek matches the
+        // last q9up row (code 0x0000, length 11), leaving 5 bits —
+        // fewer than the 8-bit raw field → EOF inside read_bits.
+        let mut reader = Sv7BitReader::new(&[0x00, 0x00]);
+        let before = reader.bits_remaining();
+        assert_eq!(before, 16);
+        assert!(matches!(
+            decode_sv8_escape_band(&mut reader, 17, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
     // ─── Classifier composition ────────────────────────────
 
     #[test]
@@ -792,15 +1088,22 @@ mod tests {
                 Sv8BandDecodeCase::ContextHuffmanPerSample
             );
         }
-        // The two DOCS-GAP arms stay unimplemented and fail loudly.
-        assert_eq!(sv8_band_type_case(1), Sv8BandDecodeCase::SparseBand);
-        assert_eq!(sv8_band_type_case(9), Sv8BandDecodeCase::LargeCoeffEscape);
-        let mut out = [0_i8; SAMPLES_PER_BAND];
-        for bt in [1_i8, 9] {
-            let mut reader = Sv7BitReader::new(&[0xFF; 64]);
-            assert!(decode_sv8_grouped2_band(&mut reader, bt, &mut out).is_err());
-            let mut reader = Sv7BitReader::new(&[0xFF; 64]);
-            assert!(decode_sv8_context_band(&mut reader, bt, 0, |_| 0, &mut out).is_err());
+        // The escape arm is implemented for the requant-defined
+        // 9..=17 range of the classifier's `>= 9` default arm.
+        for bt in 9..=17 {
+            assert_eq!(sv8_band_type_case(bt), Sv8BandDecodeCase::LargeCoeffEscape);
+            assert!(escape_raw_bits(bt).is_some());
         }
+        // The one DOCS-GAP arm (case 1, sparse band) stays
+        // unimplemented and fails loudly in every decoder here.
+        assert_eq!(sv8_band_type_case(1), Sv8BandDecodeCase::SparseBand);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        let mut out_i32 = [0_i32; SAMPLES_PER_BAND];
+        let mut reader = Sv7BitReader::new(&[0xFF; 64]);
+        assert!(decode_sv8_grouped2_band(&mut reader, 1, &mut out).is_err());
+        let mut reader = Sv7BitReader::new(&[0xFF; 64]);
+        assert!(decode_sv8_context_band(&mut reader, 1, 0, |_| 0, &mut out).is_err());
+        let mut reader = Sv7BitReader::new(&[0xFF; 64]);
+        assert!(decode_sv8_escape_band(&mut reader, 1, &mut out_i32).is_err());
     }
 }

@@ -8,6 +8,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 284** — SV8 §3.4 large-coefficient escape (`default` arm,
+  `band_type` 9..=17) in `sv8_sample_decode`, closing the arm round
+  281 had left as unpinned. The "fixed number of raw bits" is
+  derivable from three already-staged facts: the `sv8-symbols-q9up`
+  map is an exact permutation of `-128..=127` (the full signed-byte
+  alphabet, one table for the whole "9-and-up" range);
+  `requant-res-bits.meta` scopes its ladder to "SV7 §2.5 / SV8
+  §3.4", making an escape sample `band_type - 1` bits wide in
+  total; and `requant-quantizer-offset-Dc` pins the level range
+  `±D` with `D = 2^(band_type-2) - 1`. The unique consistent
+  composition: the VLC symbol carries the sign-bearing top 8 bits,
+  `n = band_type - 9` raw bits the low bits —
+  `sample = (symbol << n) | raw` tiles exactly the
+  `(band_type-1)`-bit two's-complement range `[-(D+1), D]`.
+  - `escape_raw_bits(band_type) -> Option<u8>` — the
+    `RES_BITS[band_type] - 8` ladder (`None` outside `9..=17`,
+    where the staged requant tables define no quantiser) +
+    `ESCAPE_VLC_SYMBOL_BITS = 8`.
+  - `decode_sv8_escape_band(reader, band_type, out: &mut [i32; 36])`
+    — 36 × (q9up codeword + MSB-first raw field), emitting
+    already-centred `i32` levels (the staged map is signed; the
+    SV7 escape by contrast emits uncentred levels). The raw-field
+    read mirrors the SV7 §2.5 escape's `read_bits` convention,
+    backed by the §3.6 lossless SV7↔SV8 relationship.
+  - 8 new unit tests (crate lib total `242 → 250`): signed-byte
+    alphabet pin, raw-bit ladder vs `RES_BITS`, `[-(D+1), D]`
+    range tiling vs `QUANTIZER_OFFSET_D` for all nine escape
+    band_types, pure-VLC band_type 9 bit accounting, high/low
+    composition under alternating ± codewords (band_type 13),
+    MSB-first widest raw field (band_type 17), band_type
+    rejection, EOF at the codeword and inside the raw field.
+  - The §3.4 sparse band (case 1) remains the one DOCS-GAP arm
+    (19-symbol q1 alphabet vs the prose's "flags for 18 samples";
+    newly grounded: `D = 1` for band_type 1, so sparse samples are
+    `{-1, 0, +1}` levels).
+
 - **Round 281** — new `sv8_sample_decode` module: SV8 §3.4 per-case
   sample decoders for the grounded subset of the eight-variant
   ladder, composing the round-278 canonical-Huffman decoder walk

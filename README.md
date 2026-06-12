@@ -125,6 +125,78 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 284 — SV8 §3.4 large-coefficient escape (default arm)
+
+Round 284 closes the §3.4 `default` arm ("for each sample, read a
+VLC plus a fixed number of raw bits", `band_type` 9..=17) in
+`sv8_sample_decode`, reading only `docs/audio/musepack/` (spec
+§3.4/§3.6, the wiki snapshot's quantizer ladder, and the
+`sv8-{canonical,symbols}-q9up` + `requant-*` CSVs/`.meta`s). The
+"fixed number" round 281 listed as unpinned is in fact derivable
+from three already-staged facts:
+
+1. the `sv8-symbols-q9up` map is an exact permutation of
+   `-128..=127` — the full **signed-byte** alphabet, one table for
+   the whole "9-and-up" range per its `.meta` `spec_role`;
+2. `requant-res-bits.meta` scopes its bits-per-sample ladder to
+   "SV7 §2.5 / **SV8 §3.4**", so an SV8 escape sample is
+   `RES_BITS[band_type] = band_type − 1` bits wide in total;
+3. `requant-quantizer-offset-Dc` pins the level range `±D`,
+   `D = 2^(band_type−2) − 1`.
+
+The only composition consistent with all three: the VLC symbol is
+the sign-bearing top 8 bits, the `n = band_type − 9` raw bits are
+the low bits — `sample = (symbol << n) | raw` tiles exactly the
+`(band_type−1)`-bit two's-complement range `[−(D+1), D]` ⊇ `±D`
+(raw-as-high-bits would put the sign in the raw field,
+contradicting the signed map). New surface:
+
+- `escape_raw_bits(band_type) -> Option<u8>` — the
+  `RES_BITS[band_type] − 8` ladder (`0` for band_type 9 … `8` for
+  17; `None` outside `9..=17`, where the staged requant tables
+  define no quantiser) + `ESCAPE_VLC_SYMBOL_BITS = 8`.
+- `decode_sv8_escape_band(reader, band_type, out: &mut [i32; 36])`
+  — 36 × (q9up codeword + raw field). Output is the
+  already-centred `i32` level (the staged map is signed), unlike
+  the SV7 escape which emits uncentred levels for caller-side
+  centring. The raw field is read MSB-first via the same
+  `read_bits` primitive as the SV7 §2.5 escape, backed by §3.6's
+  lossless SV7↔SV8 relationship (identical coefficient payload).
+
+8 new unit tests: the signed-byte alphabet pin; the raw-bit ladder
+vs `RES_BITS`; exact `[−(D+1), D]` range tiling against
+`QUANTIZER_OFFSET_D` for all nine escape band_types; pure-VLC
+band_type 9 with exact bit accounting; high/low composition under
+alternating ± codewords with asymmetric raw patterns (band_type
+13); MSB-first raw-field order at the widest field (band_type 17);
+band_type rejection; EOF at the codeword and inside the raw field.
+Crate lib test count `242 → 250`. `cargo test`, `cargo clippy
+--all-targets --no-deps -- -D warnings`, and `cargo fmt --check`
+all green under `CARGO_TARGET_DIR=/tmp/oxideav-musepack-r284-target`.
+
+### Still gapped (post round 284)
+
+- **SV8 §3.4 sparse band (case 1)** — the one §3.4 arm left. The
+  staged q1 alphabet is 19 symbols (`0..=18`), which cannot
+  literally carry the prose's "flags for 18 samples" (an 18-flag
+  bitmap needs 2¹⁸ symbols), and the prose covers 18 samples
+  while the band has 36. Newly grounded this round:
+  `requant-quantizer-offset-Dc` pins `D = 1` for band_type 1, so
+  sparse samples are levels in `{−1, 0, +1}` and the per-set-flag
+  raw bit is presumably the ±1 sign. Still needed from a docs
+  observer trace: (a) how many q1 codewords a 36-sample band
+  reads, (b) the symbol → flag-pattern mapping, (c) the raw-bit →
+  sign polarity.
+- **q2 ctx-pair selection rule + `5..=8` context predicate +
+  within-group emission order + escape raw-field bit order** —
+  caller knobs / isolated conventions; an observer trace pins all
+  four.
+- **SCF absolute anchor**, **§3.2 packet payload field maps**,
+  **§3.1 varint convention**, **§2.3 VLC-symbol → §2.5-case
+  remap**, **SV7 §2.5 grouped codewords**, **SV7 fixed-header
+  field map**, **SV7 32-LSB word packing**, **M/S undo + 32-band
+  polyphase synthesis filter** — all unchanged from round 281.
+
 ## Round 281 — SV8 §3.4 per-case sample decoders (grounded subset)
 
 Round 281 lands the `sv8_sample_decode` module: the §3.4 per-case
