@@ -86,6 +86,17 @@
 //!   decoders live downstream of the SV8 canonical-Huffman entropy
 //!   layer (`sv8-canonical-*` + `sv8-symbols-*` tables, staged
 //!   under `docs/audio/musepack/tables/`).
+//! - [`sv8_sample_decode`] — SV8 §3.4 per-case sample decoders for
+//!   the grounded subset of the ladder:
+//!   [`sv8_sample_decode::decode_sv8_grouped3_band`] (case 2 — 12
+//!   codewords, base-5-packed triplets over `-2..=2`),
+//!   [`sv8_sample_decode::decode_sv8_grouped2_band`] (cases 3..=4 —
+//!   18 codewords, signed-nibble pairs over `±band_type`), and
+//!   [`sv8_sample_decode::decode_sv8_context_band`] (cases 5..=8 —
+//!   one VLC per sample, table chosen per previous sample through a
+//!   caller-supplied context rule, the §3.4 GAP knob). The sparse
+//!   band (case 1) and large-coefficient escape (default arm) stay
+//!   DOCS-GAP and fail loudly.
 //! - [`packet_stream`] — SV8 §3.1/§3.2 packet-stream walker on top
 //!   of [`framing::parse_packet_header`]. `PacketStream::new` takes
 //!   the post-`MPCK` slice plus a [`packet_stream::PacketSizeConvention`]
@@ -144,6 +155,7 @@ pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod sv8_band_decode;
 pub mod sv8_huffman;
+pub mod sv8_sample_decode;
 pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from
@@ -187,6 +199,15 @@ pub enum Error {
     /// out-of-range value is reported so callers can log which
     /// `band_type` was rejected.
     UnsupportedBandType(i8),
+    /// An SV8 §3.4 grouped-codeword unpack was handed a symbol
+    /// outside the staged grouped alphabet (`0..=124` for the
+    /// case-2 base-5 triplets; nibbles within `±band_type` for the
+    /// case-3/4 signed-nibble pairs). Unreachable when the symbol
+    /// comes from the staged `sv8-symbols-*` maps (whose confinement
+    /// to the alphabet is test-proven); kept as a defensive bound
+    /// for symbols sourced elsewhere. The offending symbol is
+    /// reported for diagnostic logging.
+    GroupedSymbolOutOfRange(i8),
     /// The SV7 §2.4 SCFI VLC decoded a value outside the
     /// structurally-documented `0..=3` range. The offending raw
     /// value is included for diagnostic logging.
@@ -229,6 +250,10 @@ impl core::fmt::Display for Error {
             Error::UnsupportedBandType(bt) => write!(
                 f,
                 "oxideav-musepack: unsupported or out-of-range band_type {bt} for the sample-decode dispatcher",
+            ),
+            Error::GroupedSymbolOutOfRange(symbol) => write!(
+                f,
+                "oxideav-musepack: grouped-codeword symbol {symbol} lies outside the staged SV8 §3.4 grouped alphabet",
             ),
             Error::InvalidScfCodingMethod(raw) => write!(
                 f,

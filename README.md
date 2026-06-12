@@ -19,7 +19,8 @@ expose through a future `register(ctx)` function is not wired yet;
 the public API today surfaces the crate-local `Error` placeholder
 plus the wired `requant`, `framing`, `huffman`, `cns`,
 `sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`,
-`packet_stream`, and `typed_packet` modules (see below).
+`packet_stream`, `typed_packet`, `stream_shape`, `sv8_band_decode`,
+`sv8_huffman`, and `sv8_sample_decode` modules (see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
 
@@ -123,6 +124,90 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **SV8 packet payload field maps** — same blocker as round 194.
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
+
+## Round 281 — SV8 §3.4 per-case sample decoders (grounded subset)
+
+Round 281 lands the `sv8_sample_decode` module: the §3.4 per-case
+sample decoders for the grounded subset of the eight-variant ladder,
+composing the round-278 canonical-Huffman decoder walk with the
+round-245 `Sv8BandDecodeCase` classifier, reading only
+`docs/audio/musepack/` (spec §3.4 + the wiki snapshot's quantizer
+ladder, the `sv8-symbols-*` / `sv8-canonical-*` CSVs, and their
+`.meta` `spec_role` lines, which pin the grouped-symbol structure
+the round-278 README still listed as unspecified):
+
+- **Grouped fan-out arithmetic is now data-derived.** The `.meta`
+  `spec_role` strings name the packings — q2 "5x5x5 grouped", q3
+  "7x7 grouped", q4 "9x9 grouped, padded" — and the staged maps
+  prove them: both q2 maps are exact permutations of `0..=124`
+  whose most-probable symbol is `62 = 2·25 + 2·5 + 2` (the all-zero
+  triplet → base-5 digits, digit = sample + 2, samples `-2..=2`);
+  the q3 map is an exact bijection onto `(-3..=3)²` and q4's first
+  81 entries onto `(-4..=4)²` under signed two's-complement
+  **nibble-pair** splitting of the int8 symbol (e.g. `0x11 → (1,1)`,
+  `0x3F → (3,-1)`, `0xF0 → (0,-1)`); q4's 10 padding slots stay
+  zero and unreachable per the round-278 tiling proof. Every
+  q5..q8 map is a permutation of `-D..=D` (`D = 7/15/31/63`), so
+  the per-sample symbol IS the centred level.
+- `unpack_grouped3_symbol` / `unpack_grouped2_symbol` — the
+  case-2 base-5 triplet and case-3/4 nibble-pair unpacks
+  (`band_type` doubles as the per-nibble bound `D`); new defensive
+  `Error::GroupedSymbolOutOfRange(i8)`.
+- `decode_sv8_grouped3_band(reader, ctx, out)` — case 2: 12
+  codewords via `sv8-canonical-q2-{1,2}`, 3 consecutive samples
+  each. The q2 pair-selection rule is GAP (case 2 sits outside the
+  §3.4 `5..=8` context range) so `ctx` is a caller knob, the
+  `PacketSizeConvention` precedent.
+- `decode_sv8_grouped2_band(reader, band_type, out)` — cases
+  3..=4: 18 codewords via `sv8-canonical-q3` / `-q4`, 2 samples
+  each.
+- `decode_sv8_context_band(reader, band_type, initial_ctx,
+  ctx_for_prev, out)` — cases 5..=8: 36 per-sample VLCs from the
+  `q{5..8}` context pair; §3.4 pins that each sample's table is
+  "chosen by the previously decoded sample" but not the predicate,
+  which is a caller-supplied closure.
+- **Residual convention:** the within-group emission order (which
+  radix digit / nibble is the *first* of the consecutive samples)
+  is underivable from the staged material — both assignments are
+  bijections. The module emits least-significant-digit / low-nibble
+  first, isolated inside the two `unpack_*` helpers for a one-line
+  flip if a future observer trace pins the opposite order.
+- Cases `-1` / `0` reuse the shared SV7 arms (`fill_cns_band` /
+  `fill_zero_band`); the sparse band (case 1) and the
+  large-coefficient escape (default arm) stay DOCS-GAP and fail
+  loudly (the staged 19-symbol `0..=18` q1 alphabet cannot
+  literally carry the prose's "flags for 18 samples", and the
+  escape's "fixed number of raw bits" is unpinned).
+
+16 new unit tests: staged-fact pins for the q2 / q3 / q4 / q5..q8
+map structures; unpack hand-vectors, alphabet bijection, and
+rejection edges; per-case band decodes with exact bit accounting;
+codeword-order traces (alternating distinct codewords land on the
+right groups); a context-switching trace driving the q5 pair off
+the previous sample's sign; ctx / band_type rejection; EOF
+propagation; and classifier-arm composition. Crate lib test count
+`219 → 242`. `cargo test`, `cargo clippy --all-targets --no-deps
+-- -D warnings`, and `cargo fmt --check` all green under
+`CARGO_TARGET_DIR=/tmp/oxideav-musepack-r281-target`.
+
+### Still gapped (post round 281)
+
+- **SV8 §3.4 sparse band (case 1)** — the q1 symbol → 18-flag
+  semantics are underdetermined by the staged material (19-symbol
+  alphabet vs an 18-flag bitmap); needs a one-paragraph docs
+  addendum.
+- **SV8 §3.4 large-coefficient escape (default arm)** — the
+  per-sample raw-bit count (and its `band_type` dependence) is
+  unpinned by the structural prose.
+- **q2 ctx-pair selection rule + `5..=8` context predicate +
+  within-group emission order** — parameterised as caller knobs /
+  an isolated convention this round; an observer trace pins all
+  three.
+- **SCF absolute anchor**, **§3.2 packet payload field maps**,
+  **§3.1 varint convention**, **§2.3 VLC-symbol → §2.5-case
+  remap**, **SV7 §2.5 grouped codewords**, **SV7 fixed-header
+  field map**, **SV7 32-LSB word packing**, **M/S undo + 32-band
+  polyphase synthesis filter** — all unchanged from round 278.
 
 ## Round 278 — SV8 §3.4 canonical-Huffman decoder walk
 

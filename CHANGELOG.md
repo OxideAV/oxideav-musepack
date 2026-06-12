@@ -8,6 +8,63 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 281** — new `sv8_sample_decode` module: SV8 §3.4 per-case
+  sample decoders for the grounded subset of the eight-variant
+  ladder, composing the round-278 canonical-Huffman decoder walk
+  with grouped fan-out facts pinned by the staged
+  `sv8-symbols-*.{csv,meta}` material:
+  - `unpack_grouped3_symbol(symbol) -> Result<[i8; 3]>` — case-2
+    grouped unpack. The staged `sv8-symbols-q2-{1,2}` maps are
+    exact permutations of `0..=124` ("5x5x5 grouped" per the
+    `.meta` `spec_role`) whose most-probable symbol is the all-zero
+    triplet `62 = 2·25 + 2·5 + 2`, so a symbol is a base-5-packed
+    triplet of already-centred samples in `-2..=2` (digit = sample
+    + 2; 5 levels = `2D+1` with `D = 2` per the §2.6 requant
+    relation).
+  - `unpack_grouped2_symbol(symbol, band_type) -> Result<[i8; 2]>`
+    — case-3/4 grouped unpack. The 49-entry q3 map ("7x7 grouped")
+    is an exact bijection onto `(-3..=3)²` and the first 81 q4
+    entries ("9x9 grouped, padded") onto `(-4..=4)²` under signed
+    two's-complement **nibble-pair** splitting of the int8 symbol
+    (q4's 10 padding slots stay zero and unreachable per the
+    round-278 tiling proof); `band_type` doubles as the per-nibble
+    bound `D`.
+  - `decode_sv8_grouped3_band(reader, ctx, out)` — case 2: 12
+    codewords from the `sv8-canonical-q2-{1,2}` pair, each fanned
+    into 3 consecutive samples. The q2 pair-selection rule is GAP
+    (case 2 sits outside the §3.4 `5..=8` context range), so `ctx`
+    is a caller knob per the `PacketSizeConvention` precedent.
+  - `decode_sv8_grouped2_band(reader, band_type, out)` — cases
+    3..=4: 18 codewords from `sv8-canonical-q3` / `-q4`, each
+    fanned into 2 consecutive samples.
+  - `decode_sv8_context_band(reader, band_type, initial_ctx,
+    ctx_for_prev, out)` — cases 5..=8: one VLC per sample from the
+    `sv8-canonical-q{5..8}-{1,2}` pair; every staged q5..q8 map is
+    a permutation of `-D..=D` (`D = 7/15/31/63`) so the symbol IS
+    the centred level. §3.4 pins that the table is "chosen by the
+    previously decoded sample" but not the predicate, which is
+    taken as a caller-supplied closure.
+  - `GROUPED3_CODEWORDS_PER_BAND = 12` /
+    `GROUPED2_CODEWORDS_PER_BAND = 18` constants and a new
+    crate-level `Error::GroupedSymbolOutOfRange(i8)` defensive
+    variant.
+  The within-group emission order (which radix digit / nibble is
+  the first of the consecutive samples) is the one convention the
+  staged material cannot pin (both assignments are bijections);
+  the module emits least-significant-digit / low-nibble first,
+  isolated inside the two `unpack_*` helpers for a one-line flip
+  if a future observer trace pins the opposite order. The sparse
+  band (case 1 — the staged 19-symbol `0..=18` q1 alphabet cannot
+  literally carry the prose's "flags for 18 samples") and the
+  large-coefficient escape (default arm — the "fixed number of raw
+  bits" is unpinned) remain DOCS-GAP and fail loudly. 16 new unit
+  tests (staged-fact pins for the q2/q3/q4/q5..q8 map structures,
+  unpack hand-vectors + bijection + rejection, per-case band
+  decodes with exact bit accounting, codeword-order and
+  context-switching traces, ctx/band_type rejection, EOF
+  propagation, classifier-arm composition). Crate lib test count
+  `219 → 242`.
+
 - **Round 278** — `sv8_huffman` module gains the SV8 §3.4
   canonical-Huffman **decoder walk**, closing the round-260
   cumulative-index DOCS-GAP from the staged facts alone. The
