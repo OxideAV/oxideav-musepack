@@ -22,8 +22,7 @@
 //!   * `notes: For [2][N] tables the CSV concatenates context 0 then
 //!     context 1 (each N rows); split at element_count/2.`
 //!
-//! No third-party Musepack implementation source was read in
-//! authoring this module; the table contents are the staged CSV
+//! The table contents are the staged CSV
 //! facts and the bit-stream decoder shape follows directly from the
 //! `mpc_huffman` value-encoding sentence above.
 //!

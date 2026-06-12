@@ -92,9 +92,8 @@
 //! - Provenance: `docs/audio/musepack/provenance/01-musepack-table-extraction.md`
 //!   §6 ("SV8 canonical length-tables + symbol maps").
 //!
-//! No third-party Musepack implementation source was read in
-//! authoring this module; the only project material crossed is
-//! the staged `docs/` content above and the existing SV7 sibling
+//! The only project material crossed is the staged `docs/` content
+//! above and the existing SV7 sibling
 //! modules under `crates/oxideav-musepack/src/`.
 
 use crate::huffman::Sv7BitReader;

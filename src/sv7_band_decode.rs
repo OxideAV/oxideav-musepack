@@ -30,9 +30,8 @@
 //!   }
 //!   ```
 //!
-//! No third-party Musepack implementation source was read in
-//! authoring this module; every decoding shape comes from the
-//! structural §2.5 prose above plus the existing wired tables.
+//! Every decoding shape comes from the structural §2.5 prose above
+//! plus the existing wired tables.
 //!
 //! # Cases implemented this round
 //!

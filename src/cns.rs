@@ -19,9 +19,8 @@
 //!     r2=(r2<<1)|Parity[(r2>>25)&0x63]; word=r1^r2; noise q =
 //!     (b0+b1+b2+b3) - 510 over the 4 bytes of word.`
 //!
-//! No third-party Musepack implementation source was read in
-//! authoring this module; the constants are the staged CSV facts
-//! and the step is the staged `.meta` notes-line transcription.
+//! The constants are the staged CSV facts and the step is the staged
+//! `.meta` notes-line transcription.
 
 // Pulls in `PARITY`, `R1_SEED`, `R2_SEED`, `R1_TAP_MASK`,
 // `R2_TAP_MASK`, `R2_SHIFT`, `NOISE_SAMPLE_BYTE_SUM_BIAS` from
