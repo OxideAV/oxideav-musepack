@@ -48,9 +48,8 @@
 //!   the decoded size as separate fields on [`PacketHeader`] so a
 //!   caller can pick the right one once the observer trace lands.
 //!
-//! No third-party Musepack implementation, no FFmpeg source, and
-//! no Trac / mutagen-specs page was read in authoring this module;
-//! all values and shapes come from `docs/audio/musepack/`.
+//! All values and shapes in this module come from the staged
+//! material under `docs/audio/musepack/`.
 
 use crate::{Error, Result};
 
