@@ -82,21 +82,29 @@
 //!   one `const fn` plus two predicate helpers
 //!   ([`sv8_band_decode::case_emits_samples`],
 //!   [`sv8_band_decode::case_uses_first_order_context`]) routing
-//!   `band_type` to its §3.4 `switch` arm. The per-case sample
-//!   decoders live downstream of the SV8 canonical-Huffman entropy
-//!   layer (`sv8-canonical-*` + `sv8-symbols-*` tables, staged
-//!   under `docs/audio/musepack/tables/`).
+//!   `band_type` to its §3.4 `switch` arm, plus the
+//!   classifier-driven entry point
+//!   [`sv8_band_decode::decode_sv8_band`] that walks a band from its
+//!   `band_type` alone to the matching per-arm decoder, unifying the
+//!   grounded arms (CNS / empty / grouped3 / grouped2 / context /
+//!   escape) on an `[i32; 36]` output and failing loud on the
+//!   DOCS-GAP sparse band (case 1) and the out-of-range catch-all.
+//!   The per-case sample decoders live in [`sv8_sample_decode`]
+//!   downstream of the SV8 canonical-Huffman entropy layer
+//!   (`sv8-canonical-*` + `sv8-symbols-*` tables, staged under
+//!   `docs/audio/musepack/tables/`).
 //! - [`sv8_sample_decode`] — SV8 §3.4 per-case sample decoders for
 //!   the grounded subset of the ladder:
 //!   [`sv8_sample_decode::decode_sv8_grouped3_band`] (case 2 — 12
 //!   codewords, base-5-packed triplets over `-2..=2`),
 //!   [`sv8_sample_decode::decode_sv8_grouped2_band`] (cases 3..=4 —
-//!   18 codewords, signed-nibble pairs over `±band_type`), and
+//!   18 codewords, signed-nibble pairs over `±band_type`),
 //!   [`sv8_sample_decode::decode_sv8_context_band`] (cases 5..=8 —
 //!   one VLC per sample, table chosen per previous sample through a
-//!   caller-supplied context rule, the §3.4 GAP knob). The sparse
-//!   band (case 1) and large-coefficient escape (default arm) stay
-//!   DOCS-GAP and fail loudly.
+//!   caller-supplied context rule, the §3.4 GAP knob), and
+//!   [`sv8_sample_decode::decode_sv8_escape_band`] (default arm,
+//!   `band_type` 9..=17 — one VLC plus `band_type - 9` raw bits).
+//!   The sparse band (case 1) stays DOCS-GAP and fails loudly.
 //! - [`packet_stream`] — SV8 §3.1/§3.2 packet-stream walker on top
 //!   of [`framing::parse_packet_header`]. `PacketStream::new` takes
 //!   the post-`MPCK` slice plus a [`packet_stream::PacketSizeConvention`]

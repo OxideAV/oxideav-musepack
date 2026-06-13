@@ -8,6 +8,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 288** — SV8 §3.4 classifier-driven band dispatcher
+  `sv8_band_decode::decode_sv8_band`: the single entry point that
+  routes one band through the round-245 `sv8_band_type_case`
+  classifier to its matching per-arm decoder, composing the grounded
+  arms that earlier rounds wired one at a time.
+  - CNS (`-1`) / empty (`0`) reuse the SV7-shared `fill_cns_band` /
+    `fill_zero_band`; grouped (`2`, `3..=4`) and context (`5..=8`)
+    call `sv8_sample_decode`'s decoders with their `[i8; 36]` output
+    loss-free-widened; escape (`9..=17`) passes
+    `decode_sv8_escape_band`'s native `[i32; 36]` through. All arms
+    unify on an `[i32; 36]` output.
+  - Context knobs the staged tables do not pin (`grouped_ctx`,
+    `initial_ctx` + `ctx_for_prev`) are threaded through verbatim as
+    caller knobs.
+  - Fail-loud, never silently-wrong: the sparse band (case 1) stays a
+    DOCS-GAP (the staged `sv8-symbols-q1` 19-symbol alphabet cannot
+    carry an 18-flag bitmap) and the `OutOfRange` catch-all
+    (`band_type < -1`) both return `Error::UnsupportedBandType`.
+  - 10 new unit tests (crate lib total `250 → 259`): each routed arm
+    vs its direct per-arm decoder as oracle, the `grouped_ctx` knob
+    reaching only the case-2 table-half, and both fail-loud arms.
 - **Round 284** — SV8 §3.4 large-coefficient escape (`default` arm,
   `band_type` 9..=17) in `sv8_sample_decode`, closing the arm round
   281 had left as unpinned. The "fixed number of raw bits" is

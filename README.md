@@ -125,6 +125,46 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
 
+## Round 288 — SV8 §3.4 classifier-driven band dispatcher
+
+Round 288 lands `sv8_band_decode::decode_sv8_band`, the single
+entry point that walks one SV8 band from its `band_type` alone:
+route through the round-245 `sv8_band_type_case` classifier, then
+call the matching per-arm decoder. It composes the grounded arms
+that earlier rounds wired one at a time —
+
+- `band_type == -1` (CNS) and `0` (empty) → the SV7-shared
+  `fill_cns_band` / `fill_zero_band`;
+- `2` (Grouped3), `3..=4` (Grouped2), `5..=8` (context) →
+  `sv8_sample_decode`'s grouped/context decoders, their `[i8; 36]`
+  output loss-free-widened into the dispatcher's unified buffer;
+- `9..=17` (escape) → `decode_sv8_escape_band`'s native `[i32; 36]`,
+  passed through unwidened.
+
+All arms unify on an `[i32; 36]` output (the widest of the two
+per-arm output types). The context knobs the staged tables do not
+pin (`grouped_ctx` for the case-2 table-half pick; `initial_ctx` +
+`ctx_for_prev` for the case-5..8 first-order context) are threaded
+through verbatim as caller knobs — the dispatcher makes no choice
+the staged material does not already determine.
+
+**Fail-loud, never silently-wrong:** the sparse band (case 1)
+stays a DOCS-GAP — the staged `sv8-symbols-q1` map is a 19-symbol
+alphabet (`0..=18`) that cannot literally carry the §3.4 "flags for
+18 samples" bitmap (which needs 2¹⁸ symbols), so its symbol →
+flag-pattern mapping is underdetermined; the dispatcher returns
+`Error::UnsupportedBandType(1)`. The `OutOfRange` catch-all
+(`band_type < -1`) is likewise promoted from the classifier's
+fail-quiet `case_emits_samples == false` to a hard error.
+
+10 new unit tests across `sv8_band_decode::tests` cover: each
+routed arm against its direct per-arm decoder as the oracle (CNS
+PRNG-advance equality, empty zero-fill + zero-bit-read, grouped3 /
+context widening, escape pass-through at band_type 9 and the
+`(sym << 1) | raw` composition at band_type 10); the `grouped_ctx`
+knob reaching only the case-2 table-half pick; and both fail-loud
+arms. Crate lib test count `250 → 259`.
+
 ## Round 284 — SV8 §3.4 large-coefficient escape (default arm)
 
 Round 284 closes the §3.4 `default` arm ("for each sample, read a
