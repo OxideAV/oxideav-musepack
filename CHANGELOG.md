@@ -8,6 +8,25 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 307** — SV8 §3.5 frame-body DSCF delta-loop walk in a new
+  `sv8_dscf_loop` module, the per-band delta-scalefactor read that runs
+  after the round-301 SCFI selector, feeding off the staged
+  `sv8-canonical-dscf-{1,2}` context pair:
+  - `decode_dscf_deltas` walks a caller-supplied `deltas_per_band`
+    slice, reading that many `sv8-canonical-dscf-{1,2}` canonical-Huffman
+    codewords per band in ascending band order, returning one inner
+    `Vec<RawDscfVlc>` per band.
+  - Three §3.5 conventions stay DOCS-GAP and are threaded as caller
+    knobs: the per-band delta count (1..=3, GAP because the SV8 SCFI
+    value → count table is GAP — `scfi-2` spans `0..=15`); the
+    `dscf-1`/`dscf-2` context-selection rule (caller `ctx_for_prev_dscf`
+    closure + `initial_ctx`, context carrying across band boundaries; an
+    out-of-range context yields `Error::UnsupportedBandType(i8::MIN)`);
+    and the DSCF symbol → signed-delta centring offset (the `dscf-{1,2}`
+    maps are unsigned `0..=63` / `0..=64`, unlike SV7's directly-signed
+    `-7..=8`), kept honest by the `RawDscfVlc` newtype (the SV8 DSCF
+    sibling of `RawScfiVlc` / `RawResVlc`).
+  - 14 unit tests (crate lib total `283 → 297`).
 - **Round 301** — SV8 §3.5 frame-body SCFI-selector header walk in a
   new `sv8_scf_header` module, the per-non-zero-band SCF-coding-method
   selector read that precedes the (still-GAP) DSCF delta walk, feeding

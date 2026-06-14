@@ -156,6 +156,15 @@
 //!   GAP `res`-symbol (`0..=16`) → §3.4 `band_type` (`-1..=17`) remap
 //!   honest — the SV8 sibling of
 //!   [`sv7_band_header::RawBandTypeVlc`].
+//! - [`sv8_scf_header`] / [`sv8_dscf_loop`] — SV8 §3.5 scalefactor
+//!   layer: [`sv8_scf_header::decode_scfi_selectors`] reads the
+//!   per-band SCFI selector VLC, then
+//!   [`sv8_dscf_loop::decode_dscf_deltas`] reads the per-band DSCF
+//!   deltas (1..=3 per band, count caller-supplied since the SV8 SCFI
+//!   → granule schedule is GAP). Each raw value is wrapped in
+//!   [`sv8_scf_header::RawScfiVlc`] / [`sv8_dscf_loop::RawDscfVlc`] to
+//!   keep the GAP SCFI-value → schedule and DSCF-symbol → signed-delta
+//!   centring mappings honest.
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
@@ -180,6 +189,7 @@ pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
+pub mod sv8_dscf_loop;
 pub mod sv8_huffman;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;

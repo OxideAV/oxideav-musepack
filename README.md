@@ -20,8 +20,8 @@ the public API today surfaces the crate-local `Error` placeholder
 plus the wired `requant`, `framing`, `huffman`, `cns`,
 `sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`,
 `packet_stream`, `typed_packet`, `stream_shape`, `sv8_band_decode`,
-`sv8_huffman`, `sv8_sample_decode`, `sv8_band_header`, and
-`sv8_scf_header` modules (see below).
+`sv8_huffman`, `sv8_sample_decode`, `sv8_band_header`,
+`sv8_scf_header`, and `sv8_dscf_loop` modules (see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
 
@@ -125,6 +125,49 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **SV8 packet payload field maps** — same blocker as round 194.
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
+
+## Round 307 — SV8 §3.5 frame-body DSCF delta-loop walk
+
+Round 307 lands the new `sv8_dscf_loop` module: the §3.5 per-band
+**DSCF delta read** that runs after the round-301 SCFI selector and
+completes the structural shape of the SV8 scalefactor layer (selector
+→ per-granule deltas, reset at band boundaries). Reads only
+`docs/audio/musepack/`:
+
+- `decode_dscf_deltas` walks a caller-supplied `deltas_per_band`
+  slice, reading that many `sv8-canonical-dscf-{1,2}` canonical-Huffman
+  codewords per band (round-278 walk) in ascending band order, and
+  returns one inner `Vec<RawDscfVlc>` per band. The `dscf` table
+  `.meta` `spec_role` pins these as the "§3.5 delta-scalefactor (DSCF)"
+  context pair.
+
+Three §3.5 conventions stay **DOCS-GAP** and are threaded as caller
+knobs (the established `decode_scfi_selectors` precedent) rather than
+guessed:
+
+- The **per-band delta count (1..=3).** §2.4 ties the count to the
+  SCFI coding-method value, but the SV8 SCFI value → (count,
+  granule-mapping) table is itself GAP (`scfi-2` spans `0..=15`, not
+  the four-value SV7 schedule), so the count is supplied per band
+  rather than derived.
+- The **`dscf-1` vs `dscf-2` context-selection rule** — a
+  caller-supplied `ctx_for_prev_dscf` closure + `initial_ctx`; an
+  out-of-range context yields `Error::UnsupportedBandType(i8::MIN)`.
+  The context carries across band boundaries (§3.5 resets only the
+  base index there, not the entropy context).
+- The **DSCF symbol → signed-delta centring offset** (`dscf-{1,2}`
+  maps are unsigned `0..=63` / `0..=64`, unlike SV7's directly-signed
+  `-7..=8`); the raw value is confined in `RawDscfVlc` (the SV8 DSCF
+  sibling of `RawScfiVlc` / `RawResVlc`) until the offset is pinned.
+
+14 new unit tests cover single-delta decode against each context half,
+the worst-case three-delta band, multi-band varying counts, context
+switching within a band and across a band boundary, the empty/zero
+no-op paths, both context-fault paths, EOF propagation, the raw-newtype
+round-trip, and the sentinel-domain pin. Total crate lib test count
+`283 → 297`. `cargo test`, `cargo clippy --all-targets --no-deps --
+-D warnings`, and `cargo fmt --check` are all green under
+`CARGO_TARGET_DIR=/tmp/oxideav-musepack-r307-target`.
 
 ## Round 301 — SV8 §3.5 frame-body SCFI-selector header walk
 
