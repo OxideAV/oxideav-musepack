@@ -182,6 +182,7 @@ pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_huffman;
 pub mod sv8_sample_decode;
+pub mod sv8_scf_header;
 pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from

@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 301** — SV8 §3.5 frame-body SCFI-selector header walk in a
+  new `sv8_scf_header` module, the per-non-zero-band SCF-coding-method
+  selector read that precedes the (still-GAP) DSCF delta walk, feeding
+  off the staged `sv8-canonical-scfi-{1,2}` context pair:
+  - `decode_scfi_selectors` walks `nbands` coded bands, reading one
+    `sv8-canonical-scfi-{1,2}` canonical-Huffman codeword each in
+    ascending band order. The `scfi-1`/`scfi-2` context-pair selection
+    rule is a §3.5 DOCS-GAP, threaded as a caller-supplied
+    `ctx_for_prev_scfi` closure + `initial_ctx` (the same caller-knob
+    precedent `sv8_band_header::decode_band_resolutions` uses); an
+    out-of-range context yields `Error::UnsupportedBandType(i8::MIN)`
+    (the reserved `CONTEXT_FAULT_SENTINEL`, distinct from any genuine
+    band_type).
+  - Each raw SCFI value is wrapped in `RawScfiVlc` (the SV8 SCFI sibling
+    of `sv8_band_header::RawResVlc`) so the GAP SCFI-value → granule
+    schedule semantics cannot be applied accidentally — the staged
+    `scfi-2` symbol map spans `0..=15`, which does **not** match the
+    four-value SV7 §2.4 SCFI schedule (`scf::ScfCodingMethod`)
+    cell-for-cell. The wrapper blocks feeding a raw value straight into
+    `ScfCodingMethod::from_raw` (which would reject every value `>3`).
+  - The SV8 SCFI-value → (count, granule-mapping) schedule, the
+    context-selection predicate, and the SV8 DSCF symbol → signed-delta
+    centring offset (`dscf-{1,2}` maps span an unsigned `0..=63`, unlike
+    SV7's directly-signed `-7..=8`) all stay DOCS-GAP and are documented
+    as such in the module header.
+  - 10 new unit tests (crate lib total `273 → 283`): single-band decode
+    against each context half, two-band context switching with the
+    closure observed, zero-bands no-op, both context-fault paths
+    (out-of-range initial ctx + closure-returned ctx), EOF propagation,
+    the raw-newtype round-trip, and the sentinel-domain pin.
 - **Round 294** — SV8 §3.4 frame-body band-resolution header walk in
   a new `sv8_band_header` module, the outer loop that feeds the
   round-288 `sv8_band_decode::decode_sv8_band` per-band dispatcher:
