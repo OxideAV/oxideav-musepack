@@ -8,6 +8,33 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 294** — SV8 §3.4 frame-body band-resolution header walk in
+  a new `sv8_band_header` module, the outer loop that feeds the
+  round-288 `sv8_band_decode::decode_sv8_band` per-band dispatcher:
+  - `decode_used_subbands` reads one `sv8-canonical-bands` canonical-
+    Huffman codeword into a used-subbands count in
+    `0..=SV8_MAX_USED_SUBBANDS` (32, the §1 Layer-II subband bound),
+    rejecting an out-of-range count defensively.
+  - `decode_band_resolutions` walks `nbands` bands, reading one
+    `sv8-canonical-res-{1,2}` codeword each in ascending band order.
+    The `res-1`/`res-2` context-pair selection rule is a §3.4
+    DOCS-GAP, threaded as a caller-supplied `ctx_for_prev_res`
+    closure + `initial_ctx` (the same caller-knob precedent the
+    per-sample context arm `decode_sv8_context_band` uses); an
+    out-of-range context yields `Error::UnsupportedBandType(i8::MIN)`
+    (a reserved sentinel distinct from any genuine band_type).
+  - Each raw res value is wrapped in `RawResVlc` (the SV8 sibling of
+    `sv7_band_header::RawBandTypeVlc`) so the GAP `res`-symbol
+    (`0..=16`) → §3.4 `band_type` (`-1..=17`) remap cannot be applied
+    accidentally — only an explicit, not-yet-specified remap step may
+    consume the raw value.
+  - Per-channel ordering, the `res`→`band_type` remap, and whether
+    the count is clamped by an SH-packet `max_band` field all stay
+    DOCS-GAP and are documented as such in the module header.
+  - 14 new unit tests (crate lib total `259 → 273`): per-row count /
+    resolution decode against every staged `bands` / `res` codeword,
+    context switching driven by the previous res, both context-fault
+    paths, EOF propagation, and the raw-alphabet-confinement pin.
 - **Round 288** — SV8 §3.4 classifier-driven band dispatcher
   `sv8_band_decode::decode_sv8_band`: the single entry point that
   routes one band through the round-245 `sv8_band_type_case`

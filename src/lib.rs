@@ -135,19 +135,36 @@
 //!   (`Bands`, `Res-{1,2}`, `Scfi-{1,2}`, `Dscf-{1,2}`, `Q1`,
 //!   `Q2-{1,2}`, `Q3`, `Q4`, `Q5-{1,2}`..`Q8-{1,2}`, `Q9up`) plus
 //!   a [`sv8_huffman::Sv8TableRole`] enum + first-order context
-//!   dispatcher [`sv8_huffman::table_for_role`]. The cumulative-
-//!   index → symbol-index decoder walk is a structural §3.4
-//!   DOCS-GAP and is not wired this round — see the module-level
-//!   docs for the spec gap.
+//!   dispatcher [`sv8_huffman::table_for_role`], plus the
+//!   cumulative-index → symbol-index canonical-Huffman decode walk
+//!   ([`sv8_huffman::Sv8CanonicalTable::decode`]) derived from the
+//!   staged numeric facts (the per-row sub-index arithmetic
+//!   `index = (cum_index − (peek16 >> (16 − length))) mod 256`,
+//!   proven to tile every staged symbol map bijectively over all
+//!   2^16 peeks) — see the module-level docs for the derivation.
+//! - [`sv8_band_header`] — SV8 §3.4 frame-body band-resolution
+//!   header walk: [`sv8_band_header::decode_used_subbands`] reads the
+//!   `sv8-canonical-bands` VLC into a used-subbands count
+//!   (`0..=`[`sv8_band_header::SV8_MAX_USED_SUBBANDS`]`, the §1
+//!   Layer-II 32-subband bound), and
+//!   [`sv8_band_header::decode_band_resolutions`] walks that many
+//!   bands reading one `sv8-canonical-res-{1,2}` VLC each (the
+//!   context-pair pick is the §3.4 GAP, threaded as a caller-supplied
+//!   `ctx_for_prev_res` closure mirroring
+//!   [`sv8_sample_decode::decode_sv8_context_band`]). Each raw res
+//!   value is wrapped in [`sv8_band_header::RawResVlc`] to keep the
+//!   GAP `res`-symbol (`0..=16`) → §3.4 `band_type` (`-1..=17`) remap
+//!   honest — the SV8 sibling of
+//!   [`sv7_band_header::RawBandTypeVlc`].
 //!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
-//! packing, the SV8 canonical-Huffman cumulative-index decoder
-//! walk (tables now wired via [`sv8_huffman`]; the per-row
-//! sub-index arithmetic remains §3.4 DOCS-GAP), the SCF index →
-//! gain anchor for §2.6, and the synthesis filterbank are still
-//! pending. See `CHANGELOG.md` `[Unreleased]` for the gap list.
+//! packing, the GAP `res`/`band_type` remap and res-context
+//! selection rule the [`sv8_band_header`] walker threads as caller
+//! knobs, the SCF index → gain anchor for §2.6, and the synthesis
+//! filterbank are still pending. See `CHANGELOG.md` `[Unreleased]`
+//! for the gap list.
 
 #![forbid(unsafe_code)]
 
@@ -162,6 +179,7 @@ pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod sv8_band_decode;
+pub mod sv8_band_header;
 pub mod sv8_huffman;
 pub mod sv8_sample_decode;
 pub mod typed_packet;

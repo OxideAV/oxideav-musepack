@@ -20,7 +20,8 @@ the public API today surfaces the crate-local `Error` placeholder
 plus the wired `requant`, `framing`, `huffman`, `cns`,
 `sv7_band_decode`, `reconstruct`, `scf`, `sv7_band_header`,
 `packet_stream`, `typed_packet`, `stream_shape`, `sv8_band_decode`,
-`sv8_huffman`, and `sv8_sample_decode` modules (see below).
+`sv8_huffman`, `sv8_sample_decode`, and `sv8_band_header` modules
+(see below).
 
 ## Docs status (round 191 — NEWLY UNBLOCKED)
 
@@ -124,6 +125,46 @@ input. Total crate test count `67 → 85`. `cargo test`,
 - **SV8 packet payload field maps** — same blocker as round 194.
 - **M/S undo + 32-band polyphase synthesis filter** — downstream
   of per-band sample reconstruction; deferred.
+
+## Round 294 — SV8 §3.4 frame-body band-resolution header walk
+
+Round 294 lands the new `sv8_band_header` module: the §3.4
+audio-packet frame-body **outer loop** that decides how many
+subbands are coded and the per-band resolution, feeding the
+round-288 `sv8_band_decode::decode_sv8_band` per-band dispatcher.
+Reads only `docs/audio/musepack/`:
+
+- `decode_used_subbands` reads one `sv8-canonical-bands`
+  canonical-Huffman codeword (round-278 walk) into a used-subbands
+  count in `0..=SV8_MAX_USED_SUBBANDS` (32 — the §1 Layer-II
+  subband bound). The `bands` table's `.meta` `spec_role` pins this
+  as the "number-of-used-subbands" selector; its shortest codeword
+  decodes to `0` (no coded bands).
+- `decode_band_resolutions` walks `nbands` bands, reading one
+  `sv8-canonical-res-{1,2}` codeword each in ascending band order
+  and returning the raw VLC value of each wrapped in `RawResVlc`.
+
+Three §3.4 conventions stay **DOCS-GAP** and are threaded as caller
+knobs (the established `decode_sv8_context_band` precedent) rather
+than guessed:
+
+- the `res-1`/`res-2` context-pair selection rule → a
+  caller-supplied `ctx_for_prev_res` closure + `initial_ctx`
+  (out-of-range context → `Error::UnsupportedBandType(i8::MIN)`, a
+  reserved sentinel);
+- the raw `res`-symbol (`0..=16`) → §3.4 `band_type` (`-1..=17`)
+  remap, kept honest by the `RawResVlc` newtype (the SV8 sibling of
+  `sv7_band_header::RawBandTypeVlc`) so it cannot be applied
+  accidentally;
+- per-channel ordering and any SH-packet `max_band` clamp on the
+  count — left to a future round once the §3.2 SH field map and the
+  channel-loop shape are pinned.
+
+14 new unit tests (crate lib total `259 → 273`): per-row count /
+resolution decode against every staged `bands` / `res` codeword,
+context switching driven by the previous res, both context-fault
+paths, EOF propagation, and the raw-`0..=16`-alphabet pin.
+`cargo test` / `fmt --check` / `clippy -D warnings` all green.
 
 ## Round 288 — SV8 §3.4 classifier-driven band dispatcher
 
