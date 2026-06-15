@@ -38,6 +38,12 @@
 //! - **Empty** (band_type == 0): trivially fill 36 zeros.
 //! - **CNS** (band_type == -1): 36 samples drawn from the existing
 //!   `CnsPrng` (range -510..=510 per `cns-prng-params.meta` notes).
+//! - **Grouped3** (band_type == 1, 12 VLCs → 36 samples, 3 per VLC):
+//!   each `sv7-huffman-q1` codeword `value` is a base-3-packed
+//!   triplet (see [`unpack_grouped3_value`]).
+//! - **Grouped2** (band_type == 2, 18 VLCs → 36 samples, 2 per VLC):
+//!   each `sv7-huffman-q2` codeword `value` is a base-5-packed pair
+//!   (see [`unpack_grouped2_value`]).
 //! - **HuffmanPerSample** (band_type 3..=7): one Q{band_type}
 //!   Huffman codeword per sample, context-selected. The Q3..Q7
 //!   tables already produce signed `i8` levels covering the spec's
@@ -48,25 +54,51 @@
 //!   in `i32` (so the §2.6 reconstruction can centre it by
 //!   subtracting `D = QUANTIZER_OFFSET_D[band_type + 1]`).
 //!
-//! # Cases NOT implemented this round (DOCS-GAP)
+//! # Grouped-codeword fan-out — grounded from the staged facts
 //!
-//! - **Grouped3** (band_type == 1, 12 VLCs → 36 samples, 3 per VLC)
-//! - **Grouped2** (band_type == 2, 18 VLCs → 36 samples, 2 per VLC)
+//! The §2.5 structural prose names the grouped cases ("read 12 VLCs
+//! to produce the 36 samples" / "read 18 VLCs … 2 samples per
+//! codeword") but the prose alone does not pin how one codeword
+//! `value` expands into 3 (resp. 2) signed sample levels. That
+//! arithmetic is nevertheless uniquely determined by the staged
+//! Feist facts, by the same tiling argument the SV8 grouped round
+//! used (`sv8_sample_decode`):
 //!
-//! The §2.5 structural prose names the case but does not specify the
-//! per-codeword **sample-unpack** convention — how a single `i8`
-//! codeword expands into 3 (or 2) signed sample levels. That fact
-//! lives only in the walled Trac `SV7Specification` page and the
-//! decoder source, both forbidden. The dispatcher classifier
-//! [`band_type_case`] returns the right enum variant for these
-//! cases; the dispatcher itself returns
-//! [`Error::UnsupportedBandType`] when asked to actually decode
-//! one — fail-loud, not silently-wrong.
+//! - `sv7-huffman-q1` carries exactly 27 distinct `value`s spanning
+//!   `0..=26` in each context half; `requant-quantizer-offset-Dc`
+//!   pins band_type 1 to `D = 1` (steps `= 2D+1 = 3`). The only
+//!   composition consistent with "3 samples per codeword" and 3
+//!   levels per sample is a **base-3-packed triplet**: digit value =
+//!   sample + D = sample + 1, samples in `-1..=1`. The all-zero
+//!   triplet maps to value `13 = 1·9 + 1·3 + 1`, which is the
+//!   shortest-code (most-probable) entry in the q1 ctx-0 table —
+//!   confirming the centring.
+//! - `sv7-huffman-q2` carries exactly 25 distinct `value`s spanning
+//!   `0..=24`; band_type 2 has `D = 2` (steps `= 5`). The unique
+//!   composition is a **base-5-packed pair**: digit value =
+//!   sample + 2, samples in `-2..=2`. The all-zero pair maps to
+//!   value `12 = 2·5 + 2`, the shortest-code q2 ctx-0 entry.
+//!
+//! This mirrors the SV8 case-2 base-5 grouped3 unpack exactly (only
+//! the radix differs: SV7 q1 is base-3, q2 base-5), and is further
+//! backed by the §3.6 lossless SV7↔SV8 relationship — the two
+//! versions carry numerically-identical quantised coefficients and
+//! differ only in framing + entropy coding.
+//!
+//! The one convention the staged values cannot pin (both digit
+//! orderings are bijections onto the same value range) is the
+//! **within-group emission order** — which radix digit is the first
+//! of the consecutive samples. This module emits
+//! **least-significant digit first**, the same choice
+//! `sv8_sample_decode` made; it is isolated inside the two
+//! [`unpack_grouped3_value`] / [`unpack_grouped2_value`] helpers so a
+//! future observer trace pinning the opposite order is a one-line
+//! flip.
 
 use crate::cns::CnsPrng;
 use crate::huffman::{
-    decode as huffman_decode, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx,
-    Sv7BitReader,
+    decode as huffman_decode, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx,
+    sv7_q6_ctx, sv7_q7_ctx, Sv7BitReader,
 };
 use crate::requant::band_type_to_res_bits;
 use crate::{Error, Result};
@@ -84,12 +116,13 @@ pub enum BandDecodeCase {
     Cns,
     /// `band_type == 0`: empty band. Decoder fills 36 zeros.
     Empty,
-    /// `band_type == 1`: grouped, 3 samples per Huffman codeword.
-    /// **DOCS-GAP**: per-codeword unpack convention unspecified in
-    /// the structural §2.5 prose.
+    /// `band_type == 1`: grouped, 3 samples per Huffman codeword
+    /// (`sv7-huffman-q1` value = base-3-packed triplet, see
+    /// [`decode_grouped3_band`]).
     Grouped3,
-    /// `band_type == 2`: grouped, 2 samples per Huffman codeword.
-    /// **DOCS-GAP**: per-codeword unpack convention unspecified.
+    /// `band_type == 2`: grouped, 2 samples per Huffman codeword
+    /// (`sv7-huffman-q2` value = base-5-packed pair, see
+    /// [`decode_grouped2_band`]).
     Grouped2,
     /// `band_type == 3..=7`: one Huffman codeword per sample, table
     /// `Q{band_type}` (each a `[2][N]` context-pair).
@@ -136,6 +169,104 @@ pub fn fill_zero_band(out: &mut [i32; SAMPLES_PER_BAND]) {
 #[inline]
 pub fn fill_cns_band(prng: &mut CnsPrng, out: &mut [i32; SAMPLES_PER_BAND]) {
     prng.fill_samples(out);
+}
+
+/// Number of grouped codewords a case-1 band reads (12 codewords ×
+/// 3 samples each = 36 samples).
+pub const GROUPED3_CODEWORDS_PER_BAND: usize = 12;
+
+/// Number of grouped codewords a case-2 band reads (18 codewords ×
+/// 2 samples each = 36 samples).
+pub const GROUPED2_CODEWORDS_PER_BAND: usize = 18;
+
+/// Unpack one §2.5 case-1 grouped codeword `value` into its three
+/// consecutive samples.
+///
+/// The `sv7-huffman-q1` table carries exactly 27 distinct values
+/// spanning `0..=26` (band_type 1, `D = 1`, 3 levels per sample), so
+/// a value is a **base-3-packed triplet** with digit value =
+/// sample + 1, i.e. samples in `-1..=1`. The all-zero triplet maps
+/// to value `13`. See the module-level "Grouped-codeword fan-out"
+/// note for the grounding and the emission-order convention
+/// (least-significant digit first).
+///
+/// Values outside `0..=26` yield [`Error::GroupedSymbolOutOfRange`]
+/// (unreachable when the value comes from `decode`-ing the staged q1
+/// table, whose value alphabet the tests confine to `0..=26`; kept
+/// as a defensive bound).
+pub fn unpack_grouped3_value(value: i8) -> Result<[i8; 3]> {
+    if !(0..=26).contains(&value) {
+        return Err(Error::GroupedSymbolOutOfRange(value));
+    }
+    let v = value as i32;
+    Ok([(v % 3 - 1) as i8, (v / 3 % 3 - 1) as i8, (v / 9 - 1) as i8])
+}
+
+/// Unpack one §2.5 case-2 grouped codeword `value` into its two
+/// consecutive samples.
+///
+/// The `sv7-huffman-q2` table carries exactly 25 distinct values
+/// spanning `0..=24` (band_type 2, `D = 2`, 5 levels per sample), so
+/// a value is a **base-5-packed pair** with digit value = sample + 2,
+/// i.e. samples in `-2..=2`. The all-zero pair maps to value `12`.
+/// Emission order: least-significant digit first.
+///
+/// Values outside `0..=24` yield [`Error::GroupedSymbolOutOfRange`]
+/// (defensive bound; unreachable for values drawn from the staged q2
+/// table).
+pub fn unpack_grouped2_value(value: i8) -> Result<[i8; 2]> {
+    if !(0..=24).contains(&value) {
+        return Err(Error::GroupedSymbolOutOfRange(value));
+    }
+    let v = value as i32;
+    Ok([(v % 5 - 2) as i8, (v / 5 - 2) as i8])
+}
+
+/// Decode 36 samples for a band whose `band_type == 1` (case
+/// "Grouped3"): 12 `sv7-huffman-q1` codewords from the `ctx`-selected
+/// half of the staged `[2][27]` table, each fanned out into 3
+/// consecutive samples via [`unpack_grouped3_value`].
+///
+/// `ctx` must be `0` or `1`; any other value yields
+/// [`Error::UnsupportedBandType`] (`band_type` `1`), the same
+/// fail-loud channel `decode_huffman_band` uses.
+pub fn decode_grouped3_band(
+    reader: &mut Sv7BitReader<'_>,
+    ctx: usize,
+    out: &mut [i8; SAMPLES_PER_BAND],
+) -> Result<()> {
+    if ctx > 1 {
+        return Err(Error::UnsupportedBandType(1));
+    }
+    let table = sv7_q1_ctx(ctx);
+    for group in out.chunks_exact_mut(3) {
+        let value = huffman_decode(reader, table)?;
+        group.copy_from_slice(&unpack_grouped3_value(value)?);
+    }
+    Ok(())
+}
+
+/// Decode 36 samples for a band whose `band_type == 2` (case
+/// "Grouped2"): 18 `sv7-huffman-q2` codewords from the `ctx`-selected
+/// half of the staged `[2][25]` table, each fanned out into 2
+/// consecutive samples via [`unpack_grouped2_value`].
+///
+/// `ctx` must be `0` or `1`; any other value yields
+/// [`Error::UnsupportedBandType`] (`band_type` `2`).
+pub fn decode_grouped2_band(
+    reader: &mut Sv7BitReader<'_>,
+    ctx: usize,
+    out: &mut [i8; SAMPLES_PER_BAND],
+) -> Result<()> {
+    if ctx > 1 {
+        return Err(Error::UnsupportedBandType(2));
+    }
+    let table = sv7_q2_ctx(ctx);
+    for group in out.chunks_exact_mut(2) {
+        let value = huffman_decode(reader, table)?;
+        group.copy_from_slice(&unpack_grouped2_value(value)?);
+    }
+    Ok(())
 }
 
 /// Decode 36 samples for a band whose `band_type` is in `3..=7`
@@ -264,6 +395,250 @@ mod tests {
 
         // Both walks must have advanced the PRNG by the same amount.
         assert_eq!(prng_a.state(), prng_b.state());
+    }
+
+    // ─── Grouped value unpack (cases 1, 2) ─────────────────
+
+    #[test]
+    fn unpack_grouped3_value_covers_base3_triplet() {
+        // value 13 = 1*9 + 1*3 + 1 -> digits [1,1,1] -> [0,0,0].
+        assert_eq!(unpack_grouped3_value(13).unwrap(), [0, 0, 0]);
+        // Least-significant digit first: value 14 bumps the first
+        // sample only (digit0 1->2 -> sample -1->0... wait centred):
+        // 14 = 1*9 + 1*3 + 2 -> [2-1, 1-1, 1-1] = [1, 0, 0].
+        assert_eq!(unpack_grouped3_value(14).unwrap(), [1, 0, 0]);
+        // 12 = 1*9 + 1*3 + 0 -> [-1, 0, 0].
+        assert_eq!(unpack_grouped3_value(12).unwrap(), [-1, 0, 0]);
+        // 16 = 1*9 + 2*3 + 1 -> [0, 1, 0].
+        assert_eq!(unpack_grouped3_value(16).unwrap(), [0, 1, 0]);
+        // 10 = 1*9 + 0*3 + 1 -> [0, -1, 0].
+        assert_eq!(unpack_grouped3_value(10).unwrap(), [0, -1, 0]);
+        // 22 = 2*9 + 1*3 + 1 -> [0, 0, 1].
+        assert_eq!(unpack_grouped3_value(22).unwrap(), [0, 0, 1]);
+        // 4 = 0*9 + 1*3 + 1 -> [0, 0, -1].
+        assert_eq!(unpack_grouped3_value(4).unwrap(), [0, 0, -1]);
+        // Corners.
+        assert_eq!(unpack_grouped3_value(0).unwrap(), [-1, -1, -1]);
+        assert_eq!(unpack_grouped3_value(26).unwrap(), [1, 1, 1]);
+    }
+
+    #[test]
+    fn unpack_grouped3_value_is_a_bijection_onto_minus1_to_1_cubed() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for v in 0_i8..=26 {
+            let t = unpack_grouped3_value(v).unwrap();
+            for &s in &t {
+                assert!((-1..=1).contains(&s));
+            }
+            assert!(seen.insert(t), "duplicate triplet for value {v}");
+        }
+        assert_eq!(seen.len(), 27);
+    }
+
+    #[test]
+    fn unpack_grouped3_value_rejects_out_of_range() {
+        for v in [-1_i8, 27, 100, i8::MIN, i8::MAX] {
+            assert!(matches!(
+                unpack_grouped3_value(v),
+                Err(Error::GroupedSymbolOutOfRange(_)),
+            ));
+        }
+    }
+
+    #[test]
+    fn unpack_grouped2_value_covers_base5_pair() {
+        // value 12 = 2*5 + 2 -> [0, 0].
+        assert_eq!(unpack_grouped2_value(12).unwrap(), [0, 0]);
+        // 13 = 2*5 + 3 -> [1, 0]; 11 = 2*5 + 1 -> [-1, 0].
+        assert_eq!(unpack_grouped2_value(13).unwrap(), [1, 0]);
+        assert_eq!(unpack_grouped2_value(11).unwrap(), [-1, 0]);
+        // 17 = 3*5 + 2 -> [0, 1]; 7 = 1*5 + 2 -> [0, -1].
+        assert_eq!(unpack_grouped2_value(17).unwrap(), [0, 1]);
+        assert_eq!(unpack_grouped2_value(7).unwrap(), [0, -1]);
+        // Corners.
+        assert_eq!(unpack_grouped2_value(0).unwrap(), [-2, -2]);
+        assert_eq!(unpack_grouped2_value(24).unwrap(), [2, 2]);
+    }
+
+    #[test]
+    fn unpack_grouped2_value_is_a_bijection_onto_minus2_to_2_squared() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for v in 0_i8..=24 {
+            let p = unpack_grouped2_value(v).unwrap();
+            for &s in &p {
+                assert!((-2..=2).contains(&s));
+            }
+            assert!(seen.insert(p), "duplicate pair for value {v}");
+        }
+        assert_eq!(seen.len(), 25);
+    }
+
+    #[test]
+    fn unpack_grouped2_value_rejects_out_of_range() {
+        for v in [-1_i8, 25, 100, i8::MIN, i8::MAX] {
+            assert!(matches!(
+                unpack_grouped2_value(v),
+                Err(Error::GroupedSymbolOutOfRange(_)),
+            ));
+        }
+    }
+
+    /// Pack `count` repetitions of one left-justified `(code, length)`
+    /// Huffman codeword MSB-first, then 2 zero tail bytes so `peek16`
+    /// never runs dry mid-decode.
+    fn pack_codeword(code: u16, length: u8, count: usize) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        let mut acc: u16 = 0;
+        let mut nbits: u8 = 0;
+        for _ in 0..count {
+            for i in 0..length {
+                let bit = (code >> (15 - i)) & 1;
+                acc = (acc << 1) | bit;
+                nbits += 1;
+                if nbits == 8 {
+                    bits.push(acc as u8);
+                    acc = 0;
+                    nbits = 0;
+                }
+            }
+        }
+        if nbits > 0 {
+            bits.push((acc << (8 - nbits)) as u8);
+        }
+        bits.push(0);
+        bits.push(0);
+        bits
+    }
+
+    // ─── Grouped3 band (case 1) ────────────────────────────
+
+    #[test]
+    fn decode_grouped3_band_all_zero_triplets() {
+        // The all-zero triplet is value 13; its q1 ctx-0 codeword is
+        // the shortest (length-3) entry. Drive 12 of them -> 36 zeros.
+        let entry = sv7_q1_ctx(0)
+            .iter()
+            .find(|e| e.value == 13)
+            .copied()
+            .expect("value 13 present");
+        let bits = pack_codeword(entry.code, entry.length, GROUPED3_CODEWORDS_PER_BAND);
+        let mut reader = Sv7BitReader::new(&bits);
+        let mut out = [9_i8; SAMPLES_PER_BAND];
+        decode_grouped3_band(&mut reader, 0, &mut out).expect("decode");
+        assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn decode_grouped3_band_max_triplets_both_contexts() {
+        // value 26 -> [1,1,1]; verify on both context halves.
+        for ctx in 0..=1 {
+            let entry = sv7_q1_ctx(ctx)
+                .iter()
+                .find(|e| e.value == 26)
+                .copied()
+                .expect("value 26 present");
+            let bits = pack_codeword(entry.code, entry.length, GROUPED3_CODEWORDS_PER_BAND);
+            let mut reader = Sv7BitReader::new(&bits);
+            let mut out = [0_i8; SAMPLES_PER_BAND];
+            decode_grouped3_band(&mut reader, ctx, &mut out).expect("decode");
+            assert!(out.iter().all(|&s| s == 1), "ctx {ctx}");
+        }
+    }
+
+    #[test]
+    fn decode_grouped3_band_rejects_bad_ctx() {
+        let mut reader = Sv7BitReader::new(&[0u8; 8]);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_grouped3_band(&mut reader, 2, &mut out),
+            Err(Error::UnsupportedBandType(1)),
+        ));
+    }
+
+    #[test]
+    fn decode_grouped3_band_propagates_eof() {
+        // value 26 codeword once, then EOF before 12 codewords read.
+        let entry = sv7_q1_ctx(0)
+            .iter()
+            .find(|e| e.value == 26)
+            .copied()
+            .unwrap();
+        // Pack only 1 codeword, no tail padding -> peek16 underruns.
+        let mut bits: Vec<u8> = Vec::new();
+        let mut acc: u16 = 0;
+        let mut nbits: u8 = 0;
+        for i in 0..entry.length {
+            let bit = (entry.code >> (15 - i)) & 1;
+            acc = (acc << 1) | bit;
+            nbits += 1;
+            if nbits == 8 {
+                bits.push(acc as u8);
+                acc = 0;
+                nbits = 0;
+            }
+        }
+        if nbits > 0 {
+            bits.push((acc << (8 - nbits)) as u8);
+        }
+        let mut reader = Sv7BitReader::new(&bits);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_grouped3_band(&mut reader, 0, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── Grouped2 band (case 2) ────────────────────────────
+
+    #[test]
+    fn decode_grouped2_band_all_zero_pairs() {
+        // value 12 -> [0,0]; q2 ctx-0 shortest entry. 18 of them ->
+        // 36 zeros.
+        let entry = sv7_q2_ctx(0)
+            .iter()
+            .find(|e| e.value == 12)
+            .copied()
+            .expect("value 12 present");
+        let bits = pack_codeword(entry.code, entry.length, GROUPED2_CODEWORDS_PER_BAND);
+        let mut reader = Sv7BitReader::new(&bits);
+        let mut out = [9_i8; SAMPLES_PER_BAND];
+        decode_grouped2_band(&mut reader, 0, &mut out).expect("decode");
+        assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn decode_grouped2_band_corner_pairs_both_contexts() {
+        // value 24 -> [2,2]; both context halves.
+        for ctx in 0..=1 {
+            let entry = sv7_q2_ctx(ctx)
+                .iter()
+                .find(|e| e.value == 24)
+                .copied()
+                .expect("value 24 present");
+            let bits = pack_codeword(entry.code, entry.length, GROUPED2_CODEWORDS_PER_BAND);
+            let mut reader = Sv7BitReader::new(&bits);
+            let mut out = [0_i8; SAMPLES_PER_BAND];
+            decode_grouped2_band(&mut reader, ctx, &mut out).expect("decode");
+            assert!(out.iter().all(|&s| s == 2), "ctx {ctx}");
+        }
+    }
+
+    #[test]
+    fn decode_grouped2_band_rejects_bad_ctx() {
+        let mut reader = Sv7BitReader::new(&[0u8; 8]);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_grouped2_band(&mut reader, 5, &mut out),
+            Err(Error::UnsupportedBandType(2)),
+        ));
+    }
+
+    #[test]
+    fn grouped_codeword_counts_tile_the_band() {
+        assert_eq!(GROUPED3_CODEWORDS_PER_BAND * 3, SAMPLES_PER_BAND);
+        assert_eq!(GROUPED2_CODEWORDS_PER_BAND * 2, SAMPLES_PER_BAND);
     }
 
     // ─── HuffmanPerSample (cases 3..=7) ────────────────────

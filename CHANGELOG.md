@@ -8,6 +8,43 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 314** — SV7 §2.5 grouped-codeword sample decode (cases 1
+  and 2) in `sv7_band_decode`, closing the two arms earlier rounds
+  left as fail-loud `UnsupportedBandType`. The per-codeword fan-out,
+  previously flagged DOCS-GAP, is uniquely determined by the same
+  staged Feist facts the SV8 grouped round (281) used:
+  - `sv7-huffman-q1` carries exactly 27 distinct `value`s spanning
+    `0..=26` per context; `requant-quantizer-offset-Dc` pins
+    band_type 1 to `D = 1` (3 levels/sample). The only composition
+    consistent with "3 samples per codeword" is a **base-3-packed
+    triplet** (digit = sample + 1, samples `-1..=1`); the all-zero
+    triplet is value `13`, the shortest-code q1 ctx-0 entry.
+  - `sv7-huffman-q2` carries exactly 25 `value`s spanning `0..=24`;
+    band_type 2 has `D = 2` (5 levels). The unique composition is a
+    **base-5-packed pair** (digit = sample + 2, samples `-2..=2`);
+    the all-zero pair is value `12`, the shortest-code q2 ctx-0
+    entry. The §3.6 lossless SV7↔SV8 relationship corroborates the
+    coefficient model.
+  - `unpack_grouped3_value(value) -> Result<[i8; 3]>` /
+    `unpack_grouped2_value(value) -> Result<[i8; 2]>` — pure unpack
+    helpers, defensive `Error::GroupedSymbolOutOfRange` outside the
+    `0..=26` / `0..=24` alphabet.
+  - `decode_grouped3_band(reader, ctx, out)` (12 q1 codewords) /
+    `decode_grouped2_band(reader, ctx, out)` (18 q2 codewords), each
+    fanned into the band's 36 samples from the `ctx`-selected
+    `[2][N]` table half; out-of-range `ctx` yields
+    `Error::UnsupportedBandType(1|2)`.
+  - `GROUPED3_CODEWORDS_PER_BAND = 12` /
+    `GROUPED2_CODEWORDS_PER_BAND = 18` constants.
+  - The one convention the staged values cannot pin — the
+    within-group emission order — is taken **least-significant
+    digit first** (matching `sv8_sample_decode`) and isolated inside
+    the two `unpack_*` helpers for a one-line flip if a future
+    observer trace pins the opposite order.
+  - 14 new unit tests (base-N hand-vectors, bijection-onto-`(-D..=D)^n`
+    proofs, alphabet-bound rejection, all-zero / corner band decodes
+    on both context halves, bad-ctx rejection, EOF propagation, and
+    the codeword-count tiling pin). Crate lib total `297 → 311`.
 - **Round 307** — SV8 §3.5 frame-body DSCF delta-loop walk in a new
   `sv8_dscf_loop` module, the per-band delta-scalefactor read that runs
   after the round-301 SCFI selector, feeding off the staged
