@@ -8,6 +8,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 325** — SV8 `SH` (Stream Header) packet payload field-map
+  decoder, new `sh_header` module. `StreamHeaderFields::parse(payload)`
+  decodes the spec (`spec/musepack-headers-and-coding.md` §2) layout:
+  the 32-bit CRC (surfaced verbatim, not validated), the version byte
+  (rejected via the new `Error::InvalidStreamVersion` unless it equals
+  8), the total / beginning-silence sample counts (byte-aligned varints
+  via the existing `parse_varint`), and the packed 16-bit tail
+  (sample-freq index, the −1-biased `max_band`, the −1-biased
+  `channels`, stream M/S, block power) read MSB-first off the
+  natural-order SV8 byte stream (§4, no SV7 word-swap). Helpers
+  `sample_rate_hz()` (index → {44100, 48000, 37800, 32000} Hz, `None`
+  outside the four defined indices) and `frames_per_audio_packet()`
+  (`2^(block_power × 2)`, §2 field 9). Wired to the typed-packet
+  surface as `StreamHeaderPacket::fields()`. 10 unit tests.
 - **Round 320** — SV7 §2.5 unified per-band sample-decode dispatcher
   `decode_sv7_band(reader, band_type, cns, ctx, out)` in
   `sv7_band_decode`, the SV7 sibling of the SV8

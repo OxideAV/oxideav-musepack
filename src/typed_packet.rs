@@ -41,20 +41,28 @@ use crate::packet_stream::PacketRef;
 
 /// Stream-header (`SH`) packet — first payload packet per spec §3.2.
 ///
-/// Holds the opaque payload slice. The per-field map (CRC, stream
-/// version 8, sample-rate index, max used bands, channel count,
-/// mid-side flag, total sample count + beginning/gapless silence)
-/// is GAP per spec §3.2 and is not decoded here.
+/// Holds the payload slice. The per-field map (CRC, stream version 8,
+/// sample-rate index, max used bands, channel count, mid-side flag,
+/// total sample count + beginning/gapless silence) is decoded by
+/// [`StreamHeaderPacket::fields`] per
+/// `docs/audio/musepack/spec/musepack-headers-and-coding.md` §2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamHeaderPacket<'a> {
     payload: &'a [u8],
 }
 
 impl<'a> StreamHeaderPacket<'a> {
-    /// Opaque payload bytes between the size varint and the next
-    /// packet's start.
+    /// Payload bytes between the size varint and the next packet's
+    /// start.
     pub fn payload_bytes(&self) -> &'a [u8] {
         self.payload
+    }
+
+    /// Decode the `SH` payload field-map (headers-and-coding §2) into
+    /// [`crate::sh_header::StreamHeaderFields`]. See that type for the
+    /// per-field errors.
+    pub fn fields(&self) -> crate::Result<crate::sh_header::StreamHeaderFields> {
+        crate::sh_header::StreamHeaderFields::parse(self.payload)
     }
 }
 

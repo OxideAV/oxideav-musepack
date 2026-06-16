@@ -189,6 +189,7 @@ pub mod packet_stream;
 pub mod reconstruct;
 pub mod requant;
 pub mod scf;
+pub mod sh_header;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
@@ -265,6 +266,11 @@ pub enum Error {
     /// "level 3 = 8 channels" SV8 upgrade) need a separate decode
     /// path that is not wired this round.
     ChannelCountInvalid(u8),
+    /// The SV8 `SH` stream-header packet declared a stream-version
+    /// byte other than the required value 8
+    /// (`spec/musepack-headers-and-coding.md` §2, field 2). The
+    /// offending value is included for diagnostic logging.
+    InvalidStreamVersion(u8),
 }
 
 impl core::fmt::Display for Error {
@@ -308,6 +314,10 @@ impl core::fmt::Display for Error {
             Error::ChannelCountInvalid(nch) => write!(
                 f,
                 "oxideav-musepack: channel count {nch} is not 1 (mono) or 2 (stereo) at the §2.3 band-header layer",
+            ),
+            Error::InvalidStreamVersion(v) => write!(
+                f,
+                "oxideav-musepack: SV8 SH stream-version byte {v} is not the required value 8",
             ),
         }
     }
