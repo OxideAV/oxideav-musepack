@@ -42,12 +42,17 @@
 //! - [`cns`] — CNS / noise-substitution two-LFSR PRNG and the
 //!   256-byte parity-of-popcount lookup that drives it
 //!   (`cns-prng-parity` + `cns-prng-params`).
-//! - [`sv7_band_decode`] — SV7 §2.5 per-band sample-decode dispatch
-//!   for the unambiguous cases (`-1` CNS / `0` empty / `3..=7`
-//!   Huffman-per-sample / `8..=17` linear-PCM escape) plus a
-//!   classifier enum covering every spec case (grouped cases `1` /
-//!   `2` are flagged but not wired — their per-codeword sample-
-//!   unpack convention is GAP in the structural prose).
+//! - [`sv7_band_decode`] — SV7 §2.5 per-band sample-decode. A
+//!   classifier enum ([`sv7_band_decode::BandDecodeCase`]) covers
+//!   every §2.5 case; per-arm decoders cover CNS (`-1`), empty
+//!   (`0`), grouped (`1` / `2`), Huffman-per-sample (`3..=7`), and
+//!   linear-PCM escape (`8..=17`); and the unified entry point
+//!   [`sv7_band_decode::decode_sv7_band`] walks the §2.5
+//!   `switch (band_type)` ladder end to end from `band_type` alone,
+//!   routing each arm to its decoder and unifying them on an
+//!   `[i32; 36]` output (the SV7 sibling of
+//!   [`sv8_band_decode::decode_sv8_band`]). `band_type` outside
+//!   `-1..=17` fails loud rather than silently zeroing the band.
 //! - [`reconstruct`] — SV7 §2.6 per-sample reconstruction
 //!   primitives (centring of PCM-escape raw levels by subtracting
 //!   `D`; per-band dequant multiply by `C / 65536`; CNS dequant

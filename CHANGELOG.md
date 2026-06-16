@@ -8,6 +8,33 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 320** — SV7 §2.5 unified per-band sample-decode dispatcher
+  `decode_sv7_band(reader, band_type, cns, ctx, out)` in
+  `sv7_band_decode`, the SV7 sibling of the SV8
+  `decode_sv8_band` dispatcher (round 288). It walks the §2.5
+  `switch (band_type)` ladder end to end from `band_type` alone,
+  routing through the existing `band_type_case` classifier to the
+  matching per-arm decoder and unifying every arm on an
+  `[i32; 36]` output:
+  - CNS (`-1`), empty (`0`), and linear-PCM escape (`8..=17`) arms
+    write the unified `[i32; 36]` buffer directly.
+  - The grouped (`1` / `2`) and per-sample Huffman (`3..=7`) arms
+    decode into a scratch `[i8; 36]` and are widened into the
+    buffer via the new `widen_into` helper (loss-free `i8 -> i32`).
+  - The single `ctx` context knob is threaded verbatim into the
+    table-pair arms; CNS / empty / PCM-escape ignore it; a
+    `ctx > 1` reaches the per-arm fail-loud
+    `Error::UnsupportedBandType` channel.
+  - `band_type` outside `-1..=17` (`BandDecodeCase::OutOfRange`)
+    returns `Error::UnsupportedBandType(band_type)` rather than
+    silently zeroing the band, matching the SV8 dispatcher's
+    fail-loud posture; EOF from any arm propagates unchanged.
+  - 10 new dispatcher tests (one per arm matched against its
+    direct per-arm decoder, PRNG-state advance on the CNS arm,
+    context threading, out-of-range / bad-ctx / EOF fail-loud).
+    No DOCS-GAP touched — pure composition of already-grounded
+    arms.
+
 - **Round 314** — SV7 §2.5 grouped-codeword sample decode (cases 1
   and 2) in `sv7_band_decode`, closing the two arms earlier rounds
   left as fail-loud `UnsupportedBandType`. The per-codeword fan-out,

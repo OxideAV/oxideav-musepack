@@ -49,9 +49,11 @@ Musepack ships in two incompatible stream-format generations:
 - `scf` — SV7 SCF coding-method decoder (SCFI selector + DSCF deltas).
 - `cns` — CNS / noise-substitution two-LFSR PRNG.
 - `sv7_band_decode` / `sv7_band_header` — SV7 per-band header loop and
-  sample-decode dispatch covering every §2.5 case: CNS, empty,
-  grouped (base-3 q1 triplets / base-5 q2 pairs), per-sample Huffman
-  (Q3..Q7), and the linear-PCM escape ladder.
+  sample-decode covering every §2.5 case: CNS, empty, grouped (base-3
+  q1 triplets / base-5 q2 pairs), per-sample Huffman (Q3..Q7), and the
+  linear-PCM escape ladder, all reachable through the unified
+  `decode_sv7_band` dispatcher that walks the §2.5 `switch (band_type)`
+  ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`).
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_scf_header` / `sv8_dscf_loop` — SV8 band-resolution walk,
   per-band sample-decode dispatcher (CNS / empty / grouped /

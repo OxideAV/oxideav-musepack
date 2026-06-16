@@ -333,6 +333,87 @@ pub fn decode_linear_pcm_band(
     Ok(())
 }
 
+/// Loss-free widen of an `[i8; 36]` per-arm result into the
+/// dispatcher's unified `[i32; 36]` buffer. Every `i8` level
+/// round-trips through `i32` unchanged.
+#[inline]
+fn widen_into(src: &[i8; SAMPLES_PER_BAND], dst: &mut [i32; SAMPLES_PER_BAND]) {
+    for (d, &s) in dst.iter_mut().zip(src.iter()) {
+        *d = s as i32;
+    }
+}
+
+/// Decode the 36 subband samples of one SV7 band from its `band_type`
+/// alone, routing through [`band_type_case`] to the matching per-arm
+/// decoder and unifying every arm on an `[i32; 36]` output.
+///
+/// This is the SV7 sibling of [`crate::sv8_band_decode::decode_sv8_band`]:
+/// it walks the §2.5 `switch (band_type)` ladder end to end. The arms
+/// that already produce `[i32; 36]` natively (CNS, empty, linear-PCM
+/// escape) write `out` directly; the arms that produce signed `i8`
+/// levels (the two grouped cases and the per-sample Huffman cases) are
+/// decoded into a scratch `[i8; 36]` and widened into `out` via
+/// [`widen_into`].
+///
+/// # Context knob
+///
+/// The grouped (`band_type` 1 / 2) and per-sample Huffman (`band_type`
+/// 3..=7) arms read from the `ctx`-selected half of their staged
+/// `[2][N]` context-pair tables (see [`decode_grouped3_band`],
+/// [`decode_grouped2_band`], [`decode_huffman_band`]). The dispatcher
+/// threads the caller-supplied `ctx` through verbatim; it makes no
+/// context choice the staged tables do not already determine. The
+/// CNS / empty / PCM-escape arms take no context and ignore `ctx`. A
+/// `ctx` outside `0..=1` reaches the per-arm decoders' own fail-loud
+/// [`Error::UnsupportedBandType`] channel.
+///
+/// # Fail-loud arms
+///
+/// - **[`BandDecodeCase::OutOfRange`]** (`band_type` outside `-1..=17`)
+///   returns [`Error::UnsupportedBandType`] rather than silently
+///   zeroing the band, so a malformed `band_type` is distinguishable
+///   from a legitimately-empty (case 0) band — the same fail-loud
+///   posture [`crate::sv8_band_decode::decode_sv8_band`] takes for its
+///   non-enumerated arms.
+pub fn decode_sv7_band(
+    reader: &mut Sv7BitReader<'_>,
+    band_type: i8,
+    cns: &mut CnsPrng,
+    ctx: usize,
+    out: &mut [i32; SAMPLES_PER_BAND],
+) -> Result<()> {
+    match band_type_case(band_type) {
+        BandDecodeCase::Cns => {
+            fill_cns_band(cns, out);
+            Ok(())
+        }
+        BandDecodeCase::Empty => {
+            fill_zero_band(out);
+            Ok(())
+        }
+        BandDecodeCase::Grouped3 => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_grouped3_band(reader, ctx, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        BandDecodeCase::Grouped2 => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_grouped2_band(reader, ctx, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        BandDecodeCase::HuffmanPerSample => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_huffman_band(reader, band_type, ctx, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        BandDecodeCase::PcmEscape => decode_linear_pcm_band(reader, band_type, out),
+        BandDecodeCase::OutOfRange => Err(Error::UnsupportedBandType(band_type)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +931,185 @@ mod tests {
         let mut out = [0_i32; SAMPLES_PER_BAND];
         assert!(matches!(
             decode_linear_pcm_band(&mut reader, 8, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── Unified dispatcher (decode_sv7_band) ──────────────
+
+    #[test]
+    fn dispatch_empty_band_zeroes_and_touches_no_bits() {
+        // case 0 -> Empty: no bit-stream read, 36 zeros.
+        let mut reader = Sv7BitReader::new(&[0xFF; 8]);
+        let mut cns = CnsPrng::new();
+        let mut out = [9_i32; SAMPLES_PER_BAND];
+        decode_sv7_band(&mut reader, 0, &mut cns, 0, &mut out).expect("dispatch");
+        assert!(out.iter().all(|&s| s == 0));
+        // Empty arm consumed nothing: a fresh reader on the same bytes
+        // still peeks the same first 16 bits.
+        let mut fresh = Sv7BitReader::new(&[0xFF; 8]);
+        assert_eq!(reader.peek16().unwrap(), fresh.peek16().unwrap());
+    }
+
+    #[test]
+    fn dispatch_cns_band_matches_direct_fill_and_advances_prng() {
+        // case -1 -> Cns: dispatcher fill must equal a direct
+        // fill_cns_band walk from an identically-seeded PRNG.
+        let mut reader = Sv7BitReader::new(&[0u8; 8]);
+        let mut cns_a = CnsPrng::new();
+        let mut out_a = [0_i32; SAMPLES_PER_BAND];
+        decode_sv7_band(&mut reader, -1, &mut cns_a, 0, &mut out_a).expect("dispatch");
+
+        let mut cns_b = CnsPrng::new();
+        let mut out_b = [0_i32; SAMPLES_PER_BAND];
+        fill_cns_band(&mut cns_b, &mut out_b);
+
+        assert_eq!(out_a, out_b);
+        assert_eq!(cns_a.state(), cns_b.state());
+    }
+
+    #[test]
+    fn dispatch_grouped3_matches_direct_decode_widened() {
+        // case 1 -> Grouped3: 12 all-zero-triplet codewords. The
+        // dispatcher output (i32) must equal the direct i8 decode
+        // widened to i32 (here all zero).
+        let entry = sv7_q1_ctx(0)
+            .iter()
+            .find(|e| e.value == 13)
+            .copied()
+            .expect("value 13 present");
+        let bits = pack_codeword(entry.code, entry.length, GROUPED3_CODEWORDS_PER_BAND);
+
+        let mut reader_a = Sv7BitReader::new(&bits);
+        let mut cns = CnsPrng::new();
+        let mut out_a = [7_i32; SAMPLES_PER_BAND];
+        decode_sv7_band(&mut reader_a, 1, &mut cns, 0, &mut out_a).expect("dispatch");
+
+        let mut reader_b = Sv7BitReader::new(&bits);
+        let mut tmp = [0_i8; SAMPLES_PER_BAND];
+        decode_grouped3_band(&mut reader_b, 0, &mut tmp).expect("direct");
+        let expected: [i32; SAMPLES_PER_BAND] = core::array::from_fn(|i| tmp[i] as i32);
+
+        assert_eq!(out_a, expected);
+        assert!(out_a.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn dispatch_grouped2_threads_context_through() {
+        // case 2 -> Grouped2: value 24 -> [2,2] on context half 1.
+        for ctx in 0..=1 {
+            let entry = sv7_q2_ctx(ctx)
+                .iter()
+                .find(|e| e.value == 24)
+                .copied()
+                .expect("value 24 present");
+            let bits = pack_codeword(entry.code, entry.length, GROUPED2_CODEWORDS_PER_BAND);
+            let mut reader = Sv7BitReader::new(&bits);
+            let mut cns = CnsPrng::new();
+            let mut out = [0_i32; SAMPLES_PER_BAND];
+            decode_sv7_band(&mut reader, 2, &mut cns, ctx, &mut out).expect("dispatch");
+            assert!(out.iter().all(|&s| s == 2), "ctx {ctx}");
+        }
+    }
+
+    #[test]
+    fn dispatch_huffman_per_sample_matches_direct_decode() {
+        // case 3 -> HuffmanPerSample: 36 shortest-code (value 1)
+        // codewords. Dispatcher must equal the direct i8 decode widened.
+        let entry = SV7_Q3_TABLE[0];
+        let bits = pack_codeword(entry.code, entry.length, SAMPLES_PER_BAND);
+
+        let mut reader_a = Sv7BitReader::new(&bits);
+        let mut cns = CnsPrng::new();
+        let mut out_a = [0_i32; SAMPLES_PER_BAND];
+        decode_sv7_band(&mut reader_a, 3, &mut cns, 0, &mut out_a).expect("dispatch");
+
+        let mut reader_b = Sv7BitReader::new(&bits);
+        let mut tmp = [0_i8; SAMPLES_PER_BAND];
+        decode_huffman_band(&mut reader_b, 3, 0, &mut tmp).expect("direct");
+        let expected: [i32; SAMPLES_PER_BAND] = core::array::from_fn(|i| tmp[i] as i32);
+
+        assert_eq!(out_a, expected);
+        assert!(out_a.iter().all(|&s| s == entry.value as i32));
+    }
+
+    #[test]
+    fn dispatch_pcm_escape_matches_direct_decode() {
+        // case 8 -> PcmEscape: 7 bits/sample, sample i -> i & 0x7F.
+        let mut bits = Vec::new();
+        let mut acc: u8 = 0;
+        let mut nbits: u8 = 0;
+        for i in 0..SAMPLES_PER_BAND {
+            let v = (i as u8) & 0x7F;
+            for b in (0..7).rev() {
+                acc = (acc << 1) | ((v >> b) & 1);
+                nbits += 1;
+                if nbits == 8 {
+                    bits.push(acc);
+                    acc = 0;
+                    nbits = 0;
+                }
+            }
+        }
+        if nbits > 0 {
+            bits.push(acc << (8 - nbits));
+        }
+
+        let mut reader_a = Sv7BitReader::new(&bits);
+        let mut cns = CnsPrng::new();
+        let mut out_a = [0_i32; SAMPLES_PER_BAND];
+        decode_sv7_band(&mut reader_a, 8, &mut cns, 0, &mut out_a).expect("dispatch");
+
+        let mut reader_b = Sv7BitReader::new(&bits);
+        let mut out_b = [0_i32; SAMPLES_PER_BAND];
+        decode_linear_pcm_band(&mut reader_b, 8, &mut out_b).expect("direct");
+
+        assert_eq!(out_a, out_b);
+        for (i, &s) in out_a.iter().enumerate() {
+            assert_eq!(s, (i as i32) & 0x7F, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn dispatch_out_of_range_band_type_fails_loud() {
+        // band_type outside -1..=17 -> OutOfRange -> hard error, never
+        // a silently-zeroed band.
+        let mut cns = CnsPrng::new();
+        let mut out = [3_i32; SAMPLES_PER_BAND];
+        for bt in [-2_i8, 18, i8::MIN, i8::MAX] {
+            let mut reader = Sv7BitReader::new(&[0xFF; 8]);
+            assert!(
+                matches!(
+                    decode_sv7_band(&mut reader, bt, &mut cns, 0, &mut out),
+                    Err(Error::UnsupportedBandType(b)) if b == bt,
+                ),
+                "band_type {bt} should fail loud",
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_bad_ctx_reaches_per_arm_fail_loud() {
+        // ctx > 1 on a context-using arm reaches the per-arm fail-loud
+        // channel (grouped/huffman cases); CNS/empty/escape ignore ctx.
+        let mut reader = Sv7BitReader::new(&[0xFF; 8]);
+        let mut cns = CnsPrng::new();
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv7_band(&mut reader, 1, &mut cns, 2, &mut out),
+            Err(Error::UnsupportedBandType(1)),
+        ));
+    }
+
+    #[test]
+    fn dispatch_eof_propagates_from_arm() {
+        // case 8 needs 7*36=252 bits; 1 byte -> EOF surfaces through
+        // the dispatcher.
+        let mut reader = Sv7BitReader::new(&[0xFF]);
+        let mut cns = CnsPrng::new();
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv7_band(&mut reader, 8, &mut cns, 0, &mut out),
             Err(Error::UnexpectedEof),
         ));
     }
