@@ -62,7 +62,7 @@ pub const SV7_MAX_BAND_INCLUSIVE: u8 = 31;
 /// Every multi-bit field has been un-packed from the word-swapped
 /// header bitstream; the four ReplayGain quantities are surfaced as the
 /// raw 16-bit values the header carries (later rescaling is a separate
-/// concern). Fields the reference decoder reads but does not use
+/// concern). Fields a conformant decoder reads but does not use
 /// (`max_level`, `link`, `reserved`) are surfaced verbatim rather than
 /// dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub struct Sv7HeaderFields {
     /// Number of audio frames (§1, field 1). Each frame carries
     /// [`SV7_SAMPLES_PER_FRAME`] samples per channel.
     pub frame_count: u32,
-    /// Intensity-stereo flag (§1, field 2). The reference expects 0
+    /// Intensity-stereo flag (§1, field 2). The spec expects 0
     /// (unused in practice); surfaced verbatim.
     pub intensity_stereo: bool,
     /// Stream-wide mid/side enable (§1, field 3). When set, per-band
