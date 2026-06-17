@@ -193,6 +193,7 @@ pub mod sh_header;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod sv7_header;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_dscf_loop;

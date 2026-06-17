@@ -8,6 +8,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 329** — SV7 (`MP+`) fixed-header field-map decoder, new
+  `sv7_header` module. `Sv7HeaderFields::parse(input)` decodes the spec
+  (`spec/musepack-headers-and-coding.md` §1) layout: all 17 fields in
+  order (32-bit frame count assembled from two 16-bit halves, the
+  intensity / M/S flags, 6-bit `max_band`, 4-bit profile, 2-bit link,
+  2-bit sample-freq index, 16-bit max-level, the four 16-bit ReplayGain
+  title/album gain+peak fields, true-gapless flag, 11-bit last-frame
+  samples, fast-seek flag, 19-bit reserved, 8-bit encoder version). The
+  field reader runs over the SV7 32-bit-word byte-swap framing (§4 —
+  each aligned 4-byte group reversed; field reads begin at bit 32, after
+  the `MP+`+version prefix word) via a local `word_swap_sv7` helper; the
+  `MP+` magic is validated on the raw input first. Enforces the §1
+  sanity gate `1 ≤ max_band ≤ 31` (reusing `Error::MaxBandOutOfRange`).
+  Helpers: `sample_rate_hz()` (index → {44100, 48000, 37800, 32000} Hz),
+  `channels()` (stereo-only constant 2), and `total_samples()`
+  (`frame_count × 1152`). 9 unit tests. Closes the README "SV7
+  fixed-header field map / SV7 32-LSB word packing" gap.
 - **Round 325** — SV8 `SH` (Stream Header) packet payload field-map
   decoder, new `sh_header` module. `StreamHeaderFields::parse(payload)`
   decodes the spec (`spec/musepack-headers-and-coding.md` §2) layout:

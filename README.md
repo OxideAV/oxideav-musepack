@@ -42,6 +42,15 @@ Musepack ships in two incompatible stream-format generations:
   `channels` fields, stream M/S, and the block-power → frames-per-`AP`
   derivation (headers-and-coding §2). Surfaced as
   `StreamHeaderPacket::fields()`.
+- `sv7_header` — SV7 (`MP+`) fixed-header field-map decoder (the SV7
+  analogue of `sh_header`): all 17 fields (frame count, intensity / M/S
+  flags, `max_band`, profile, link, sample-freq index, max-level, the
+  ReplayGain title/album gain+peak quad, true-gapless + 11-bit
+  last-frame samples, fast-seek, reserved, encoder version), the SV7
+  32-bit-word byte-swap framing that the field reader runs over
+  (headers-and-coding §1 / §4), the `1 ≤ max_band ≤ 31` sanity gate,
+  and the stereo-only `channels` + `frame_count × 1152` total-sample
+  derivations.
 - `packet_stream` / `typed_packet` / `stream_shape` — SV8 packet-stream
   walker, per-kind typed packet views (`SH` / `RG` / `EI` / `SO` /
   `ST` / `AP` / `SE`), and a structural stream observer.
@@ -70,7 +79,6 @@ Musepack ships in two incompatible stream-format generations:
 
 - Absolute SCF anchor gain (the relative ladder is wired; the
   reference-index gain value is unspecified in the structural prose).
-- SV7 fixed-header field map, SV7 32-LSB word packing.
 - SV8 sparse band (case 1), the `RG` / `EI` / `SO` / `ST` packet
   payload field maps (the `SH` field map is now wired — see
   `sh_header`), and the varint inclusive/exclusive convention.
