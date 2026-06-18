@@ -246,6 +246,74 @@ pub fn reconstruct_cns_band_with_granule_scf(
     apply_granule_scf_relative(anchor, granule_scf, out);
 }
 
+/// End-to-end §2.6 reconstruction of one SV7 band, from the unified
+/// `[i32; 36]` level buffer that [`crate::sv7_band_decode::decode_sv7_band`]
+/// emits, straight to reconstructed `f64` subband samples.
+///
+/// This is the integrating entry point that joins the §2.5 per-band
+/// sample decode to the §2.6 dequant + per-granule SCF multiply. It
+/// branches on the [`crate::sv7_band_decode::band_type_case`] classifier
+/// so each arm's level convention is handled correctly **before** the
+/// dequant:
+///
+/// - **Empty** (`band_type == 0`): the levels are all zero; dequant of
+///   zero is zero, and the SCF multiply leaves them zero. The band
+///   reconstructs to silence regardless of `anchor` / `granule_scf`.
+/// - **CNS** (`band_type == -1`): PRNG levels dequantised by the CNS
+///   coefficient (`DEQUANT_COEFFICIENT_C[0]`), via
+///   [`reconstruct_cns_band_with_granule_scf`].
+/// - **Grouped / per-sample Huffman** (`band_type` 1..=7): the decoded
+///   levels are already signed-centred; dequantised directly.
+/// - **PCM-escape** (`band_type` 8..=17): the decoded levels are raw
+///   *unsigned* (`0..=2D`); centred in place by subtracting `D`
+///   ([`centre_pcm_band`]) before the dequant.
+///
+/// After dequant, the three per-granule SCF gains are applied relative
+/// to `anchor` ([`apply_granule_scf_relative`]). `granule_scf[g]` is the
+/// absolute SCF index for granule `g`, as reconstructed by the
+/// [`crate::scf`] decoder; `anchor` carries the still-GAP absolute
+/// reference (see the module docs — relative loudness between granules
+/// and between anchor-sharing bands is exact).
+///
+/// `levels` is taken by value into a local scratch buffer so the
+/// in-place PCM centring does not mutate the caller's decode output.
+///
+/// Returns [`Error::UnsupportedBandType`] for a `band_type` outside the
+/// structurally-enumerated `-1..=17` range (the classifier's
+/// `OutOfRange` arm).
+pub fn reconstruct_sv7_band_from_levels(
+    band_type: i8,
+    levels: &[i32; SAMPLES_PER_BAND],
+    anchor: u8,
+    granule_scf: [u8; GRANULES_PER_BAND],
+    out: &mut [f64; SAMPLES_PER_BAND],
+) -> Result<()> {
+    use crate::sv7_band_decode::{band_type_case, BandDecodeCase};
+
+    match band_type_case(band_type) {
+        BandDecodeCase::Cns => {
+            reconstruct_cns_band_with_granule_scf(levels, anchor, granule_scf, out);
+            Ok(())
+        }
+        BandDecodeCase::PcmEscape => {
+            // Raw unsigned levels → centre in a scratch copy, then
+            // dequantise + apply the per-granule SCF.
+            let mut centred = *levels;
+            centre_pcm_band(band_type, &mut centred)?;
+            reconstruct_band_with_granule_scf(band_type, &centred, anchor, granule_scf, out)
+        }
+        BandDecodeCase::Empty
+        | BandDecodeCase::Grouped3
+        | BandDecodeCase::Grouped2
+        | BandDecodeCase::HuffmanPerSample => {
+            // Already-centred levels (zero for Empty); dequantise in the
+            // quantiser-bearing 0..=17 range, then apply per-granule SCF.
+            reconstruct_band_with_granule_scf(band_type, levels, anchor, granule_scf, out)
+        }
+        BandDecodeCase::OutOfRange => Err(Error::UnsupportedBandType(band_type)),
+    }
+}
+
 /// Compile-time sanity: the reconstruct-layer granule geometry must
 /// match the scf-layer's `SCF_GRANULES_PER_BAND`, and the 3×12 split
 /// must tile the full 36-sample band exactly.
@@ -927,6 +995,111 @@ mod tests {
                     "granule {g} sample {k}"
                 );
             }
+        }
+    }
+
+    // ─── End-to-end SV7 band reconstruction from levels ────
+
+    #[test]
+    fn reconstruct_from_levels_empty_band_is_silence() {
+        // band_type 0: levels all zero; reconstruct to all-zero samples
+        // regardless of SCF.
+        let levels = [0_i32; SAMPLES_PER_BAND];
+        let mut out = [9.9_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(0, &levels, 30, [30, 35, 40], &mut out).unwrap();
+        for &s in out.iter() {
+            assert_eq!(s, 0.0);
+        }
+    }
+
+    #[test]
+    fn reconstruct_from_levels_huffman_path_matches_centred_reconstruct() {
+        // band_type 4 (Huffman, already-centred levels): the level
+        // buffer is fed straight through dequant + per-granule SCF.
+        let band_type = 4_i8;
+        let mut levels = [0_i32; SAMPLES_PER_BAND];
+        for (i, l) in levels.iter_mut().enumerate() {
+            *l = (i as i32 % 7) - 3; // small centred values
+        }
+        let anchor = 40;
+        let scf = [40_u8, 44, 48];
+        let mut got = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(band_type, &levels, anchor, scf, &mut got).unwrap();
+
+        let mut want = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_band_with_granule_scf(band_type, &levels, anchor, scf, &mut want).unwrap();
+        for i in 0..SAMPLES_PER_BAND {
+            assert!((got[i] - want[i]).abs() < 1e-12, "{i}");
+        }
+    }
+
+    #[test]
+    fn reconstruct_from_levels_pcm_escape_centres_before_dequant() {
+        // band_type 8: raw unsigned levels 0..=2D, D = 63. A raw level
+        // of D must reconstruct to 0 (centred = 0).
+        let band_type = 8_i8;
+        let d = QUANTIZER_OFFSET_D[9] as i32;
+        let levels = [d; SAMPLES_PER_BAND]; // every centred level == 0
+        let mut out = [1.0_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(band_type, &levels, 50, [50, 50, 50], &mut out).unwrap();
+        for &s in out.iter() {
+            assert_eq!(s, 0.0);
+        }
+
+        // A raw level of 2D → centred +D → positive sample scaled by SCF.
+        let levels_hi = [2 * d; SAMPLES_PER_BAND];
+        let mut out_hi = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(band_type, &levels_hi, 50, [50, 50, 50], &mut out_hi)
+            .unwrap();
+        // Expected: raw 2D centred to +D, dequantised, gain 1.0
+        // (anchor == scf).
+        let mut centred = [2 * d; SAMPLES_PER_BAND];
+        centre_pcm_band(band_type, &mut centred).unwrap();
+        let mut want = [0.0_f64; SAMPLES_PER_BAND];
+        dequantise_band(band_type, &centred, &mut want).unwrap();
+        for i in 0..SAMPLES_PER_BAND {
+            assert!((out_hi[i] - want[i]).abs() < 1e-12, "{i}");
+        }
+    }
+
+    #[test]
+    fn reconstruct_from_levels_does_not_mutate_caller_levels() {
+        // PCM-escape centring must operate on a scratch copy.
+        let band_type = 9_i8;
+        let d = QUANTIZER_OFFSET_D[10] as i32;
+        let levels = [d; SAMPLES_PER_BAND];
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(band_type, &levels, 0, [0, 0, 0], &mut out).unwrap();
+        // Caller's buffer untouched.
+        for &l in levels.iter() {
+            assert_eq!(l, d);
+        }
+    }
+
+    #[test]
+    fn reconstruct_from_levels_cns_uses_cns_coefficient() {
+        let levels = [200_i32; SAMPLES_PER_BAND];
+        let anchor = 64;
+        let scf = [64_u8, 64, 64];
+        let mut got = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_sv7_band_from_levels(-1, &levels, anchor, scf, &mut got).unwrap();
+
+        let mut want = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_cns_band_with_granule_scf(&levels, anchor, scf, &mut want);
+        for i in 0..SAMPLES_PER_BAND {
+            assert!((got[i] - want[i]).abs() < 1e-12, "{i}");
+        }
+    }
+
+    #[test]
+    fn reconstruct_from_levels_rejects_out_of_range_band_type() {
+        let levels = [0_i32; SAMPLES_PER_BAND];
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        for bt in [-2_i8, 18, i8::MAX, i8::MIN] {
+            assert!(matches!(
+                reconstruct_sv7_band_from_levels(bt, &levels, 0, [0, 0, 0], &mut out),
+                Err(Error::UnsupportedBandType(_)),
+            ));
         }
     }
 
