@@ -14,10 +14,15 @@
 //! - `DEQUANT_COEFFICIENT_C[i]` — dequant coefficient
 //!   `C = 65536 / (2 * D + 1)`.
 //!
-//! This module covers **only** the per-sample dequantise step (the
-//! product `centred_level * C / 65536`). The downstream SCF multiply,
-//! M/S undo, and synthesis filterbank are not in scope for this
-//! round.
+//! This module wires the per-sample dequantise step (the product
+//! `centred_level * C / 65536`) **and** the per-granule scalefactor
+//! multiply that follows it (each band's 36 samples split into 3
+//! granules of 12, each granule scaled by its own SCF index relative to
+//! a shared anchor — see [`apply_granule_scf_relative`] /
+//! [`reconstruct_band_with_granule_scf`]). The remaining §2.6 steps —
+//! M/S undo and the synthesis filterbank — are not yet wired; M/S undo
+//! and the synthesis-window `D_i` table are documented gaps (the latter
+//! lives in the ISO Layer-II PDF referenced by the spec).
 //!
 //! # Centring convention
 //!
@@ -82,6 +87,23 @@ use crate::{Error, Result};
 /// SCF index range is therefore `0..=255`.
 pub const SCF_INDEX_COUNT: usize = 256;
 
+/// Number of 12-sample granules a band's 36 subband samples split into.
+///
+/// §1 (`musepack-sv7-sv8-spec.md`): each subband carries 36 samples per
+/// frame, "internally grouped as 3 granules of 12 samples". The §2.4
+/// scalefactor layer transmits up to one SCF index per granule (the
+/// Layer-II SCFSI inheritance, see [`crate::scf`]). Kept in lockstep
+/// with the scf layer's `SCF_GRANULES_PER_BAND` by a compile-time
+/// assertion at the end of this module.
+pub const GRANULES_PER_BAND: usize = 3;
+
+/// Number of subband samples in one SCF granule (`36 / 3`).
+///
+/// The first 12 samples belong to granule 0, the next 12 to granule 1,
+/// the last 12 to granule 2 — the contiguous time order in which the
+/// §2.5 per-band sample decode emits them.
+pub const SAMPLES_PER_GRANULE: usize = SAMPLES_PER_BAND / GRANULES_PER_BAND;
+
 /// Multiplicative SCF gain at index `to` *relative to* index `from`.
 ///
 /// Returns [`crate::requant::SCF_STEP_RATIO`]`^(to − from)`. This is
@@ -136,6 +158,101 @@ pub fn apply_scf_relative(from_index: u8, to_index: u8, band: &mut [f64; SAMPLES
         *slot *= gain;
     }
 }
+
+/// Scale a 36-sample dequantised band in place by a **per-granule** SCF
+/// gain, applying each of the three granule SCF indices to its own
+/// contiguous 12-sample slice, *relative to* a shared `anchor` index.
+///
+/// This is the §2.6 "multiply by the band/granule scalefactor" step at
+/// the granularity the §2.4 scalefactor layer actually transmits it:
+/// one SCF index per 12-sample granule (the Layer-II SCFSI inheritance,
+/// §1). `granule_scf[g]` is the absolute SCF index for granule `g`, as
+/// reconstructed by the [`crate::scf`] decoder
+/// ([`crate::scf::BandScf::indices`]). Samples `0..12` are scaled by
+/// `scf_relative_gain(anchor, granule_scf[0])`, `12..24` by
+/// granule 1's gain, and `24..36` by granule 2's.
+///
+/// # Why `anchor`-relative
+///
+/// The §2.6 absolute scalefactor gain table needs a reference-index
+/// anchor value that the structural prose leaves GAP (see the module
+/// docs). What **is** fully specified is the geometric ratio between any
+/// two SCF indices, so this function multiplies each granule by its gain
+/// *relative to* the caller's `anchor`. Passing the band's own minimum
+/// (or any fixed) SCF index as `anchor` makes the three granules carry
+/// their exact relative loudness; the whole band then differs from a
+/// fully-anchored decode by the single global constant the GAP anchor
+/// would supply. The relative loudness *between granules* and *between
+/// bands sharing an anchor* is exact.
+///
+/// In-place. Infallible: `anchor` and every `granule_scf` entry are
+/// `u8`, hence structurally inside the `0..=255` SCF ladder.
+pub fn apply_granule_scf_relative(
+    anchor: u8,
+    granule_scf: [u8; GRANULES_PER_BAND],
+    band: &mut [f64; SAMPLES_PER_BAND],
+) {
+    for (g, &scf) in granule_scf.iter().enumerate() {
+        let gain = scf_relative_gain(anchor, scf);
+        let start = g * SAMPLES_PER_GRANULE;
+        for slot in band[start..start + SAMPLES_PER_GRANULE].iter_mut() {
+            *slot *= gain;
+        }
+    }
+}
+
+/// Full §2.6 per-band reconstruction for the entropy-Huffman /
+/// PCM-escape range: dequantise 36 already-centred levels by the
+/// `band_type` quantiser, then apply the three per-granule SCF gains
+/// relative to `anchor` — producing the reconstructed `f64` subband
+/// samples ready for M/S undo + the synthesis filterbank.
+///
+/// `centred` carries the signed, already-centred levels from the §2.5
+/// per-band sample decode (the Q3..Q7 Huffman levels are centred as
+/// decoded; the PCM-escape levels must first pass through
+/// [`centre_pcm_band`]). `band_type` must be in the quantiser-bearing
+/// range `0..=17`; the CNS band (`band_type == -1`) uses
+/// [`reconstruct_cns_band_with_granule_scf`] instead.
+///
+/// Returns [`Error::UnsupportedBandType`] for a `band_type` outside
+/// `0..=17`.
+pub fn reconstruct_band_with_granule_scf(
+    band_type: i8,
+    centred: &[i32; SAMPLES_PER_BAND],
+    anchor: u8,
+    granule_scf: [u8; GRANULES_PER_BAND],
+    out: &mut [f64; SAMPLES_PER_BAND],
+) -> Result<()> {
+    dequantise_band(band_type, centred, out)?;
+    apply_granule_scf_relative(anchor, granule_scf, out);
+    Ok(())
+}
+
+/// Full §2.6 per-band reconstruction for the CNS / noise band
+/// (`band_type == -1`): dequantise the PRNG samples by the CNS
+/// coefficient (see [`dequantise_cns_band`]), then apply the three
+/// per-granule SCF gains relative to `anchor`.
+///
+/// The CNS path has no `band_type` in the quantiser range, so it gets
+/// its own entry point. Infallible — the CNS dequant is total and the
+/// SCF gain is `u8`-bounded.
+pub fn reconstruct_cns_band_with_granule_scf(
+    cns_levels: &[i32; SAMPLES_PER_BAND],
+    anchor: u8,
+    granule_scf: [u8; GRANULES_PER_BAND],
+    out: &mut [f64; SAMPLES_PER_BAND],
+) {
+    dequantise_cns_band(cns_levels, out);
+    apply_granule_scf_relative(anchor, granule_scf, out);
+}
+
+/// Compile-time sanity: the reconstruct-layer granule geometry must
+/// match the scf-layer's `SCF_GRANULES_PER_BAND`, and the 3×12 split
+/// must tile the full 36-sample band exactly.
+const _: () = {
+    assert!(GRANULES_PER_BAND == crate::scf::SCF_GRANULES_PER_BAND);
+    assert!(GRANULES_PER_BAND * SAMPLES_PER_GRANULE == SAMPLES_PER_BAND);
+};
 
 /// Divisor in the §2.6 dequant relation `sample = centred_level * C / 65536`.
 ///
@@ -702,6 +819,114 @@ mod tests {
         apply_scf_relative(95, 30, &mut band);
         for &s in band.iter() {
             assert!((s - original).abs() < 1e-9, "got {s}");
+        }
+    }
+
+    // ─── Per-granule SCF reconstruction ────────────────────
+
+    #[test]
+    fn granule_geometry_tiles_the_band() {
+        assert_eq!(GRANULES_PER_BAND, 3);
+        assert_eq!(SAMPLES_PER_GRANULE, 12);
+        assert_eq!(GRANULES_PER_BAND * SAMPLES_PER_GRANULE, SAMPLES_PER_BAND);
+    }
+
+    #[test]
+    fn apply_granule_scf_scales_each_twelve_sample_slice_independently() {
+        // Three distinct granule SCFs over a flat band: each contiguous
+        // 12-sample slice must carry its own relative gain.
+        let mut band = [1.0_f64; SAMPLES_PER_BAND];
+        let anchor = 50;
+        let scf = [50_u8, 52, 60];
+        apply_granule_scf_relative(anchor, scf, &mut band);
+        for (g, &s) in scf.iter().enumerate() {
+            let want = scf_relative_gain(anchor, s);
+            for k in 0..SAMPLES_PER_GRANULE {
+                let i = g * SAMPLES_PER_GRANULE + k;
+                assert!((band[i] - want).abs() < 1e-12, "granule {g} sample {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn apply_granule_scf_anchor_equal_indices_is_identity() {
+        let mut band = [-2.5_f64; SAMPLES_PER_BAND];
+        apply_granule_scf_relative(33, [33, 33, 33], &mut band);
+        for &s in band.iter() {
+            assert_eq!(s, -2.5);
+        }
+    }
+
+    #[test]
+    fn apply_granule_scf_uniform_indices_matches_apply_scf_relative() {
+        // When all three granule SCFs are equal, the per-granule path
+        // must agree with the whole-band apply_scf_relative.
+        let mut granule_band = [3.0_f64; SAMPLES_PER_BAND];
+        let mut whole_band = [3.0_f64; SAMPLES_PER_BAND];
+        apply_granule_scf_relative(10, [40, 40, 40], &mut granule_band);
+        apply_scf_relative(10, 40, &mut whole_band);
+        for i in 0..SAMPLES_PER_BAND {
+            assert!((granule_band[i] - whole_band[i]).abs() < 1e-12, "{i}");
+        }
+    }
+
+    #[test]
+    fn reconstruct_band_dequantises_then_applies_granule_scf() {
+        // band_type 3: C = DEQUANT_COEFFICIENT_C[4]. Centred level 1 in
+        // every slot; check granule 1 carries the (anchor→scf[1]) gain
+        // on top of the dequant product.
+        let band_type = 3_i8;
+        let centred = [1_i32; SAMPLES_PER_BAND];
+        let anchor = 20;
+        let scf = [20_u8, 25, 30];
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_band_with_granule_scf(band_type, &centred, anchor, scf, &mut out).unwrap();
+
+        let mut dq = [0.0_f64; SAMPLES_PER_BAND];
+        dequantise_band(band_type, &centred, &mut dq).unwrap();
+        for (g, &s) in scf.iter().enumerate() {
+            let gain = scf_relative_gain(anchor, s);
+            for k in 0..SAMPLES_PER_GRANULE {
+                let i = g * SAMPLES_PER_GRANULE + k;
+                assert!(
+                    (out[i] - dq[i] * gain).abs() < 1e-12,
+                    "granule {g} sample {k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruct_band_rejects_out_of_quantiser_range_band_type() {
+        let centred = [0_i32; SAMPLES_PER_BAND];
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        for bt in [-2_i8, -1, 18, i8::MAX, i8::MIN] {
+            assert!(matches!(
+                reconstruct_band_with_granule_scf(bt, &centred, 0, [0, 0, 0], &mut out),
+                Err(Error::UnsupportedBandType(_)),
+            ));
+        }
+    }
+
+    #[test]
+    fn reconstruct_cns_band_dequantises_then_applies_granule_scf() {
+        let cns_levels = [255_i32; SAMPLES_PER_BAND];
+        let anchor = 64;
+        let scf = [64_u8, 66, 70];
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        reconstruct_cns_band_with_granule_scf(&cns_levels, anchor, scf, &mut out);
+
+        let mut dq = [0.0_f64; SAMPLES_PER_BAND];
+        dequantise_cns_band(&cns_levels, &mut dq);
+        for (g, &s) in scf.iter().enumerate() {
+            let gain = scf_relative_gain(anchor, s);
+            for k in 0..SAMPLES_PER_GRANULE {
+                let i = g * SAMPLES_PER_GRANULE + k;
+                assert!(
+                    (out[i] - dq[i] * gain).abs() < 1e-12,
+                    "granule {g} sample {k}"
+                );
+            }
         }
     }
 
