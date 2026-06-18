@@ -58,9 +58,19 @@ Musepack ships in two incompatible stream-format generations:
   decoder and an MSB-first bit reader.
 - `sv8_huffman` — the 21 SV8 canonical-Huffman length tables + paired
   symbol maps, with the cumulative-index decoder walk.
-- `requant` / `reconstruct` — SV7 requantiser constants and the
-  per-sample reconstruction primitives (PCM-escape centring, dequant
-  multiply, and the relative scalefactor gain ladder).
+- `requant` / `reconstruct` — SV7 requantiser constants and the §2.6
+  reconstruction path: PCM-escape centring, the per-`band_type` dequant
+  multiply, the relative scalefactor gain ladder, and the **per-granule
+  SCF multiply** (each band's 36 samples are 3 granules of 12, each
+  granule scaled by its own SCF index — the Layer-II SCFSI inheritance).
+  `reconstruct_sv7_band_from_levels` is the integrating entry point that
+  joins the §2.5 per-band sample decode to §2.6: it takes the unified
+  `[i32; 36]` level buffer from `decode_sv7_band` and, branching on the
+  band-type case so each arm's level convention (raw-unsigned PCM-escape
+  vs already-centred Huffman vs CNS-PRNG) is centred/dequantised
+  correctly, produces the reconstructed `f64` subband samples — relative
+  to a caller-supplied SCF anchor (the absolute anchor is GAP), so
+  granule-to-granule and anchor-sharing-band loudness is exact.
 - `scf` — SV7 SCF coding-method decoder (SCFI selector + DSCF deltas).
 - `cns` — CNS / noise-substitution two-LFSR PRNG.
 - `sv7_band_decode` / `sv7_band_header` — SV7 per-band header loop and
@@ -81,13 +91,26 @@ Musepack ships in two incompatible stream-format generations:
 
 ## Not yet wired (DOCS-GAP / downstream)
 
-- Absolute SCF anchor gain (the relative ladder is wired; the
-  reference-index gain value is unspecified in the structural prose).
+- Absolute SCF anchor gain (the relative ladder + per-granule multiply
+  are wired; the reference-index gain value is unspecified in the
+  structural prose).
 - The `RG` / `EI` / `SO` / `ST` packet payload field maps (the `SH`
   field map is now wired — see `sh_header`; `RG` / `EI` layouts are
   now specified in `spec/musepack-headers-and-coding.md` §2 and are
   the next pick).
-- M/S undo + the 32-band polyphase synthesis filterbank.
+- **M/S undo** — §2.6 says "undo M/S where `msflag` set" but the exact
+  channel arithmetic (whether `L = M + S` / `R = M − S`, and any 0.5 /
+  √2 normalisation) is not specified anywhere under
+  `docs/audio/musepack/`. DOCS-GAP.
+- **32-band polyphase synthesis filterbank** — the reconstruction path
+  now reaches dequantised, per-granule-SCF-scaled `f64` subband samples
+  (`reconstruct_sv7_band_from_levels`). The final windowing step needs
+  the Layer-II synthesis window `D_i` (Table 3-B.3) and the `N_ik`
+  matrix, which §1 of the spec states live in the in-repo ISO
+  11172-3 PDF under `docs/audio/mp3/` — outside this crate's
+  `docs/audio/musepack/` source-of-truth scope. Staging those two
+  tables (or their facts) under `docs/audio/musepack/tables/` would
+  unblock the PCM step.
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive
