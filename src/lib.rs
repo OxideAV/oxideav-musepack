@@ -108,8 +108,12 @@
 //!   one VLC per sample, table chosen per previous sample through a
 //!   caller-supplied context rule, the §3.4 GAP knob), and
 //!   [`sv8_sample_decode::decode_sv8_escape_band`] (default arm,
-//!   `band_type` 9..=17 — one VLC plus `band_type - 9` raw bits).
-//!   The sparse band (case 1) stays DOCS-GAP and fails loudly.
+//!   `band_type` 9..=17 — one VLC plus `band_type - 9` raw bits), and
+//!   [`sv8_sample_decode::decode_sv8_sparse_band`] (case 1 — two
+//!   halves of 18, a `sv8-canonical-q1` non-zero count per half, a
+//!   §6.5 enumerative position-selection codeword, and one sign bit
+//!   per present `±1` sample). Every SV8 §3.4 sample-decode arm is now
+//!   wired.
 //! - [`packet_stream`] — SV8 §3.1/§3.2 packet-stream walker on top
 //!   of [`framing::parse_packet_header`]. `PacketStream::new` takes
 //!   the post-`MPCK` slice plus a [`packet_stream::PacketSizeConvention`]

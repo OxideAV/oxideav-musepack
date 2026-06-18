@@ -8,6 +8,48 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 336** — SV8 §3.4 / §6.4.1 sparse band (`band_type == 1`)
+  sample decode in `sv8_sample_decode`, closing the last unimplemented
+  SV8 per-band arm and wiring it into the
+  `sv8_band_decode::decode_sv8_band` dispatcher. The persistent
+  "19-symbol q1 alphabet cannot carry an 18-flag bitmap" DOCS-GAP
+  (fail-loud across rounds 245/281/284/288) is resolved by the newly
+  staged `spec/musepack-headers-and-coding.md` §6.4.1 + §6.5: the q1
+  `0..=18` symbol is the per-group **non-zero count**, not a flag
+  bitmap.
+  - `decode_sv8_sparse_band(reader, out: &mut [i8; 36])` — decodes a
+    band as **two halves of 18** (`SPARSE_GROUP_SIZE`). For each half:
+    one `sv8-canonical-q1` codeword gives the non-zero count `cnt`;
+    then `decode_sparse_group` reads the §6.5 enumerative codeword
+    selecting which `min(cnt, 18 − cnt)` positions are non-zero
+    (bit-inverting the mask when `cnt > 9`, since the smaller
+    complement is always coded), and one raw sign bit per present
+    position sets it to `±1` (`requant-quantizer-offset-Dc` pins
+    `D = 1` for `band_type` 1). `cnt == 0` ⇒ all-zero; `cnt == 18` ⇒
+    all-present (no enumerative bits).
+  - `enum_decode_subset(reader, k, n)` — the §6.5 enumerative
+    (combinatorial) coder: a phased-/truncated-binary index read
+    (`bitlen − 1` bits, with a conditional extra "lost-codes" bit and
+    rebase) over the `C(n, k)`-sized code space, followed by a
+    combinadic peel (walk positions high→low, subtract `C(m, k)` when
+    the running code admits it). Returns the selected positions as an
+    `n`-bit mask. All binomials are computed via a `const fn binomial`
+    multiplicative recurrence — no new staged tables
+    (`C(18, 9) = 48620` is the largest value reached).
+  - `SPARSE_GROUP_SIZE = 18` constant; `enum_bitlen_lost(total)`
+    helper (`bitlen = ceil(log2(total))`, `lost = 2^bitlen − total`).
+    A malformed q1 count (> 18) yields
+    `Error::GroupedSymbolOutOfRange`; EOF in any phase propagates.
+  - New unit tests: a full sparse-band round-trip harness (test-side
+    phased-binary + combinadic encoder) covering every count `0..=18`,
+    single-non-zero halves, the `cnt > 9` complement inversion,
+    all-present halves, the all-zero fast path with exact bit
+    accounting, malformed-count rejection, EOF propagation, the
+    `(bitlen, lost)` / binomial-code-space identity, and the binomial
+    recurrence against a reference; plus the dispatcher's sparse arm
+    re-tested against the direct decoder (replacing the prior
+    fail-loud test). Crate lib total `339 → 348`.
+
 - **Round 329** — SV7 (`MP+`) fixed-header field-map decoder, new
   `sv7_header` module. `Sv7HeaderFields::parse(input)` decodes the spec
   (`spec/musepack-headers-and-coding.md` §1) layout: all 17 fields in

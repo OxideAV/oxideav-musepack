@@ -195,7 +195,7 @@ use crate::huffman::Sv7BitReader;
 use crate::sv7_band_decode::{fill_cns_band, fill_zero_band, SAMPLES_PER_BAND};
 use crate::sv8_sample_decode::{
     decode_sv8_context_band, decode_sv8_escape_band, decode_sv8_grouped2_band,
-    decode_sv8_grouped3_band,
+    decode_sv8_grouped3_band, decode_sv8_sparse_band,
 };
 use crate::{Error, Result};
 
@@ -238,19 +238,17 @@ use crate::{Error, Result};
 /// These are caller knobs by construction: the dispatcher makes no
 /// choice the staged tables do not already determine.
 ///
-/// # Fail-loud arms
+/// # Sparse band (`band_type == 1`)
 ///
-/// - **`band_type == 1` (sparse band)** — DOCS-GAP. The §3.4 prose
-///   names the shape ("one VLC carrying flags for 18 samples; for
-///   each set flag, read 1 bit to fill a sample") but the staged
-///   `sv8-symbols-q1` map is a 19-symbol alphabet (`0..=18`) that
-///   cannot literally carry an 18-flag bitmap (that needs `2^18`
-///   symbols), and the prose covers 18 samples while the band has
-///   36. The symbol → flag-pattern mapping and per-band codeword
-///   count stay underdetermined by the staged material, so this arm
-///   returns [`Error::UnsupportedBandType`] (fail-loud, never
-///   silently-wrong) — see [`crate::sv8_sample_decode`]'s
-///   "Case NOT implemented" note.
+/// Now wired via [`decode_sv8_sparse_band`] from the staged §6.4.1 +
+/// §6.5 facts (two halves of 18, a `sv8-canonical-q1` non-zero count
+/// per half, a §6.5 enumerative position-selection codeword, one sign
+/// bit per present position). The earlier "19-symbol q1 alphabet vs
+/// 18-flag bitmap" blocker is resolved: the q1 symbol is the
+/// per-group non-zero *count*, not a flag bitmap.
+///
+/// # Fail-loud arm
+///
 /// - **[`Sv8BandDecodeCase::OutOfRange`]** (`band_type < -1`) — not a
 ///   §3.4-enumerated arm; returns [`Error::UnsupportedBandType`]
 ///   (promoting the classifier's fail-quiet `case_emits_samples ==
@@ -295,13 +293,16 @@ where
             widen_into(&tmp, out);
             Ok(())
         }
-        Sv8BandDecodeCase::LargeCoeffEscape => decode_sv8_escape_band(reader, band_type, out),
-        // Sparse band (case 1) is a DOCS-GAP; OutOfRange is not a
-        // §3.4-enumerated arm. Both fail loud rather than emit a
-        // silently-wrong band.
-        Sv8BandDecodeCase::SparseBand | Sv8BandDecodeCase::OutOfRange => {
-            Err(Error::UnsupportedBandType(band_type))
+        Sv8BandDecodeCase::SparseBand => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_sparse_band(reader, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
         }
+        Sv8BandDecodeCase::LargeCoeffEscape => decode_sv8_escape_band(reader, band_type, out),
+        // OutOfRange is not a §3.4-enumerated arm; fail loud rather
+        // than emit a silently-wrong band.
+        Sv8BandDecodeCase::OutOfRange => Err(Error::UnsupportedBandType(band_type)),
     }
 }
 
@@ -775,17 +776,62 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sparse_band_fails_loud_docs_gap() {
-        // case 1 (sparse band) is a DOCS-GAP: the staged sv8-symbols-q1
-        // 19-symbol alphabet cannot literally carry an 18-flag bitmap.
-        // The dispatcher must fail loud, never emit a silently-wrong
-        // band.
+    fn dispatch_sparse_band_matches_direct_decoder() {
+        // case 1 (sparse band) is now wired (§6.4.1 + §6.5). Build a
+        // two-half sparse band — each half a q1 cnt==0 codeword (an
+        // all-zero group, no enumerative/sign bits) — and confirm the
+        // dispatcher's widened i32 output equals the direct i8
+        // decoder's, sample for sample.
+        use crate::sv8_huffman::SV8_Q1_TABLE;
+        // Find the q1 codeword whose decoded symbol is the count 0.
+        let mut zero: Option<(u16, u8)> = None;
+        let mut upper: u32 = 0x1_0000;
+        for e in SV8_Q1_TABLE.lengths.iter() {
+            if e.length == 0 {
+                continue;
+            }
+            let step = 1u32 << (16 - e.length as u32);
+            let mut pat = e.code as u32;
+            while pat < upper {
+                let mut pp = BitPacker::new();
+                pp.push(pat as u16, e.length);
+                let pb = pp.finish();
+                let mut r = Sv7BitReader::new(&pb);
+                if SV8_Q1_TABLE.decode(&mut r).unwrap() == 0 {
+                    zero = Some((pat as u16, e.length));
+                    break;
+                }
+                pat += step;
+            }
+            if zero.is_some() {
+                break;
+            }
+            upper = e.code as u32;
+        }
+        let (code, len) = zero.expect("q1 has a cnt-0 codeword");
+
+        let mut p = BitPacker::new();
+        p.push(code, len); // half 0: cnt 0
+        p.push(code, len); // half 1: cnt 0
+        let bytes = p.finish();
+
+        let mut direct = [0_i8; SAMPLES_PER_BAND];
+        {
+            let mut reader = Sv7BitReader::new(&bytes);
+            crate::sv8_sample_decode::decode_sv8_sparse_band(&mut reader, &mut direct)
+                .expect("direct sparse");
+        }
+
         let mut out = [0_i32; SAMPLES_PER_BAND];
         let mut prng = CnsPrng::new();
-        let bytes = [0u8; 8];
         let mut reader = Sv7BitReader::new(&bytes);
-        let err = decode_sv8_band(&mut reader, 1, &mut prng, 0, 0, no_ctx, &mut out).unwrap_err();
-        assert!(matches!(err, Error::UnsupportedBandType(1)));
+        decode_sv8_band(&mut reader, 1, &mut prng, 0, 0, no_ctx, &mut out)
+            .expect("sparse dispatch");
+
+        for (o, &d) in out.iter().zip(direct.iter()) {
+            assert_eq!(*o, d as i32);
+        }
+        assert!(out.iter().all(|&s| s == 0), "cnt 0 / cnt 0 → all-zero band");
     }
 
     #[test]

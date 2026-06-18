@@ -111,22 +111,26 @@
 //!   quantised-coefficient payload, only the entropy layer
 //!   differs).
 //!
-//! # Case NOT implemented (DOCS-GAP, fail-loud)
+//! # Case 1 (`SparseBand`) — now grounded by §6.4.1 + §6.5
 //!
-//! - **Case 1 (`SparseBand`)** — the staged `sv8-symbols-q1` map is
-//!   a 19-symbol alphabet (`0..=18`), which cannot literally carry
-//!   the "flags for 18 samples" the §3.4 prose describes (an 18-flag
-//!   bitmap needs 2¹⁸ symbols), and the prose covers 18 samples
-//!   while the band has 36. What IS grounded:
-//!   `requant-quantizer-offset-Dc` pins `D = 1` for `band_type` 1,
-//!   so sparse-band samples are levels in `{-1, 0, +1}` and the
-//!   per-set-flag raw bit is presumably the ±1 sign — but the
-//!   symbol → flag-pattern mapping and the per-band codeword count
-//!   stay underdetermined by the staged material.
+//! The earlier "19-symbol q1 alphabet cannot carry an 18-flag bitmap"
+//! blocker is resolved by the staged
+//! `spec/musepack-headers-and-coding.md` §6.4.1: the q1 symbol map's
+//! `0..=18` alphabet is **not** a flag bitmap but the per-group
+//! **non-zero count** `cnt`. A band's 36 samples are decoded as two
+//! halves of 18 ([`SPARSE_GROUP_SIZE`]); for each half a q1 codeword
+//! gives `cnt`, then a §6.5 enumerative (combinatorial) codeword names
+//! *which* `min(cnt, 18 − cnt)` of the 18 positions are non-zero (the
+//! mask is bit-inverted when `cnt > 9` because the smaller complement
+//! is always coded), and finally one raw sign bit per present position
+//! sets it to `±1` (`requant-quantizer-offset-Dc` pins `D = 1` for
+//! `band_type` 1, so the only non-zero levels are `{−1, +1}`).
+//! [`decode_sv8_sparse_band`] wires this end to end; the enumerative
+//! coder ([`enum_decode_subset`]) and its phased-binary index read are
+//! both pinned by §6.5 (binomial code space, `bitlen − 1` bits with a
+//! conditional extra "lost-codes" bit, then a combinadic peel). All
+//! arithmetic is computed (binomial recurrence) — no new tables.
 //!
-//! The case is reachable through [`crate::sv8_band_decode`]'s
-//! classifier; asking this module to decode it is answered with
-//! [`Error::UnsupportedBandType`] — fail-loud, not silently-wrong.
 //! Cases `-1` (CNS) and `0` (empty) are shared arms with SV7 (the
 //! round-245 classifier tests pin the agreement) and reuse
 //! [`crate::sv7_band_decode::fill_cns_band`] /
@@ -178,6 +182,203 @@ pub const fn escape_raw_bits(band_type: i8) -> Option<u8> {
 /// Sign-extend the low 4 bits of `n` as a two's-complement nibble.
 const fn sign_extend_nibble(n: u8) -> i8 {
     (((n & 0x0F) << 4) as i8) >> 4
+}
+
+/// Number of positions in each of the two sparse-band groups
+/// (§6.4.1: "the 36 samples are decoded in two halves of 18").
+pub const SPARSE_GROUP_SIZE: usize = 18;
+
+/// Binomial coefficient `C(n, k)` for the small `n ≤ 18` the §6.5
+/// enumerative coder operates over.
+///
+/// Computed with the multiplicative recurrence so no precomputed
+/// table is needed; `C(18, 9) = 48620` is the largest value reached
+/// in the sparse-band path and fits comfortably in `u32`.
+const fn binomial(n: u32, k: u32) -> u32 {
+    if k > n {
+        return 0;
+    }
+    let k = if k > n - k { n - k } else { k };
+    let mut num: u64 = 1;
+    let mut i: u32 = 0;
+    while i < k {
+        num = num * (n - i) as u64 / (i + 1) as u64;
+        i += 1;
+    }
+    num as u32
+}
+
+/// `(bitlen, lost)` for a §6.5 enumerative code space of `total`
+/// distinct codewords.
+///
+/// `bitlen = ceil(log2(total))` is the width of a full (long)
+/// codeword; `lost = 2^bitlen − total` is the count of "lost codes"
+/// the non-power-of-two code space leaves over — those many codewords
+/// are stored one bit shorter (the truncated-/phased-binary code the
+/// §6.5 prose describes: "Decode reads `bitlen − 1` bits; if the
+/// value reaches into the 'lost-codes' region it reads one more bit
+/// and rebases"). `total ≤ 1` ⇒ a single codeword carrying zero bits.
+const fn enum_bitlen_lost(total: u32) -> (u8, u32) {
+    if total <= 1 {
+        return (0, 0);
+    }
+    // bitlen = ceil(log2(total))
+    let mut bitlen: u8 = 0;
+    while (1u32 << bitlen) < total {
+        bitlen += 1;
+    }
+    let lost = (1u32 << bitlen) - total;
+    (bitlen, lost)
+}
+
+/// Decode one §6.5 enumerative (combinatorial) codeword naming a
+/// specific `k`-subset of `n` positions, returning the selected
+/// positions as a low-`n`-bit mask (bit `p` set ⇒ position `p`
+/// selected).
+///
+/// Two stages, both pinned by §6.5:
+///
+/// 1. **Phased-binary index read.** The code space has
+///    `total = C(n, k)` codewords; with
+///    `(bitlen, lost) = `[`enum_bitlen_lost`]`(total)`, read
+///    `bitlen − 1` bits as `code`; if `code ≥ lost` the codeword is a
+///    full one, so read one more bit and rebase
+///    `code = (code << 1) − lost + bit`. The `lost` short codewords
+///    (`code < lost`) carry the low-ranked subsets.
+/// 2. **Combinadic peel.** Walk positions `m` from `n − 1` down to
+///    `0`; at each, if the running `code ≥ C(m, k)` mark position `m`,
+///    subtract `C(m, k)`, and decrement `k`. The result is exactly an
+///    `n`-bit mask with `k` set bits.
+///
+/// `k == 0` selects the empty subset (no bits read, mask 0); `k == n`
+/// selects all positions (a single codeword, no bits read).
+fn enum_decode_subset(reader: &mut Sv7BitReader<'_>, k: u32, n: u32) -> Result<u32> {
+    let total = binomial(n, k);
+    let (bitlen, lost) = enum_bitlen_lost(total);
+    let mut code: u32 = if bitlen == 0 {
+        0
+    } else {
+        let mut c = reader.read_bits(bitlen - 1)? as u32;
+        if c >= lost {
+            c = (c << 1) - lost + reader.read_bits(1)? as u32;
+        }
+        c
+    };
+    let mut mask: u32 = 0;
+    let mut kk = k;
+    let mut m = n;
+    while m > 0 && kk > 0 {
+        m -= 1;
+        let c = binomial(m, kk);
+        if code >= c {
+            mask |= 1 << m;
+            code -= c;
+            kk -= 1;
+        }
+    }
+    Ok(mask)
+}
+
+/// Decode one §6.4.1 sparse-band group of [`SPARSE_GROUP_SIZE`]
+/// (= 18) samples into `out`, given the per-group non-zero count
+/// `cnt` (already decoded from the `sv8-canonical-q1` table by the
+/// caller).
+///
+/// Per §6.4.1:
+///
+/// 1. `cnt == 0` ⇒ all 18 samples are zero (no bits read);
+///    `cnt == 18` ⇒ all 18 positions are present (no enumerative bits
+///    read — the full mask is implied).
+/// 2. Otherwise read a §6.5 enumerative codeword
+///    ([`enum_decode_subset`]) selecting `min(cnt, 18 − cnt)`
+///    positions; when `cnt > 9` the coder named the *complement* (the
+///    smaller of the two selections is always coded), so the mask is
+///    bit-inverted within the 18-bit field to recover the present
+///    positions.
+/// 3. Walk the 18 positions MSB-first (position 17 down to 0); each
+///    present position reads **one raw sign bit** and is set to
+///    `(bit << 1) − 1`, i.e. `+1` for a 1 bit and `−1` for a 0 bit;
+///    absent positions stay 0.
+///
+/// `cnt > 18` yields [`Error::GroupedSymbolOutOfRange`] (a malformed
+/// q1 symbol — the staged map spans `0..=18` exactly, so this is
+/// unreachable for a well-formed stream and kept as a defensive
+/// bound).
+fn decode_sparse_group(
+    reader: &mut Sv7BitReader<'_>,
+    cnt: u8,
+    out: &mut [i8; SPARSE_GROUP_SIZE],
+) -> Result<()> {
+    *out = [0; SPARSE_GROUP_SIZE];
+    let n = SPARSE_GROUP_SIZE as u32;
+    let cnt_u = cnt as u32;
+    if cnt_u > n {
+        return Err(Error::GroupedSymbolOutOfRange(cnt as i8));
+    }
+    let present_mask: u32 = if cnt_u == 0 {
+        0
+    } else if cnt_u == n {
+        (1 << n) - 1
+    } else {
+        let k = cnt_u.min(n - cnt_u);
+        let coded = enum_decode_subset(reader, k, n)?;
+        if cnt_u > n / 2 {
+            (!coded) & ((1 << n) - 1)
+        } else {
+            coded
+        }
+    };
+    // Walk positions MSB-first; each present position reads one sign
+    // bit and becomes ±1.
+    for p in (0..SPARSE_GROUP_SIZE).rev() {
+        if present_mask & (1 << p) != 0 {
+            let bit = reader.read_bits(1)? as i8;
+            out[p] = (bit << 1) - 1;
+        }
+    }
+    Ok(())
+}
+
+/// Decode 36 samples for an SV8 band with `band_type == 1`
+/// (§3.4 / §6.4.1 sparse case,
+/// [`crate::sv8_band_decode::Sv8BandDecodeCase::SparseBand`]).
+///
+/// The band is decoded as **two halves of 18**
+/// ([`SPARSE_GROUP_SIZE`]); for each half:
+///
+/// 1. one `sv8-canonical-q1` canonical-Huffman codeword decodes the
+///    half's non-zero count `cnt` (the q1 symbol map is the 19-symbol
+///    alphabet `0..=18`, exactly one count per group of 18 — the fact
+///    earlier rounds could not reconcile with the older "18-flag
+///    bitmap" reading and that §6.4.1 now resolves);
+/// 2. [`decode_sparse_group`] reads the §6.5 enumerative
+///    position-selection codeword plus one sign bit per present
+///    position, filling that half with values in `{−1, 0, +1}`.
+///
+/// Output samples are already-centred levels in `{−1, 0, +1}`
+/// (`requant-quantizer-offset-Dc` pins `D = 1` for `band_type` 1), so
+/// the `[i8; 36]` shape matches the other grouped arms and the
+/// [`crate::sv8_band_decode::decode_sv8_band`] dispatcher widens it to
+/// `[i32; 36]` loss-free.
+///
+/// A malformed q1 count (> 18) yields
+/// [`Error::GroupedSymbolOutOfRange`]; EOF in any phase propagates as
+/// [`Error::UnexpectedEof`].
+pub fn decode_sv8_sparse_band(
+    reader: &mut Sv7BitReader<'_>,
+    out: &mut [i8; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let table = table_for_role(Sv8TableRole::Q1, 0).ok_or(Error::UnsupportedBandType(1))?;
+    for half in out.chunks_exact_mut(SPARSE_GROUP_SIZE) {
+        let cnt = table.decode(reader)?;
+        if !(0..=SPARSE_GROUP_SIZE as i8).contains(&cnt) {
+            return Err(Error::GroupedSymbolOutOfRange(cnt));
+        }
+        let mut group = [0_i8; SPARSE_GROUP_SIZE];
+        decode_sparse_group(reader, cnt as u8, &mut group)?;
+        half.copy_from_slice(&group);
+    }
+    Ok(())
 }
 
 /// Unpack one §3.4 case-2 grouped codeword symbol into its three
@@ -406,6 +607,22 @@ mod tests {
             for i in 0..length {
                 let bit = (pattern >> (15 - i)) & 1;
                 self.acc = (self.acc << 1) | bit as u32;
+                self.nbits += 1;
+                if self.nbits == 8 {
+                    self.bytes.push(self.acc as u8);
+                    self.acc = 0;
+                    self.nbits = 0;
+                }
+            }
+        }
+
+        /// Push the low `length` bits of `value` MSB-first (a
+        /// right-justified raw field, the convention the enumerative
+        /// index and sign bits use).
+        fn push_raw(&mut self, value: u32, length: u8) {
+            for i in (0..length).rev() {
+                let bit = (value >> i) & 1;
+                self.acc = (self.acc << 1) | bit;
                 self.nbits += 1;
                 if self.nbits == 8 {
                     self.bytes.push(self.acc as u8);
@@ -1071,6 +1288,253 @@ mod tests {
         ));
     }
 
+    // ─── Sparse band (case 1, §6.4.1 + §6.5) ──────────────
+
+    /// Reference binomial for the test-side encoder (independent of
+    /// the impl's `const fn binomial`).
+    fn comb(n: u32, k: u32) -> u32 {
+        if k > n {
+            return 0;
+        }
+        let k = k.min(n - k);
+        let mut r: u64 = 1;
+        for i in 0..k {
+            r = r * (n - i) as u64 / (i + 1) as u64;
+        }
+        r as u32
+    }
+
+    /// Encode one §6.5 enumerative codeword for `coded` (a `k`-subset
+    /// of `n` positions, as a low-`n`-bit mask) into `p`, mirroring
+    /// the phased-binary + combinadic convention the decoder inverts.
+    fn pack_enum_subset(p: &mut BitPacker, coded: u32, k: u32, n: u32) {
+        let total = comb(n, k);
+        if total <= 1 {
+            return; // bitlen 0 → no bits
+        }
+        let mut bitlen: u8 = 0;
+        while (1u32 << bitlen) < total {
+            bitlen += 1;
+        }
+        let lost = (1u32 << bitlen) - total;
+        // combinadic rank (same greedy high→low walk as the decoder)
+        let mut rank: u32 = 0;
+        let mut kk = k;
+        let mut m = n;
+        while m > 0 && kk > 0 {
+            m -= 1;
+            if coded & (1 << m) != 0 {
+                rank += comb(m, kk);
+                kk -= 1;
+            }
+        }
+        if rank < lost {
+            // short codeword: bitlen-1 bits
+            p.push_raw(rank, bitlen - 1);
+        } else {
+            // long codeword: (rank + lost) in bitlen bits
+            p.push_raw(rank + lost, bitlen);
+        }
+    }
+
+    /// Encode one sparse group of 18 samples (`{-1,0,+1}`) into `p`,
+    /// returning the `cnt` the caller must emit via the q1 table:
+    /// the enumerative position codeword (omitted for cnt 0 / 18) plus
+    /// one MSB-first sign bit per present position.
+    fn pack_sparse_group(p: &mut BitPacker, samples: &[i8; 18]) -> u8 {
+        let n = 18u32;
+        let mut present: u32 = 0;
+        for (i, &s) in samples.iter().enumerate() {
+            if s != 0 {
+                present |= 1 << i;
+            }
+        }
+        let cnt = present.count_ones();
+        if cnt != 0 && cnt != n {
+            let (coded, k) = if cnt > n / 2 {
+                ((!present) & ((1 << n) - 1), n - cnt)
+            } else {
+                (present, cnt)
+            };
+            pack_enum_subset(p, coded, k, n);
+        }
+        // sign bits MSB-first over present positions
+        for pos in (0..18).rev() {
+            if present & (1 << pos) != 0 {
+                let s = samples[pos];
+                p.push_raw(if s > 0 { 1 } else { 0 }, 1);
+            }
+        }
+        cnt as u8
+    }
+
+    /// Emit a q1 codeword carrying the count `cnt` (the shortest code
+    /// that maps to symbol == cnt), so a sparse-band test stream is
+    /// self-contained.
+    fn push_q1_count(p: &mut BitPacker, cnt: u8) {
+        use crate::sv8_huffman::SV8_Q1_TABLE;
+        let (pat, len, _sym) = find_codeword(&SV8_Q1_TABLE, |s| s == cnt as i8)
+            .unwrap_or_else(|| panic!("q1 has a codeword for cnt {cnt}"));
+        p.push(pat, len);
+    }
+
+    /// Count of non-zero samples in an 18-sample group.
+    fn nonzero_count(samples: &[i8; 18]) -> u8 {
+        samples.iter().filter(|&&s| s != 0).count() as u8
+    }
+
+    /// Build a complete `band_type == 1` stream from two 18-sample
+    /// halves (q1 count + group payload, in stream order per half) and
+    /// decode it back, asserting an exact round trip.
+    fn sparse_roundtrip(first: [i8; 18], second: [i8; 18]) {
+        let mut p = BitPacker::new();
+        push_q1_count(&mut p, nonzero_count(&first));
+        pack_sparse_group(&mut p, &first);
+        push_q1_count(&mut p, nonzero_count(&second));
+        pack_sparse_group(&mut p, &second);
+        let bytes = p.finish();
+
+        let mut reader = Sv7BitReader::new(&bytes);
+        let mut out = [99_i8; SAMPLES_PER_BAND];
+        decode_sv8_sparse_band(&mut reader, &mut out).expect("sparse decode");
+        let mut expected = [0_i8; SAMPLES_PER_BAND];
+        expected[..18].copy_from_slice(&first);
+        expected[18..].copy_from_slice(&second);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn sparse_all_zero_band_reads_only_two_q1_counts() {
+        // Both halves cnt 0: no enumerative or sign bits, just two q1
+        // count codewords; every sample is 0.
+        use crate::sv8_huffman::SV8_Q1_TABLE;
+        let (pat, len, _) = find_codeword(&SV8_Q1_TABLE, |s| s == 0).unwrap();
+        let mut p = BitPacker::new();
+        p.push(pat, len);
+        p.push(pat, len);
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let before = reader.bits_remaining();
+        let mut out = [7_i8; SAMPLES_PER_BAND];
+        decode_sv8_sparse_band(&mut reader, &mut out).expect("decode");
+        assert_eq!(out, [0; SAMPLES_PER_BAND]);
+        assert_eq!(before - reader.bits_remaining(), 2 * len as u64);
+    }
+
+    #[test]
+    fn sparse_single_nonzero_per_half_roundtrips() {
+        // cnt 1 in each half: enumerative code names one of 18
+        // positions, one sign bit each.
+        let mut a = [0_i8; 18];
+        a[5] = 1;
+        let mut b = [0_i8; 18];
+        b[12] = -1;
+        sparse_roundtrip(a, b);
+    }
+
+    #[test]
+    fn sparse_complement_inversion_above_half_roundtrips() {
+        // cnt 14 (> 9): the coder names the 4-position complement and
+        // the decoder bit-inverts. Mixed signs.
+        let mut a = [0_i8; 18];
+        for (i, s) in a.iter_mut().enumerate() {
+            *s = if matches!(i, 2 | 7 | 11 | 15) {
+                0
+            } else if i % 2 == 0 {
+                1
+            } else {
+                -1
+            };
+        }
+        let b = [1_i8; 18]; // cnt 18: all present, no enumerative bits
+        sparse_roundtrip(a, b);
+    }
+
+    #[test]
+    fn sparse_every_count_roundtrips_with_distinct_positions() {
+        // Sweep cnt 0..=18 in the first half (lowest `cnt` positions
+        // set, signs alternating) paired with an all-zero second half.
+        for cnt in 0..=18usize {
+            let mut a = [0_i8; 18];
+            for (i, s) in a.iter_mut().enumerate().take(cnt) {
+                *s = if i % 2 == 0 { 1 } else { -1 };
+            }
+            sparse_roundtrip(a, [0; 18]);
+        }
+    }
+
+    #[test]
+    fn sparse_full_band_all_present_both_halves() {
+        // cnt 18 in both halves: no enumerative bits, 18 sign bits per
+        // half; the decoder must read exactly 2 q1 + 36 sign bits.
+        let a = [1_i8; 18];
+        let mut b = [0_i8; 18];
+        for (i, s) in b.iter_mut().enumerate() {
+            *s = if i % 3 == 0 { -1 } else { 1 };
+        }
+        sparse_roundtrip(a, b);
+    }
+
+    #[test]
+    fn sparse_rejects_malformed_count_above_18() {
+        // decode_sparse_group is internal; exercise its bound directly
+        // through a hand value via decode_sv8_sparse_band is not
+        // possible (q1 caps at 18), so test the group helper's guard.
+        let mut reader = Sv7BitReader::new(&[0xFF; 8]);
+        let mut group = [0_i8; SPARSE_GROUP_SIZE];
+        assert!(matches!(
+            decode_sparse_group(&mut reader, 19, &mut group),
+            Err(Error::GroupedSymbolOutOfRange(19)),
+        ));
+    }
+
+    #[test]
+    fn sparse_propagates_eof() {
+        // A single q1 count for a non-empty half, then the stream ends
+        // before the sign bit can be read.
+        use crate::sv8_huffman::SV8_Q1_TABLE;
+        let (pat, len, _) = find_codeword(&SV8_Q1_TABLE, |s| s == 1).unwrap();
+        let mut p = BitPacker::new();
+        p.push(pat, len);
+        // cnt 1 needs an enumerative codeword (5 bits) + 1 sign bit;
+        // truncate so the decode starves.
+        let mut bytes = p.finish();
+        bytes.truncate(1);
+        let mut reader = Sv7BitReader::new(&bytes);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv8_sparse_band(&mut reader, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    #[test]
+    fn enum_bitlen_lost_matches_binomial_code_space() {
+        // (bitlen, lost) must satisfy 2^bitlen - lost == C(18,k).
+        for k in 0..=18u32 {
+            let total = binomial(18, k);
+            let (bitlen, lost) = enum_bitlen_lost(total);
+            if total <= 1 {
+                assert_eq!((bitlen, lost), (0, 0), "k {k}");
+            } else {
+                assert_eq!((1u32 << bitlen) - lost, total, "k {k}");
+                // bitlen is the ceil(log2): 2^(bitlen-1) < total.
+                assert!((1u32 << (bitlen - 1)) < total, "k {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn binomial_recurrence_matches_reference() {
+        for n in 0..=18u32 {
+            for k in 0..=n {
+                assert_eq!(binomial(n, k), comb(n, k), "C({n},{k})");
+            }
+        }
+        assert_eq!(binomial(18, 9), 48620);
+        assert_eq!(binomial(5, 3), 10);
+    }
+
     // ─── Classifier composition ────────────────────────────
 
     #[test]
@@ -1094,8 +1558,9 @@ mod tests {
             assert_eq!(sv8_band_type_case(bt), Sv8BandDecodeCase::LargeCoeffEscape);
             assert!(escape_raw_bits(bt).is_some());
         }
-        // The one DOCS-GAP arm (case 1, sparse band) stays
-        // unimplemented and fails loudly in every decoder here.
+        // Case 1 (sparse band) has its own dedicated decoder
+        // (decode_sv8_sparse_band); the grouped/context/escape
+        // decoders still reject band_type 1 (it is not their arm).
         assert_eq!(sv8_band_type_case(1), Sv8BandDecodeCase::SparseBand);
         let mut out = [0_i8; SAMPLES_PER_BAND];
         let mut out_i32 = [0_i32; SAMPLES_PER_BAND];

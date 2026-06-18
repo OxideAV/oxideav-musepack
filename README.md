@@ -71,18 +71,27 @@ Musepack ships in two incompatible stream-format generations:
   ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`).
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_scf_header` / `sv8_dscf_loop` — SV8 band-resolution walk,
-  per-band sample-decode dispatcher (CNS / empty / grouped /
-  context-Huffman / large-coefficient escape arms), and scalefactor
-  layer.
+  per-band sample-decode dispatcher (CNS / empty / **sparse** /
+  grouped / context-Huffman / large-coefficient escape arms), and
+  scalefactor layer. The sparse arm (§6.4.1) decodes each band as two
+  halves of 18: a `sv8-canonical-q1` non-zero count per half, a §6.5
+  enumerative (combinatorial) position-selection codeword
+  (binomial-coded, computed — no new tables), and one sign bit per
+  present `±1` sample. Every SV8 §3.4 sample-decode arm is now wired.
 
 ## Not yet wired (DOCS-GAP / downstream)
 
 - Absolute SCF anchor gain (the relative ladder is wired; the
   reference-index gain value is unspecified in the structural prose).
-- SV8 sparse band (case 1), the `RG` / `EI` / `SO` / `ST` packet
-  payload field maps (the `SH` field map is now wired — see
-  `sh_header`), and the varint inclusive/exclusive convention.
+- The `RG` / `EI` / `SO` / `ST` packet payload field maps (the `SH`
+  field map is now wired — see `sh_header`; `RG` / `EI` layouts are
+  now specified in `spec/musepack-headers-and-coding.md` §2 and are
+  the next pick).
 - M/S undo + the 32-band polyphase synthesis filterbank.
+
+The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
+and the SV8 packet-size varint convention is resolved as inclusive
+(`spec/musepack-headers-and-coding.md` §3).
 
 ## Codec category
 
