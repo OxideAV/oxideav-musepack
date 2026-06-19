@@ -54,6 +54,14 @@ Musepack ships in two incompatible stream-format generations:
 - `packet_stream` / `typed_packet` / `stream_shape` — SV8 packet-stream
   walker, per-kind typed packet views (`SH` / `RG` / `EI` / `SO` /
   `ST` / `AP` / `SE`), and a structural stream observer.
+- `rg_header` / `ei_header` — SV8 `RG` (ReplayGain) and `EI` (Encoder
+  Info) packet payload field-map decoders
+  (`spec/musepack-headers-and-coding.md` §2). `RG` carries the version
+  byte plus the title/album gain+peak quad (raw 16-bit, verbatim); `EI`
+  carries the packed `profile×8` + PNS flag byte plus the three-byte
+  encoder version (major / minor / build), with `profile()` /
+  `profile_int()` / `version_word()` helpers. Surfaced as
+  `ReplayGainPacket::fields()` and `EncoderInfoPacket::fields()`.
 - `huffman` — SV7 entropy tables plus a left-justified-code linear
   decoder and an MSB-first bit reader.
 - `sv8_huffman` — the 21 SV8 canonical-Huffman length tables + paired
@@ -94,10 +102,11 @@ Musepack ships in two incompatible stream-format generations:
 - Absolute SCF anchor gain (the relative ladder + per-granule multiply
   are wired; the reference-index gain value is unspecified in the
   structural prose).
-- The `RG` / `EI` / `SO` / `ST` packet payload field maps (the `SH`
-  field map is now wired — see `sh_header`; `RG` / `EI` layouts are
-  now specified in `spec/musepack-headers-and-coding.md` §2 and are
-  the next pick).
+- The `SO` / `ST` packet payload field maps (the `SH` / `RG` / `EI`
+  field maps are now wired — see `sh_header` / `rg_header` /
+  `ei_header`; the `SO` seek-table-offset and `ST` seek-table layouts
+  remain GAP in `spec/musepack-headers-and-coding.md` and are the next
+  pick).
 - **M/S undo** — §2.6 says "undo M/S where `msflag` set" but the exact
   channel arithmetic (whether `L = M + S` / `R = M − S`, and any 0.5 /
   √2 normalisation) is not specified anywhere under

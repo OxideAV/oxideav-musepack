@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 344** — SV8 `RG` (ReplayGain) and `EI` (Encoder Info) packet
+  payload field-map decoders, two new modules `rg_header` / `ei_header`,
+  closing the README "RG / EI packet payload field maps" pick. Both
+  layouts are now fully specified in
+  `spec/musepack-headers-and-coding.md` §2 (they were GAP when
+  `typed_packet`'s `RG`/`EI` newtypes were first wired in round 232).
+  - `rg_header::ReplayGainFields::parse(payload)` decodes the §2 `RG`
+    layout: 8-bit version (rejected via the new
+    `Error::InvalidReplayGainVersion` unless it equals 1), then four
+    big-endian 16-bit fields in order — title gain, title peak, album
+    gain, album peak — read straight off the natural-order SV8 byte
+    stream (§4). Gain/peak values are surfaced verbatim (raw 16-bit);
+    no dB/linear rescale is pinned by the staged facts.
+    `SV8_REPLAYGAIN_VERSION = 1` / `RG_PAYLOAD_LEN = 9` constants.
+  - `ei_header::EncoderInfoFields::parse(payload)` decodes the §2 `EI`
+    layout: a packed first byte (high 7 bits = `profile × 8`, low bit =
+    PNS noise-substitution flag), then three whole bytes — encoder
+    major, minor, build. Helpers `profile()` (fractional, `raw / 8`),
+    `profile_int()` (`raw >> 3`), and `version_word()`
+    (`(major<<24)|(minor<<16)|(build<<8)` per §2). `EI_PAYLOAD_LEN = 4`.
+  - Wired to the typed-packet surface as `ReplayGainPacket::fields()`
+    and `EncoderInfoPacket::fields()`, the §3.2 siblings of the
+    round-325 `StreamHeaderPacket::fields()`. The two newtypes' doc
+    comments are updated to point at the field maps instead of "GAP".
+  - New crate-level `Error::InvalidReplayGainVersion(u8)` variant.
+  - 14 new unit tests (canonical-payload decode, per-field-order pin
+    with distinct values, version rejection, truncation `UnexpectedEof`,
+    trailing-byte tolerance, payload-length constants for `RG`; profile
+    divide-by-8 + integer truncation, PNS low-bit isolation,
+    version-word packing, full-7-bit profile, truncation, trailing
+    bytes, length constant for `EI`). Crate lib total `361 → 375`.
+
 - **Round 336** — SV8 §3.4 / §6.4.1 sparse band (`band_type == 1`)
   sample decode in `sv8_sample_decode`, closing the last unimplemented
   SV8 per-band arm and wiring it into the

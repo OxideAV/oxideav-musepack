@@ -187,11 +187,13 @@
 #![forbid(unsafe_code)]
 
 pub mod cns;
+pub mod ei_header;
 pub mod framing;
 pub mod huffman;
 pub mod packet_stream;
 pub mod reconstruct;
 pub mod requant;
+pub mod rg_header;
 pub mod scf;
 pub mod sh_header;
 pub mod stream_shape;
@@ -276,6 +278,11 @@ pub enum Error {
     /// (`spec/musepack-headers-and-coding.md` §2, field 2). The
     /// offending value is included for diagnostic logging.
     InvalidStreamVersion(u8),
+    /// The SV8 `RG` (ReplayGain) packet declared a version byte other
+    /// than the required value 1
+    /// (`spec/musepack-headers-and-coding.md` §2). The offending value
+    /// is included for diagnostic logging.
+    InvalidReplayGainVersion(u8),
 }
 
 impl core::fmt::Display for Error {
@@ -323,6 +330,10 @@ impl core::fmt::Display for Error {
             Error::InvalidStreamVersion(v) => write!(
                 f,
                 "oxideav-musepack: SV8 SH stream-version byte {v} is not the required value 8",
+            ),
+            Error::InvalidReplayGainVersion(v) => write!(
+                f,
+                "oxideav-musepack: SV8 RG packet version byte {v} is not the required value 1",
             ),
         }
     }

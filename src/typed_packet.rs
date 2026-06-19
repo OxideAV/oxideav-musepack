@@ -67,8 +67,9 @@ impl<'a> StreamHeaderPacket<'a> {
 }
 
 /// ReplayGain (`RG`) packet — bitstream-level loudness metadata per
-/// spec §3.2. Field sizes (version + title gain/peak + album
-/// gain/peak) are GAP.
+/// spec §3.2. The per-field map (version + title gain/peak + album
+/// gain/peak) is decoded by [`ReplayGainPacket::fields`] per
+/// `docs/audio/musepack/spec/musepack-headers-and-coding.md` §2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayGainPacket<'a> {
     payload: &'a [u8],
@@ -79,11 +80,19 @@ impl<'a> ReplayGainPacket<'a> {
     pub fn payload_bytes(&self) -> &'a [u8] {
         self.payload
     }
+
+    /// Decode the `RG` payload field-map (headers-and-coding §2) into
+    /// [`crate::rg_header::ReplayGainFields`]. See that type for the
+    /// per-field errors.
+    pub fn fields(&self) -> crate::Result<crate::rg_header::ReplayGainFields> {
+        crate::rg_header::ReplayGainFields::parse(self.payload)
+    }
 }
 
 /// Encoder-info (`EI`) packet — encoder identification per spec
-/// §3.2 (profile / quality, PNS flag, encoder version). Field map
-/// is GAP.
+/// §3.2 (profile / quality, PNS flag, encoder version). The per-field
+/// map is decoded by [`EncoderInfoPacket::fields`] per
+/// `docs/audio/musepack/spec/musepack-headers-and-coding.md` §2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderInfoPacket<'a> {
     payload: &'a [u8],
@@ -93,6 +102,13 @@ impl<'a> EncoderInfoPacket<'a> {
     /// Opaque payload bytes.
     pub fn payload_bytes(&self) -> &'a [u8] {
         self.payload
+    }
+
+    /// Decode the `EI` payload field-map (headers-and-coding §2) into
+    /// [`crate::ei_header::EncoderInfoFields`]. See that type for the
+    /// per-field errors.
+    pub fn fields(&self) -> crate::Result<crate::ei_header::EncoderInfoFields> {
+        crate::ei_header::EncoderInfoFields::parse(self.payload)
     }
 }
 
