@@ -89,6 +89,14 @@ Musepack ships in two incompatible stream-format generations:
   reconstruct to silence (the §2.3 / §2.5 "data stored only for
   non-zero bands" convention). Pure composition — no new format facts;
   fail-loud on out-of-range subband / SCF-ladder index / band_type.
+- `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo *structure*:
+  `undo_ms_stereo(stereo, ms_flags, undo)` walks a stereo pair of
+  `SubbandMatrix` rows, transforming each `msflag`-set subband's
+  (mid, side) rows via a caller-supplied `undo(m, s) -> (l, r)` closure
+  and passing L/R subbands through. The per-sample mid/side →
+  left/right arithmetic is a documented GAP (unspecified under
+  `docs/audio/musepack/`) threaded as the closure knob, isolated for a
+  one-edit pin once a trace lands.
 - `scf` — SV7 SCF coding-method decoder (SCFI selector + DSCF deltas).
 - `cns` — CNS / noise-substitution two-LFSR PRNG.
 - `sv7_band_decode` / `sv7_band_header` — SV7 per-band header loop and
@@ -117,10 +125,14 @@ Musepack ships in two incompatible stream-format generations:
   `ei_header`; the `SO` seek-table-offset and `ST` seek-table layouts
   remain GAP in `spec/musepack-headers-and-coding.md` and are the next
   pick).
-- **M/S undo** — §2.6 says "undo M/S where `msflag` set" but the exact
-  channel arithmetic (whether `L = M + S` / `R = M − S`, and any 0.5 /
-  √2 normalisation) is not specified anywhere under
-  `docs/audio/musepack/`. DOCS-GAP.
+- **M/S undo arithmetic** — the §2.6 M/S-undo *structure* is now wired
+  in `ms_stereo` (`undo_ms_stereo` gates each subband on its `msflag`,
+  pairs the two channels' rows, passes L/R rows through unchanged), but
+  the exact per-sample channel arithmetic (whether `L = M + S` /
+  `R = M − S`, and any 0.5 / √2 normalisation) is **not specified
+  anywhere under `docs/audio/musepack/`** and is threaded as a
+  caller-supplied closure (the crate's GAP-knob pattern). The closure
+  is the one edit that pins it once a docs trace lands. DOCS-GAP.
 - **32-band polyphase synthesis filterbank** — the reconstruction path
   now reaches the full per-channel dequantised, per-granule-SCF-scaled
   `f64` subband-sample matrix (`frame_reconstruct::SubbandMatrix`, via

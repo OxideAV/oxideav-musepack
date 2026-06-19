@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 344** — SV7/SV8 §2.6 mid/side (M/S) stereo-undo *structure*,
+  new `ms_stereo` module. `undo_ms_stereo(stereo, ms_flags, undo)`
+  applies the §2.6 "undo M/S where `msflag` set" reconstruction step
+  across a stereo `StereoSubbandMatrix` (`[SubbandMatrix; 2]`): each
+  subband whose `ms_flags[b]` is set has its two channels' row `b`
+  (mid, side) transformed sample-by-sample into (left, right); L/R
+  subbands pass through unchanged.
+  - The **exact per-sample channel arithmetic** (whether `L = M + S` /
+    `R = M − S`, and any 0.5 / √2 normalisation) is a documented GAP —
+    unspecified anywhere under `docs/audio/musepack/` — so it is
+    threaded as a caller-supplied `undo(m, s) -> (l, r)` closure (the
+    crate's established GAP-knob pattern, cf.
+    `sv8_band_header`'s `ctx_for_prev_res`). The closure is the one
+    edit that pins the arithmetic once a docs trace lands; the module
+    wires the *structure* (per-subband `msflag` gating, channel-row
+    pairing, L/R pass-through) without committing to it.
+  - `StereoSubbandMatrix` type alias. `Error::MaxBandOutOfRange` for an
+    `ms_flags` schedule longer than the 32-subband frame; a shorter
+    schedule is allowed (subbands past its end pass through as L/R, per
+    the §2.3 "msflag only for coded bands" convention).
+  - 8 new unit tests (M/S subband transformed via a test-only
+    `L=M+S`/`R=M−S` stand-in, L/R pass-through, selective row gating,
+    empty/short/full-width/overlong schedules, per-sample index
+    pairing). Crate lib total `386 → 394`.
+
 - **Round 344** — SV7 §2.6 frame-level reconstruction assembler, new
   `frame_reconstruct` module. `reconstruct_frame_channel(bands, anchor)`
   composes the per-band
