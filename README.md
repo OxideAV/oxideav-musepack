@@ -79,6 +79,16 @@ Musepack ships in two incompatible stream-format generations:
   correctly, produces the reconstructed `f64` subband samples — relative
   to a caller-supplied SCF anchor (the absolute anchor is GAP), so
   granule-to-granule and anchor-sharing-band loudness is exact.
+- `frame_reconstruct` — SV7 §2.6 frame-level reconstruction assembler:
+  `reconstruct_frame_channel(bands, anchor)` composes the per-band
+  `reconstruct::reconstruct_sv7_band_from_levels` over the Layer-II
+  32-subband frame geometry (§1: 32 subbands × 36 samples = 1152 per
+  channel), producing the per-channel `SubbandMatrix`
+  (`[[f64; 36]; 32]`) — the structure the remaining §2.6 steps (M/S
+  undo, then the synthesis filterbank) consume. Uncoded subbands
+  reconstruct to silence (the §2.3 / §2.5 "data stored only for
+  non-zero bands" convention). Pure composition — no new format facts;
+  fail-loud on out-of-range subband / SCF-ladder index / band_type.
 - `scf` — SV7 SCF coding-method decoder (SCFI selector + DSCF deltas).
 - `cns` — CNS / noise-substitution two-LFSR PRNG.
 - `sv7_band_decode` / `sv7_band_header` — SV7 per-band header loop and
@@ -112,8 +122,10 @@ Musepack ships in two incompatible stream-format generations:
   √2 normalisation) is not specified anywhere under
   `docs/audio/musepack/`. DOCS-GAP.
 - **32-band polyphase synthesis filterbank** — the reconstruction path
-  now reaches dequantised, per-granule-SCF-scaled `f64` subband samples
-  (`reconstruct_sv7_band_from_levels`). The final windowing step needs
+  now reaches the full per-channel dequantised, per-granule-SCF-scaled
+  `f64` subband-sample matrix (`frame_reconstruct::SubbandMatrix`, via
+  `reconstruct_frame_channel` composing the per-band
+  `reconstruct_sv7_band_from_levels`). The final windowing step needs
   the Layer-II synthesis window `D_i` (Table 3-B.3) and the `N_ik`
   matrix, which §1 of the spec states live in the in-repo ISO
   11172-3 PDF under `docs/audio/mp3/` — outside this crate's

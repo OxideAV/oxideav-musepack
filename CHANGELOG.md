@@ -8,6 +8,33 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 344** — SV7 §2.6 frame-level reconstruction assembler, new
+  `frame_reconstruct` module. `reconstruct_frame_channel(bands, anchor)`
+  composes the per-band
+  `reconstruct::reconstruct_sv7_band_from_levels` over the Layer-II
+  32-subband frame geometry (spec §1: 32 subbands × 36 samples = 1152
+  per channel), producing the per-channel `SubbandMatrix`
+  (`[[f64; 36]; SV7_SUBBAND_COUNT]`) — the structure the remaining §2.6
+  steps (M/S undo, then the synthesis filterbank) consume.
+  - `SubbandMatrix` type alias + `zero_subband_matrix()` constructor.
+  - `BandLevels { subband, band_type, levels: [i32; 36], granule_scf:
+    [u32; 3] }` — one decoded band's input; bands absent from the slice
+    (uncoded subbands) reconstruct to silence (the §2.3 / §2.5 "data
+    stored only for non-zero bands" convention).
+  - Fail-loud, never silently-wrong: `Error::MaxBandOutOfRange` for a
+    `subband >= 32` or an SCF index outside the `0..SCF_INDEX_COUNT`
+    (256) ladder (the §5.3 "clamp to sentinel" note is surfaced as an
+    error rather than silently clamped); `Error::UnsupportedBandType`
+    propagated for a `band_type` outside `-1..=17`.
+  - Pure composition — no new format facts beyond the documented frame
+    geometry + the already-grounded per-band reconstruction.
+  - 11 new unit tests (zero-matrix silence, empty/absent-band silence,
+    single-band agreement with the direct per-band path, multi-band
+    row placement + sign preservation, per-granule SCF reaching the
+    right 12-sample slice with monotone gain, subband / SCF-ladder /
+    band_type rejection, CNS-band row placement, and the 32×36 == 1152
+    geometry cross-check). Crate lib total `375 → 386`.
+
 - **Round 344** — SV8 `RG` (ReplayGain) and `EI` (Encoder Info) packet
   payload field-map decoders, two new modules `rg_header` / `ei_header`,
   closing the README "RG / EI packet payload field maps" pick. Both
