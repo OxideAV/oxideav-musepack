@@ -8,6 +8,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 353** — SV8 §6.2 band-resolution (`Res`) header walk, now
+  grounded (was two GAP-knobs). The freshly-staged
+  `spec/musepack-headers-and-coding.md` §6.2 closes the
+  `decode_band_resolutions` caller closures with two pinned rules:
+  - **Context selection** — the `res-1` (ctx 0) vs `res-2` (ctx 1)
+    pick is "whether the band-above `Res` exceeds 2" (`> 2 ⇒ ctx 1`);
+    the top used band reads ctx 0. New `res_ctx_for_above`.
+  - **Top-down delta + signed wrap** — bands decode highest-index
+    first; the top band's raw value is the `band_type` after "values
+    above 15 wrap by −17" (raw `16 ⇒ −1` CNS), and each lower band
+    folds `Res[n] = canon(Res, ctx) + Res[n+1]`, re-wrapped. New
+    `wrap_res`. This closes the `RawResVlc → band_type` remap GAP the
+    module documented: the grounded walk emits signed `i8` band_types
+    in ascending band order, ready for `sv8_band_type_case`.
+  - `decode_band_resolutions_grounded(reader, nbands) -> Vec<i8>`: the
+    knob-free §6.2 walk. The legacy GAP-knob `decode_band_resolutions`
+    (closure + `RawResVlc` output) is retained.
+  - 8 new unit tests: `wrap_res` ring pins (pass-through + `16→−1` +
+    post-delta `30→13`), the `>2` context predicate, single-band
+    ctx-0 wrap across the full res-1 alphabet, an equivalence
+    cross-check against a hand-replicated §6.2 walk over five varied
+    band chains, ascending-order verification, and mid-walk EOF.
+    Crate lib total `416 → 424`.
+
 - **Round 348** — SV8 §6.4.2 first-order context model, now grounded
   (was two GAP-knobs). The staged
   `spec/musepack-headers-and-coding.md` §6.4.2 closes the

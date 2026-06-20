@@ -37,30 +37,33 @@
 //!    walk reads exactly one `res` VLC per coded band, in ascending
 //!    band order.
 //!
-//! ## What the §3.4 prose does NOT pin (caller knobs / GAP)
+//! ## §6.2 now GROUNDS the context rule + the band_type remap
 //!
-//! - **The `res-1` vs `res-2` context-selection rule.** §3.4 ships a
-//!   `{ctx0, ctx1}` pair for the band-resolution selector but the
-//!   structural prose does not state the predicate choosing which
-//!   half a given band reads from (the SV8 first-order context model
-//!   is named in §3.4 for the *sample* tables `5..=8`, not spelled
-//!   out for the band-resolution selector). [`decode_band_resolutions`]
-//!   takes the pick as a caller-supplied closure
-//!   `ctx_for_prev_res(previous_raw_res) -> ctx`, the same GAP-knob
-//!   precedent the per-sample context arm uses
-//!   ([`crate::sv8_sample_decode::decode_sv8_context_band`]); the
-//!   first band uses a caller-supplied `initial_ctx`.
-//! - **The raw-`res`-symbol → §3.4 `band_type` remap.** The `res`
-//!   symbol maps span `0..=16` while the §3.4 sample `switch` ladder
-//!   ranges over `band_type` in `-1..=17`. The two domains do not
-//!   line up cell-for-cell, so an upstream remap is implied — but
-//!   its shape (an offset, a CNS-flag escape, a delta-from-previous)
-//!   is unspecified in the structural prose. This module returns the
-//!   raw VLC value wrapped in [`RawResVlc`] so a caller cannot
-//!   accidentally feed it straight into a
-//!   [`crate::sv8_band_decode::sv8_band_type_case`] dispatcher
-//!   without an explicit remap step that does not yet exist (the
-//!   exact analogue of SV7's [`crate::sv7_band_header::RawBandTypeVlc`]).
+//! The staged `spec/musepack-headers-and-coding.md` **§6.2** closes the
+//! two GAPs the original GAP-knob walk ([`decode_band_resolutions`])
+//! carried — both are now pinned by [`decode_band_resolutions_grounded`]:
+//!
+//! - **The `res-1` vs `res-2` context-selection rule.** §6.2: the
+//!   Res-table context is selected by "whether the band-above `Res`
+//!   exceeds 2" (`> 2` ⇒ `res-2` / ctx 1, else `res-1` / ctx 0). The
+//!   **top** used band has no band above and reads from ctx 0. This is
+//!   no longer a caller closure — see [`res_ctx_for_above`].
+//! - **The raw-`res`-symbol → §3.4 `band_type` remap.** §6.2: bands are
+//!   decoded **top-down**; the top band's raw value is the band_type
+//!   after "values > 15 wrap by −17 (signed range)", and each lower
+//!   band folds `Res[n] = canon(Res, ctx) + Res[n+1]`, re-wrapped the
+//!   same way. So the staged `0..=16` raw alphabet maps onto the signed
+//!   `-1..=15` band_type ring directly via [`wrap_res`] + the delta
+//!   fold — no separate offset/escape table is needed. The grounded
+//!   walk therefore returns signed `i8` band_types ready for
+//!   [`crate::sv8_band_decode::sv8_band_type_case`].
+//!
+//! ## What §3.4 / §6.2 still leave to the caller (GAP)
+//!
+//! - The legacy GAP-knob [`decode_band_resolutions`] (closure + raw
+//!   [`RawResVlc`] output) is retained for callers that want to drive
+//!   the context rule themselves or inspect the pre-wrap raw alphabet,
+//!   but new band-walk wiring should prefer the grounded function.
 //! - **Per-channel ordering / interleaving.** Unlike SV7 §2.3 (which
 //!   reproduces an explicit `for ch` inner loop, "left band first,
 //!   right band next"), the §3.4 prose reproduces only the per-band
@@ -232,6 +235,112 @@ where
         ctx = ctx_for_prev_res(raw);
     }
     Ok(out)
+}
+
+/// The §6.2 signed-`band_type` wrap: the staged `res` symbol maps emit
+/// a raw value in `0..=16`, but the §3.4 sample `switch` ladder ranges
+/// over a *signed* `band_type` in `-1..=15` here. Spec §6.2: "values
+/// above 15 wrap by −17 (signed range)". So a raw `16` becomes `-1`
+/// (the CNS case), and `0..=15` pass through unchanged.
+/// The same wrap is reapplied after the delta fold (`canon + above`),
+/// keeping every intermediate and final `band_type` inside the signed
+/// ring.
+#[inline]
+const fn wrap_res(v: i32) -> i8 {
+    if v > 15 {
+        (v - 17) as i8
+    } else {
+        v as i8
+    }
+}
+
+/// The §6.2 per-band Res-table **context** predicate: the context-pair
+/// half (`sv8-canonical-res-1` = ctx 0 vs `-2` = ctx 1) is selected by
+/// "whether the band-above `Res` exceeds 2". So a band whose neighbour
+/// above decoded to a `band_type > 2` reads its own res VLC from
+/// context 1; otherwise from context 0. The top used band has no band
+/// above and reads from context 0 (`res-1`) directly.
+#[inline]
+const fn res_ctx_for_above(above: i8) -> u8 {
+    if above > 2 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Walk the §6.2 SV8 per-band band-resolution header **fully grounded**
+/// — no caller knobs. This is the §6.2 replacement for the GAP-knob
+/// [`decode_band_resolutions`]: §6.2 now pins both the context-selection
+/// predicate and the top-down delta fold that that function carried as
+/// caller-supplied closures.
+///
+/// §6.2 decode order and arithmetic:
+///
+/// - **Top band first, downward.** Bands are decoded from the highest
+///   coded index down to band 0. The **top** used band reads its res
+///   VLC from **context 0** (`sv8-canonical-res-1`); its raw value is
+///   wrapped to the signed `band_type` ring by [`wrap_res`] (raw `16`
+///   ⇒ `-1`).
+/// - **Lower bands delta off the band above.** For each band below the
+///   top, the res-table context is [`res_ctx_for_above`] of the
+///   *already-decoded band above* (`above > 2` ⇒ ctx 1, else ctx 0);
+///   the decoded raw value is added to the band-above `band_type`
+///   (`canon(Res, ctx) + Res[n+1]`) and the sum re-wrapped by
+///   [`wrap_res`].
+///
+/// The returned `Vec` is in **ascending band order** (`out[0]` = band
+/// 0, the lowest), holding the signed `band_type` ready to feed
+/// [`crate::sv8_band_decode::sv8_band_type_case`] directly — this is the
+/// §6.2 closure of the `RawResVlc → band_type` remap GAP that
+/// [`decode_band_resolutions`] left open.
+///
+/// `nbands` is the §6.2 used-band count (typically the
+/// [`decode_used_subbands`] result). `nbands == 0` reads nothing and
+/// returns an empty vector.
+///
+/// Errors:
+///
+/// - [`Error::UnexpectedEof`] mid-walk if the reader starves.
+/// - [`Error::HuffmanNoMatch`] if a res peek matches no row
+///   (unreachable for the staged res tables).
+/// - [`Error::UnsupportedBandType`] if [`table_for_role`] cannot supply
+///   the selected context's res table (unreachable for `ctx ∈ {0,1}`,
+///   kept as a defensive bound).
+pub fn decode_band_resolutions_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    nbands: u8,
+) -> Result<Vec<i8>> {
+    let n = nbands as usize;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Decoded top-down into a descending buffer, then reversed to
+    // ascending band order for the caller. `tmp[0]` = top band.
+    let mut tmp: Vec<i8> = Vec::with_capacity(n);
+
+    // Top band: context 0 (`res-1`), no band above to delta against.
+    let top_table =
+        table_for_role(Sv8TableRole::Res, 0).ok_or(Error::UnsupportedBandType(i8::MIN))?;
+    let top = wrap_res(top_table.decode(reader)? as i32);
+    tmp.push(top);
+
+    // Remaining bands, top-down: context from the band above, delta
+    // folded onto the band above, re-wrapped.
+    let mut above = top;
+    for _ in 1..n {
+        let ctx = res_ctx_for_above(above);
+        let table =
+            table_for_role(Sv8TableRole::Res, ctx).ok_or(Error::UnsupportedBandType(i8::MIN))?;
+        let raw = table.decode(reader)? as i32;
+        let res = wrap_res(raw + above as i32);
+        tmp.push(res);
+        above = res;
+    }
+
+    tmp.reverse();
+    Ok(tmp)
 }
 
 #[cfg(test)]
@@ -516,5 +625,190 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── §6.2 grounded helpers ─────────────────────────────
+
+    #[test]
+    fn wrap_res_pins_the_signed_band_type_ring() {
+        // §6.2: "values > 15 wrap by −17". 0..=15 pass through; 16 ⇒ −1
+        // (the CNS case); the wrap is idempotent on already-signed input.
+        for v in 0..=15 {
+            assert_eq!(wrap_res(v), v as i8, "raw {v} must pass through");
+        }
+        assert_eq!(wrap_res(16), -1, "raw 16 wraps to the CNS band_type −1");
+        // Post-delta sums above 15 also wrap (e.g. 15 + 15 = 30 ⇒ 13).
+        assert_eq!(wrap_res(30), 13);
+        assert_eq!(wrap_res(31), 14);
+        // A sum that stays in range is untouched.
+        assert_eq!(wrap_res(7), 7);
+        assert_eq!(wrap_res(0), 0);
+    }
+
+    #[test]
+    fn res_ctx_for_above_uses_the_band_above_exceeds_two_predicate() {
+        // §6.2: context-1 (`res-2`) iff the band-above Res exceeds 2.
+        for above in -1..=2 {
+            assert_eq!(res_ctx_for_above(above), 0, "above {above} ⇒ ctx 0");
+        }
+        for above in 3..=15 {
+            assert_eq!(res_ctx_for_above(above), 1, "above {above} ⇒ ctx 1");
+        }
+    }
+
+    // ─── decode_band_resolutions_grounded (§6.2) ───────────
+
+    /// Hand-replicate the §6.2 top-down walk independent of the impl:
+    /// top band from ctx 0 (wrap), each lower band's ctx from the band
+    /// above (`>2 ⇒ 1`), delta = raw + above, re-wrap. Returns
+    /// ascending band order. `row_for_ctx` chooses which length-table
+    /// row each successive decode reads (so callers drive the stream).
+    fn replicate_grounded(rows: &[usize]) -> (Vec<u8>, Vec<i8>) {
+        // Build the stream + the expected ascending-order band_type vec.
+        let mut p = BitPacker::new();
+        let mut top_down: Vec<i8> = Vec::new();
+        let mut above: Option<i8> = None;
+        for &row in rows {
+            let ctx = match above {
+                None => 0,
+                Some(a) => res_ctx_for_above_ref(a),
+            };
+            let table = if ctx == 0 {
+                &SV8_RES_1_TABLE
+            } else {
+                &SV8_RES_2_TABLE
+            };
+            let e = table.lengths[row];
+            p.push(e.code, e.length);
+            let raw = symbol_for_row(table, row) as i32;
+            let res = match above {
+                None => wrap_res_ref(raw),
+                Some(a) => wrap_res_ref(raw + a as i32),
+            };
+            top_down.push(res);
+            above = Some(res);
+        }
+        let mut ascending = top_down.clone();
+        ascending.reverse();
+        (p.finish(), ascending)
+    }
+
+    // Test-local mirrors of the (private const) impl helpers, so the
+    // expected vector is computed from the spec rule, not the impl.
+    fn wrap_res_ref(v: i32) -> i8 {
+        if v > 15 {
+            (v - 17) as i8
+        } else {
+            v as i8
+        }
+    }
+    fn res_ctx_for_above_ref(above: i8) -> u8 {
+        if above > 2 {
+            1
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn grounded_zero_bands_reads_nothing() {
+        let mut reader = Sv7BitReader::new(&[0xFF; 4]);
+        let before = reader.bits_remaining();
+        let res = decode_band_resolutions_grounded(&mut reader, 0).unwrap();
+        assert!(res.is_empty());
+        assert_eq!(reader.bits_remaining(), before, "0 bands reads no bits");
+    }
+
+    #[test]
+    fn grounded_single_band_reads_ctx0_and_wraps() {
+        // One band: ctx 0 (`res-1`), value wrapped to the signed ring.
+        // Use every res-1 row so the wrap is exercised across the full
+        // 0..=16 raw alphabet (the row whose symbol is 16 must yield −1).
+        for row in 0..SV8_RES_1_TABLE.lengths.len() {
+            let e = SV8_RES_1_TABLE.lengths[row];
+            let mut p = BitPacker::new();
+            p.push(e.code, e.length);
+            let bytes = p.finish();
+            let mut reader = Sv7BitReader::new(&bytes);
+            let res = decode_band_resolutions_grounded(&mut reader, 1).unwrap();
+            assert_eq!(res.len(), 1);
+            let raw = symbol_for_row(&SV8_RES_1_TABLE, row) as i32;
+            assert_eq!(res[0], wrap_res_ref(raw), "res-1 row {row}");
+        }
+    }
+
+    #[test]
+    fn grounded_matches_replicated_spec_walk_for_varied_chains() {
+        // Drive several multi-band chains by choosing length-table rows;
+        // the impl's ascending output must equal the spec replica's.
+        let chains: &[&[usize]] = &[
+            &[0, 0, 0],
+            &[0, 1, 2, 3],
+            &[5, 0, 7, 1, 0],
+            &[10, 10, 10, 10, 10, 10],
+            &[0, 11, 0, 11],
+        ];
+        for chain in chains {
+            // Skip any row index out of range for the table it would be
+            // read from would be a test bug; both res tables have ≥12
+            // rows so 0..=11 is always safe.
+            let (bytes, expected) = replicate_grounded(chain);
+            let mut reader = Sv7BitReader::new(&bytes);
+            let got = decode_band_resolutions_grounded(&mut reader, chain.len() as u8).unwrap();
+            assert_eq!(got, expected, "chain {chain:?}");
+        }
+    }
+
+    #[test]
+    fn grounded_output_is_ascending_band_order() {
+        // Construct a chain whose top-down decode is strictly recognis-
+        // able, then assert the returned vec is reversed (band 0 first).
+        // Top band reads row 0 of res-1; with a distinct second row the
+        // two bands differ, so order is observable.
+        let top_e = SV8_RES_1_TABLE.lengths[0];
+        let top_sym = symbol_for_row(&SV8_RES_1_TABLE, 0) as i32;
+        let top_res = wrap_res_ref(top_sym);
+        let ctx_below = res_ctx_for_above_ref(top_res);
+        let below_table = if ctx_below == 0 {
+            &SV8_RES_1_TABLE
+        } else {
+            &SV8_RES_2_TABLE
+        };
+        // pick a below-row whose folded result differs from top_res
+        let mut chosen: Option<(usize, i8)> = None;
+        for r in 0..below_table.lengths.len() {
+            let raw = symbol_for_row(below_table, r) as i32;
+            let res = wrap_res_ref(raw + top_res as i32);
+            if res != top_res {
+                chosen = Some((r, res));
+                break;
+            }
+        }
+        let (below_row, below_res) = chosen.expect("a distinct below band exists");
+        let mut p = BitPacker::new();
+        p.push(top_e.code, top_e.length);
+        let be = below_table.lengths[below_row];
+        p.push(be.code, be.length);
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let got = decode_band_resolutions_grounded(&mut reader, 2).unwrap();
+        // ascending: band 0 (decoded last / bottom) then band 1 (top).
+        assert_eq!(got, vec![below_res, top_res]);
+    }
+
+    #[test]
+    fn grounded_propagates_eof_mid_walk() {
+        let table = &SV8_RES_1_TABLE;
+        let e = table.lengths[0];
+        let mut p = BitPacker::new();
+        p.push(e.code, e.length);
+        let mut bytes = p.bytes.clone();
+        if p.nbits > 0 {
+            bytes.push((p.acc << (8 - p.nbits)) as u8);
+        }
+        // No trailing zero bytes: band 0 decodes, band 1's peek starves.
+        let mut reader = Sv7BitReader::new(&bytes);
+        let res = decode_band_resolutions_grounded(&mut reader, 2);
+        assert!(matches!(res, Err(Error::UnexpectedEof)));
     }
 }
