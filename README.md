@@ -17,7 +17,7 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~300 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~436 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
 
 ## Format outline
@@ -128,7 +128,12 @@ Musepack ships in two incompatible stream-format generations:
   truncated-binary code over `0..max_band+1`) and
   `decode_nonkey_max_used_band` (`last_max_band + canon(Bands)`, with
   the ">32 wraps by −33" fold). `decode_log_code` is the reusable §6.5
-  bounded-log primitive (also serving M/S `cnt`).
+  bounded-log primitive (also serving M/S `cnt`). The §6.2 SV8 mid/side
+  band-selection bitmap is wired too: `decode_sv8_ms_flags(reader, tot)`
+  reads `cnt` (M/S band count) via the log code, then a §6.5
+  enumerative codeword naming `min(cnt, tot−cnt)` of the `tot`
+  non-zero-channel bands (complement-inverted when `cnt > tot/2`),
+  returning a top-down `Vec<bool>` for the `ms_stereo` undo step.
 - `sv8_context` — the SV8 §6.4.2 first-order context model, now
   grounded. `Sv8Context` is the running accumulator the context-adaptive
   sample arms use to pick their canonical-Huffman table half: per `Res`

@@ -258,7 +258,11 @@ const fn enum_bitlen_lost(total: u32) -> (u8, u32) {
 ///
 /// `k == 0` selects the empty subset (no bits read, mask 0); `k == n`
 /// selects all positions (a single codeword, no bits read).
-fn enum_decode_subset(reader: &mut Sv7BitReader<'_>, k: u32, n: u32) -> Result<u32> {
+///
+/// `pub(crate)` so the §6.2 SV8 M/S band-selection
+/// ([`crate::sv8_band_header::decode_sv8_ms_flags`]) can reuse the same
+/// §6.5 enumerative coder the sparse arm uses.
+pub(crate) fn enum_decode_subset(reader: &mut Sv7BitReader<'_>, k: u32, n: u32) -> Result<u32> {
     let total = binomial(n, k);
     let (bitlen, lost) = enum_bitlen_lost(total);
     let mut code: u32 = if bitlen == 0 {

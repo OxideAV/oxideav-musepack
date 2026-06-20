@@ -275,6 +275,81 @@ pub fn decode_nonkey_max_used_band(reader: &mut Sv7BitReader<'_>, last_max_band:
     Ok(value as u8)
 }
 
+/// Decode the §6.2 SV8 **mid/side band-selection** bitmap: which of the
+/// `tot` non-zero-channel bands carry a per-band M/S flag.
+///
+/// §6.2: "rather than one bit per band, SV8 counts the bands with a
+/// non-zero channel (`tot`), reads a 'log' code `cnt` = how many of
+/// them are mid/side, then — if `0 < cnt < tot` — reads an enumerative
+/// (combinatorial) code selecting *which* `cnt` of the `tot` bands are
+/// flagged. The bitmap is applied to the non-zero bands from the top
+/// down."
+///
+/// `tot` is the count of bands with at least one non-zero channel
+/// (computed by the caller from the §6.2 band-resolution walk). The
+/// returned `Vec<bool>` has length `tot`; index `0` is the **topmost**
+/// non-zero band and index `tot − 1` the lowest (the "top down"
+/// application order). `true` ⇒ that band is mid/side.
+///
+/// Decode:
+///
+/// 1. `cnt` = [`decode_log_code`] over `0..tot+1` (how many bands are
+///    M/S). `cnt == 0` ⇒ no flags set; `cnt == tot` ⇒ all set; both
+///    read no enumerative bits.
+/// 2. Otherwise a §6.5 enumerative codeword
+///    ([`crate::sv8_sample_decode::enum_decode_subset`]) selects
+///    `min(cnt, tot − cnt)` positions of `tot`; when `cnt > tot / 2`
+///    the coder named the *complement* (the smaller subset is always
+///    coded), so the mask is bit-inverted within the `tot`-bit field.
+/// 3. The mask is read MSB-first: bit `tot − 1` is the topmost band
+///    (`out[0]`), down to bit `0` (`out[tot − 1]`).
+///
+/// `tot == 0` returns an empty vector (reads nothing).
+///
+/// Errors: [`Error::UnexpectedEof`] if the reader starves;
+/// [`Error::MaxBandOutOfRange`] if the decoded `cnt` exceeds `tot`
+/// (a malformed log-code tail; defensive — the `0..tot+1` bound makes
+/// it unreachable for a well-formed stream).
+pub fn decode_sv8_ms_flags(reader: &mut Sv7BitReader<'_>, tot: u8) -> Result<Vec<bool>> {
+    use crate::sv8_sample_decode::enum_decode_subset;
+
+    let n = tot as u32;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    let cnt = decode_log_code(reader, n + 1)?;
+    if cnt > n {
+        return Err(Error::MaxBandOutOfRange(cnt.min(u8::MAX as u32) as u8));
+    }
+
+    let mask: u32 = if cnt == 0 {
+        0
+    } else if cnt == n {
+        if n >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << n) - 1
+        }
+    } else {
+        let k = cnt.min(n - cnt);
+        let coded = enum_decode_subset(reader, k, n)?;
+        let full = if n >= 32 { u32::MAX } else { (1u32 << n) - 1 };
+        if cnt > n / 2 {
+            (!coded) & full
+        } else {
+            coded
+        }
+    };
+
+    // MSB-first: bit (tot-1) is the topmost band, out[0].
+    let mut out = Vec::with_capacity(tot as usize);
+    for p in (0..n).rev() {
+        out.push(mask & (1 << p) != 0);
+    }
+    Ok(out)
+}
+
 /// Walk the §3.4 per-band band-resolution header: read `nbands`
 /// `sv8-canonical-res-{1,2}` codewords in ascending band order,
 /// returning the raw VLC value of each wrapped in [`RawResVlc`].
@@ -1063,6 +1138,144 @@ mod tests {
         let mut reader = Sv7BitReader::new(&[]);
         assert!(matches!(
             decode_keyframe_max_used_band(&mut reader, 31),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── §6.2 SV8 M/S band-selection ───────────────────────
+
+    fn comb(n: u32, k: u32) -> u32 {
+        if k > n {
+            return 0;
+        }
+        let k = if k > n - k { n - k } else { k };
+        let mut num: u64 = 1;
+        for i in 0..k {
+            num = num * (n - i) as u64 / (i + 1) as u64;
+        }
+        num as u32
+    }
+
+    /// Reference §6.5 enumerative encoder: given an `n`-bit `mask` with
+    /// exactly `k` set bits, emit the phased-binary codeword (combinadic
+    /// rank + phased-binary index) MSB-first into `p`.
+    fn pack_enum_subset(p: &mut BitPacker, mask: u32, k: u32, n: u32) {
+        // combinadic rank
+        let mut rank: u32 = 0;
+        let mut kk = k;
+        for m in (0..n).rev() {
+            if kk == 0 {
+                break;
+            }
+            if mask & (1 << m) != 0 {
+                rank += comb(m, kk);
+                kk -= 1;
+            }
+        }
+        let total = comb(n, k);
+        if total <= 1 {
+            return; // single codeword, no bits
+        }
+        let mut bitlen: u8 = 0;
+        while (1u32 << bitlen) < total {
+            bitlen += 1;
+        }
+        let lost = (1u32 << bitlen) - total;
+        if rank < lost {
+            p.push((rank as u16) << (16 - (bitlen - 1)), bitlen - 1);
+        } else {
+            let code = rank + lost;
+            p.push((code as u16) << (16 - bitlen), bitlen);
+        }
+    }
+
+    /// Encode a §6.2 M/S flag schedule (topmost band first) into a
+    /// stream that [`decode_sv8_ms_flags`] must reproduce.
+    fn pack_ms_flags(flags: &[bool]) -> Vec<u8> {
+        let n = flags.len() as u32;
+        let mut p = BitPacker::new();
+        // mask MSB-first: out[0] (topmost) is bit n-1.
+        let mut mask: u32 = 0;
+        for (i, &f) in flags.iter().enumerate() {
+            if f {
+                mask |= 1 << (n - 1 - i as u32);
+            }
+        }
+        let cnt = mask.count_ones();
+        // log code for cnt over 0..n+1
+        let (pat, len) = log_encode(cnt, n + 1);
+        if len > 0 {
+            p.push(pat, len);
+        }
+        if cnt != 0 && cnt != n {
+            // Encode the smaller subset; invert the mask first if the
+            // complement is smaller.
+            let k = cnt.min(n - cnt);
+            let coded_mask = if cnt > n / 2 {
+                (!mask) & ((1u32 << n) - 1)
+            } else {
+                mask
+            };
+            pack_enum_subset(&mut p, coded_mask, k, n);
+        }
+        p.finish()
+    }
+
+    #[test]
+    fn ms_flags_zero_tot_reads_nothing() {
+        let mut reader = Sv7BitReader::new(&[0xFF; 4]);
+        let before = reader.bits_remaining();
+        assert!(decode_sv8_ms_flags(&mut reader, 0).unwrap().is_empty());
+        assert_eq!(reader.bits_remaining(), before);
+    }
+
+    #[test]
+    fn ms_flags_roundtrip_exhaustive_for_small_tot() {
+        // Every flag pattern for tot 1..=12 must roundtrip, exercising
+        // cnt==0, cnt==tot, and the enumerative middle (with the
+        // complement-inversion branch when cnt > tot/2).
+        for tot in 1u8..=12 {
+            for bits in 0u32..(1u32 << tot) {
+                let flags: Vec<bool> = (0..tot).map(|i| bits & (1 << (tot - 1 - i)) != 0).collect();
+                let bytes = pack_ms_flags(&flags);
+                let mut reader = Sv7BitReader::new(&bytes);
+                let got = decode_sv8_ms_flags(&mut reader, tot).unwrap();
+                assert_eq!(got, flags, "tot {tot} pattern {bits:#b}");
+            }
+        }
+    }
+
+    #[test]
+    fn ms_flags_all_set_and_none_set_read_only_the_count() {
+        // cnt==0 and cnt==tot read no enumerative bits — confirm via the
+        // exact-bit roundtrip (already covered above) plus a top-down
+        // ordering spot check: a single top band flagged.
+        let mut flags = vec![false; 6];
+        flags[0] = true; // topmost band M/S
+        let bytes = pack_ms_flags(&flags);
+        let mut reader = Sv7BitReader::new(&bytes);
+        let got = decode_sv8_ms_flags(&mut reader, 6).unwrap();
+        assert_eq!(got, flags);
+        assert!(got[0] && got[1..].iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn ms_flags_top_down_ordering_is_observable() {
+        // A flag only on the lowest band must land at out[tot-1].
+        let mut flags = vec![false; 5];
+        flags[4] = true; // lowest band
+        let bytes = pack_ms_flags(&flags);
+        let mut reader = Sv7BitReader::new(&bytes);
+        let got = decode_sv8_ms_flags(&mut reader, 5).unwrap();
+        assert_eq!(got, flags);
+        assert!(got[4] && got[..4].iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn ms_flags_propagates_eof() {
+        let mut reader = Sv7BitReader::new(&[]);
+        assert!(matches!(
+            decode_sv8_ms_flags(&mut reader, 8),
             Err(Error::UnexpectedEof),
         ));
     }

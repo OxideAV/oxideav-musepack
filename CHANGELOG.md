@@ -53,6 +53,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     over `0..max_band+1` for several `max_band`, non-key delta-fold +
     the >32→−33 wrap, and EOF propagation. Crate lib total `424 → 431`.
 
+- **Round 353** — SV8 §6.2 mid/side band-selection **bitmap decode**,
+  closing the last band-header GAP that fed the `ms_stereo` undo step.
+  `decode_sv8_ms_flags(reader, tot) -> Vec<bool>` decodes which of the
+  `tot` non-zero-channel bands carry a per-band M/S flag:
+  - `cnt` (how many bands are M/S) via the §6.5 bounded log code over
+    `0..tot+1`; `cnt == 0` ⇒ none, `cnt == tot` ⇒ all (no enumerative
+    bits).
+  - otherwise a §6.5 enumerative codeword selecting `min(cnt, tot−cnt)`
+    of `tot`, bit-inverted when `cnt > tot/2` (the smaller subset is
+    always coded). This reuses the same enumerative coder the sparse
+    arm uses (`enum_decode_subset`, now `pub(crate)`).
+  - the bitmap is returned **top-down**: `out[0]` is the topmost
+    non-zero band, matching the §6.2 application order. The caller maps
+    these `tot` flags onto the actual band indices for the
+    `ms_stereo::undo_ms_stereo` step.
+  - 5 new unit tests incl. an **exhaustive** roundtrip over every flag
+    pattern for `tot` 1..=12 (exercises `cnt==0`, `cnt==tot`, and the
+    complement-inversion middle), top-down ordering on single-band
+    flags, and EOF. Crate lib total `431 → 436`.
+
 - **Round 348** — SV8 §6.4.2 first-order context model, now grounded
   (was two GAP-knobs). The staged
   `spec/musepack-headers-and-coding.md` §6.4.2 closes the
