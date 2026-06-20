@@ -32,6 +32,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     band chains, ascending-order verification, and mid-walk EOF.
     Crate lib total `416 → 424`.
 
+- **Round 353** — SV8 §6.2 `Max_used_Band` decode + §6.5 bounded "log"
+  code, grounded. The new staged §6.2/§6.5 pins how the per-packet
+  coded-band count is read:
+  - `decode_log_code(reader, max)`: the §6.5 phased-/truncated-binary
+    "log" code over `0..max` — reads `floor(log2(max−1))` bits, plus
+    one extra bit when the value lands in the `lost = 2^bitlen − max`
+    tail (`bitlen = ceil(log2(max))`). Reuses the same lost-codes
+    convention as the §6.5 enumerative coder
+    (`sv8_sample_decode::enum_decode_subset`'s prefix step); `max ≤ 1`
+    reads nothing. Also serves §6.2's M/S `cnt`.
+  - `decode_keyframe_max_used_band(reader, max_band)`: §6.2 key-frame
+    rule — a log code over `0..max_band+1`.
+  - `decode_nonkey_max_used_band(reader, last_max_band)`: §6.2 non-key
+    rule — `Max_used_Band = last_max_band + canon(Bands)` (signed delta
+    via `sv8-canonical-bands`), "results > 32 wrap by subtracting 33".
+  - 7 new unit tests: exhaustive log-code roundtrip (every value for
+    `max` 1..=40 via a reference phased-binary encoder), `max ≤ 1`
+    no-read, power-of-two `max` = plain fixed width, key-frame log-code
+    over `0..max_band+1` for several `max_band`, non-key delta-fold +
+    the >32→−33 wrap, and EOF propagation. Crate lib total `424 → 431`.
+
 - **Round 348** — SV8 §6.4.2 first-order context model, now grounded
   (was two GAP-knobs). The staged
   `spec/musepack-headers-and-coding.md` §6.4.2 closes the

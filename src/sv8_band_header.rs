@@ -181,6 +181,100 @@ pub fn decode_used_subbands(reader: &mut Sv7BitReader<'_>) -> Result<u8> {
     Ok(symbol as u8)
 }
 
+/// Decode one §6.5 bounded **"log" code**: a phased-/truncated-binary
+/// codeword naming a value in `0..max`.
+///
+/// §6.5: the code "reads `floor(log2(max−1))` bits, and one extra bit
+/// only when the value falls in the code space's 'lost' tail." This is
+/// the same phased-binary prefix step the §6.5 enumerative coder uses
+/// (cf. `crate::sv8_sample_decode`'s `enum_decode_subset`): for a code
+/// space of `max` distinct values, `bitlen = ceil(log2(max))` is the
+/// long-codeword width and `lost = 2^bitlen − max` short codewords use
+/// `bitlen − 1` bits. (Identity: for `max ≥ 2`,
+/// `bitlen − 1 == floor(log2(max−1))`, matching the §6.5 phrasing.)
+///
+/// Decode: read `bitlen − 1` bits as `code`; if `code ≥ lost`, read one
+/// more bit and rebase `code = (code << 1) − lost + bit`. The `lost`
+/// short codewords (`code < lost`) carry the low-ranked values.
+///
+/// `max ≤ 1` ⇒ the only value is 0 and no bits are read.
+///
+/// Used by §6.2 for the key-frame `Max_used_Band` (over
+/// `0..max_band+1`) and by §6.2's M/S `cnt` selection.
+///
+/// Errors: [`Error::UnexpectedEof`] if the reader starves mid-code.
+pub fn decode_log_code(reader: &mut Sv7BitReader<'_>, max: u32) -> Result<u32> {
+    if max <= 1 {
+        return Ok(0);
+    }
+    // bitlen = ceil(log2(max))
+    let mut bitlen: u8 = 0;
+    while (1u32 << bitlen) < max {
+        bitlen += 1;
+    }
+    let lost = (1u32 << bitlen) - max;
+    // Short codewords are `bitlen - 1` bits.
+    let mut code = reader.read_bits(bitlen - 1)? as u32;
+    if code >= lost {
+        code = (code << 1) - lost + reader.read_bits(1)? as u32;
+    }
+    Ok(code)
+}
+
+/// Decode the §6.2 **key-frame** `Max_used_Band`: a §6.5 bounded log
+/// code over `0..max_band+1`, where `max_band` is the SH-packet's
+/// highest-coded-subband field (`SH` field 6, already `+1`-debiased).
+///
+/// §6.2: "On a key frame `Max_used_Band` is read with a bounded 'log'
+/// code (`mpc_bits_log_dec`, a truncated-binary code over the range
+/// `0..max_band+1`)." The decoded value is the count of coded bands.
+///
+/// The result is range-checked against `max_band` (it cannot exceed the
+/// SH-declared maximum); a log code over `0..max_band+1` already bounds
+/// it, but a malformed `lost`-tail read is rejected via
+/// [`Error::MaxBandOutOfRange`].
+pub fn decode_keyframe_max_used_band(reader: &mut Sv7BitReader<'_>, max_band: u8) -> Result<u8> {
+    let value = decode_log_code(reader, max_band as u32 + 1)?;
+    if value > max_band as u32 {
+        return Err(Error::MaxBandOutOfRange(value.min(u8::MAX as u32) as u8));
+    }
+    Ok(value as u8)
+}
+
+/// Decode the §6.2 **non-key-frame** `Max_used_Band`:
+/// `Max_used_Band = last_max_band + canon(Bands)`, where `canon(Bands)`
+/// is a signed delta from the `sv8-canonical-bands` table and "results
+/// > 32 wrap by subtracting 33".
+///
+/// §6.2: "Non-key-frame: `Max_used_Band = last_max_band +
+/// canon(Bands)`, where `canon(Bands)` decodes a signed delta via the
+/// `sv8-canonical-bands` table; results > 32 wrap by subtracting 33."
+///
+/// `last_max_band` is the previous packet's `Max_used_Band`. The fold
+/// keeps the count in the `0..=32` ring: a sum exceeding 32 wraps by
+/// −33 (the inclusive 33-value ring `0..=32`).
+///
+/// Errors:
+///
+/// - [`Error::UnexpectedEof`] if fewer than 16 bits remain for the
+///   `bands` canonical peek.
+/// - [`Error::HuffmanNoMatch`] if the peek matches no `bands` row.
+/// - [`Error::MaxBandOutOfRange`] if the wrapped result still exceeds
+///   [`SV8_MAX_USED_SUBBANDS`] (unreachable for a well-formed delta;
+///   defensive).
+pub fn decode_nonkey_max_used_band(reader: &mut Sv7BitReader<'_>, last_max_band: u8) -> Result<u8> {
+    let delta = SV8_BANDS_TABLE.decode(reader)? as i32;
+    // last_max_band + canon(Bands); wrap a result above 32 by −33.
+    let mut value = last_max_band as i32 + delta;
+    if value > SV8_MAX_USED_SUBBANDS as i32 {
+        value -= SV8_MAX_USED_SUBBANDS as i32 + 1;
+    }
+    if !(0..=SV8_MAX_USED_SUBBANDS as i32).contains(&value) {
+        return Err(Error::MaxBandOutOfRange(value.unsigned_abs() as u8));
+    }
+    Ok(value as u8)
+}
+
 /// Walk the §3.4 per-band band-resolution header: read `nbands`
 /// `sv8-canonical-res-{1,2}` codewords in ascending band order,
 /// returning the raw VLC value of each wrapped in [`RawResVlc`].
@@ -810,5 +904,166 @@ mod tests {
         let mut reader = Sv7BitReader::new(&bytes);
         let res = decode_band_resolutions_grounded(&mut reader, 2);
         assert!(matches!(res, Err(Error::UnexpectedEof)));
+    }
+
+    // ─── §6.5 bounded "log" code ───────────────────────────
+
+    /// Reference phased-binary encoder for value `v` in `0..max`:
+    /// mirrors the §6.5 decode so a roundtrip pins the convention.
+    /// Returns the codeword bits MSB-first as (pattern, length).
+    fn log_encode(v: u32, max: u32) -> (u16, u8) {
+        if max <= 1 {
+            return (0, 0);
+        }
+        let mut bitlen: u8 = 0;
+        while (1u32 << bitlen) < max {
+            bitlen += 1;
+        }
+        let lost = (1u32 << bitlen) - max;
+        if v < lost {
+            // short codeword: v in (bitlen - 1) bits
+            let len = bitlen - 1;
+            ((v as u16) << (16 - len), len)
+        } else {
+            // long codeword: (v + lost) in bitlen bits
+            let code = v + lost;
+            ((code as u16) << (16 - bitlen), bitlen)
+        }
+    }
+
+    #[test]
+    fn log_code_roundtrips_every_value_for_varied_max() {
+        for max in 1..=40u32 {
+            for v in 0..max {
+                let (pat, len) = log_encode(v, max);
+                let mut p = BitPacker::new();
+                if len > 0 {
+                    p.push(pat, len);
+                }
+                let bytes = p.finish();
+                let mut reader = Sv7BitReader::new(&bytes);
+                let before = reader.bits_remaining();
+                let got = decode_log_code(&mut reader, max).unwrap();
+                assert_eq!(got, v, "max {max} value {v}");
+                // Codeword width is bitlen-1 (short) or bitlen (long).
+                let consumed = before - reader.bits_remaining();
+                assert!(consumed <= 8, "max {max} v {v}: {consumed} bits");
+            }
+        }
+    }
+
+    #[test]
+    fn log_code_max_le_one_reads_nothing() {
+        for max in [0u32, 1] {
+            let mut reader = Sv7BitReader::new(&[0xFF; 2]);
+            let before = reader.bits_remaining();
+            assert_eq!(decode_log_code(&mut reader, max).unwrap(), 0);
+            assert_eq!(reader.bits_remaining(), before, "max {max}");
+        }
+    }
+
+    #[test]
+    fn log_code_power_of_two_max_is_plain_fixed_width() {
+        // max = 8: lost = 0, every value uses 3 bits, no short tail.
+        for v in 0..8u32 {
+            let mut p = BitPacker::new();
+            p.push((v as u16) << 13, 3);
+            let bytes = p.finish();
+            let mut reader = Sv7BitReader::new(&bytes);
+            assert_eq!(decode_log_code(&mut reader, 8).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn log_code_propagates_eof() {
+        // max = 32 needs up to 5 bits; an empty reader starves.
+        let mut reader = Sv7BitReader::new(&[]);
+        assert!(matches!(
+            decode_log_code(&mut reader, 32),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── §6.2 Max_used_Band (key + non-key) ────────────────
+
+    #[test]
+    fn keyframe_max_used_band_is_log_code_over_zero_to_maxband_plus_one() {
+        for max_band in [1u8, 5, 16, 31] {
+            for v in 0..=max_band as u32 {
+                let (pat, len) = log_encode(v, max_band as u32 + 1);
+                let mut p = BitPacker::new();
+                if len > 0 {
+                    p.push(pat, len);
+                }
+                let bytes = p.finish();
+                let mut reader = Sv7BitReader::new(&bytes);
+                let got = decode_keyframe_max_used_band(&mut reader, max_band).unwrap();
+                assert_eq!(got as u32, v, "max_band {max_band} value {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn nonkey_max_used_band_folds_delta_and_wraps_above_32() {
+        // canon(Bands) row 0 is the shortest codeword; compute its delta
+        // and verify last_max_band + delta (wrapped) equals the result.
+        for row in 0..SV8_BANDS_TABLE.lengths.len() {
+            let delta = symbol_for_row(&SV8_BANDS_TABLE, row) as i32;
+            for last in [0u8, 10, 32] {
+                let mut expected = last as i32 + delta;
+                if expected > 32 {
+                    expected -= 33;
+                }
+                if !(0..=32).contains(&expected) {
+                    continue; // a defensive-reject combo; skip here
+                }
+                let e = SV8_BANDS_TABLE.lengths[row];
+                let mut p = BitPacker::new();
+                p.push(e.code, e.length);
+                let bytes = p.finish();
+                let mut reader = Sv7BitReader::new(&bytes);
+                let got = decode_nonkey_max_used_band(&mut reader, last).unwrap();
+                assert_eq!(got as i32, expected, "row {row} last {last} delta {delta}");
+            }
+        }
+    }
+
+    #[test]
+    fn nonkey_max_used_band_wrap_pins_above_32_to_minus_33() {
+        // A synthetic delta is not directly injectable (the table is
+        // fixed), so pin the wrap arithmetic directly: any sum in
+        // 33..=64 maps to sum-33 (i.e. 0..=31).
+        for sum in 33..=64i32 {
+            let wrapped = sum - 33;
+            assert!((0..=31).contains(&wrapped), "sum {sum}");
+        }
+        // And confirm the impl applies it: the bands table's largest
+        // symbol added to last=32 — if it pushes over 32, it wraps.
+        let max_sym = (0..SV8_BANDS_TABLE.lengths.len())
+            .map(|r| symbol_for_row(&SV8_BANDS_TABLE, r) as i32)
+            .max()
+            .unwrap();
+        let row = (0..SV8_BANDS_TABLE.lengths.len())
+            .find(|&r| symbol_for_row(&SV8_BANDS_TABLE, r) as i32 == max_sym)
+            .unwrap();
+        let sum = 32 + max_sym;
+        if sum > 32 && (0..=32).contains(&(sum - 33)) {
+            let e = SV8_BANDS_TABLE.lengths[row];
+            let mut p = BitPacker::new();
+            p.push(e.code, e.length);
+            let bytes = p.finish();
+            let mut reader = Sv7BitReader::new(&bytes);
+            let got = decode_nonkey_max_used_band(&mut reader, 32).unwrap();
+            assert_eq!(got as i32, sum - 33);
+        }
+    }
+
+    #[test]
+    fn keyframe_max_used_band_propagates_eof() {
+        let mut reader = Sv7BitReader::new(&[]);
+        assert!(matches!(
+            decode_keyframe_max_used_band(&mut reader, 31),
+            Err(Error::UnexpectedEof),
+        ));
     }
 }

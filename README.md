@@ -114,6 +114,21 @@ Musepack ships in two incompatible stream-format generations:
   half, a §6.5 enumerative (combinatorial) position-selection codeword
   (binomial-coded, computed — no new tables), and one sign bit per
   present `±1` sample. Every SV8 §3.4 sample-decode arm is now wired.
+- `sv8_band_header` — the §6.2 band-resolution outer walk is now
+  **grounded** (was GAP-knobs). `decode_band_resolutions_grounded`
+  decodes bands top-down: the top band reads res-1 (context 0), each
+  lower band picks its context from "band-above `Res` > 2" (res-2 vs
+  res-1) and folds `Res[n] = canon(Res, ctx) + Res[n+1]`, with the
+  §6.2 signed wrap "values above 15 wrap by −17" (raw `16 → −1` CNS)
+  applied to both the top value and every delta sum — closing the
+  `RawResVlc → band_type` remap GAP and emitting signed `i8`
+  band_types (ascending order) ready for `sv8_band_type_case`. The
+  §6.2 `Max_used_Band` count is wired for both packet kinds:
+  `decode_keyframe_max_used_band` (a §6.5 bounded "log" /
+  truncated-binary code over `0..max_band+1`) and
+  `decode_nonkey_max_used_band` (`last_max_band + canon(Bands)`, with
+  the ">32 wraps by −33" fold). `decode_log_code` is the reusable §6.5
+  bounded-log primitive (also serving M/S `cnt`).
 - `sv8_context` — the SV8 §6.4.2 first-order context model, now
   grounded. `Sv8Context` is the running accumulator the context-adaptive
   sample arms use to pick their canonical-Huffman table half: per `Res`
