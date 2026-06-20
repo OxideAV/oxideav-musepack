@@ -456,6 +456,38 @@ pub fn decode_sv8_grouped3_band(
     Ok(())
 }
 
+/// Decode 36 samples for an SV8 band with `band_type == 2`
+/// (§3.4 case 2) using the **grounded** §6.4.2 first-order context
+/// model rather than a fixed caller-supplied `ctx`.
+///
+/// The canonical-decode-path sibling of [`decode_sv8_grouped3_band`]:
+/// the `sv8-canonical-q2-{1,2}` half-of-pair pick for each of the 12
+/// groups is driven by the [`crate::sv8_context::Sv8Context`]
+/// accumulator that `spec/musepack-headers-and-coding.md` §6.4.2 pins.
+/// The accumulator starts at `2 × thres[2] = 6` (so the first group
+/// reads from context-1, since `6 > thres[2] = 3`); each group's table
+/// is context-1 when `idx > 3` else context-0; and after each decoded
+/// group's product index `tmp` the accumulator folds in
+/// `idx = (idx >> 1) + var[tmp]`, with `var[tmp]` the summed magnitude
+/// of the three samples `tmp` encodes
+/// ([`crate::sv8_context::case2_magnitude`]). The product index is the
+/// raw symbol the q2 table decodes *before* un-bundling, so the
+/// magnitude fold uses the symbol directly.
+pub fn decode_sv8_grouped3_band_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    out: &mut [i8; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let mut ctx = crate::sv8_context::Sv8Context::new(2).ok_or(Error::UnsupportedBandType(2))?;
+    for group in out.chunks_exact_mut(3) {
+        let table = table_for_role(Sv8TableRole::Q2, ctx.table_ctx())
+            .ok_or(Error::UnsupportedBandType(2))?;
+        let symbol = table.decode(reader)?;
+        group.copy_from_slice(&unpack_grouped3_symbol(symbol)?);
+        ctx.update_group(symbol as i32);
+    }
+    Ok(())
+}
+
 /// Decode 36 samples for an SV8 band with `band_type` in `3..=4`
 /// (§3.4 cases 3..4, [`crate::sv8_band_decode::Sv8BandDecodeCase::Grouped2`]):
 /// 18 canonical-Huffman codewords from `sv8-canonical-q3` (band_type
@@ -519,6 +551,44 @@ where
         let table = table_for_role(role, ctx).ok_or(Error::UnsupportedBandType(band_type))?;
         *slot = table.decode(reader)?;
         ctx = ctx_for_prev(*slot);
+    }
+    Ok(())
+}
+
+/// Decode 36 samples for an SV8 band with `band_type` in `5..=8`
+/// (§3.4 cases 5..8) using the **grounded** §6.4.2 first-order context
+/// model rather than a caller-supplied predicate.
+///
+/// This is the canonical-decode-path sibling of
+/// [`decode_sv8_context_band`]: the table pick for each sample is
+/// driven by the [`crate::sv8_context::Sv8Context`] accumulator that
+/// `spec/musepack-headers-and-coding.md` §6.4.2 pins — the accumulator
+/// starts at `2 × thres[band_type]` (so the first sample reads from
+/// context-1), each sample's table is context-1 when `idx > thres`
+/// else context-0, and after each decoded sample `q` the accumulator
+/// folds in `idx = (idx >> 1) + |q|`. No knob: the predicate comes
+/// entirely from the staged §6.4.2 facts.
+///
+/// A `band_type` outside `5..=8` yields [`Error::UnsupportedBandType`].
+pub fn decode_sv8_context_band_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    band_type: i8,
+    out: &mut [i8; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let role = match band_type {
+        5 => Sv8TableRole::Q5,
+        6 => Sv8TableRole::Q6,
+        7 => Sv8TableRole::Q7,
+        8 => Sv8TableRole::Q8,
+        _ => return Err(Error::UnsupportedBandType(band_type)),
+    };
+    let mut ctx = crate::sv8_context::Sv8Context::new(band_type)
+        .ok_or(Error::UnsupportedBandType(band_type))?;
+    for slot in out.iter_mut() {
+        let table =
+            table_for_role(role, ctx.table_ctx()).ok_or(Error::UnsupportedBandType(band_type))?;
+        *slot = table.decode(reader)?;
+        ctx.update_sample(*slot);
     }
     Ok(())
 }
@@ -1114,6 +1184,185 @@ mod tests {
         let mut out = [0_i8; SAMPLES_PER_BAND];
         assert!(matches!(
             decode_sv8_context_band(&mut reader, 5, 0, |_| 0, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── decode_sv8_context_band_grounded (§6.4.2 cases 5..=8) ─────
+
+    #[test]
+    fn grounded_context_band_starts_in_context_one() {
+        // §6.4.2: idx init = 2·thres > thres, so the FIRST sample must
+        // read from the context-1 table (q{bt}-2). Build a stream whose
+        // leading codeword is the shortest ctx-1 codeword; the grounded
+        // decoder must produce that ctx-1 symbol for sample 0.
+        for (band_type, t1) in [
+            (5_i8, &SV8_Q5_2_TABLE),
+            (6, &SV8_Q6_2_TABLE),
+            (7, &SV8_Q7_2_TABLE),
+            (8, &SV8_Q8_2_TABLE),
+        ] {
+            let entry1 = t1.lengths[0];
+            let sym_via_ctx1 = symbol_for_row(t1, 0);
+            let mut p = BitPacker::new();
+            for _ in 0..SAMPLES_PER_BAND {
+                p.push(entry1.code, entry1.length);
+            }
+            let bytes = p.finish();
+            let mut reader = Sv7BitReader::new(&bytes);
+            let mut out = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_context_band_grounded(&mut reader, band_type, &mut out).expect("decode");
+            assert_eq!(
+                out[0], sym_via_ctx1,
+                "band_type {band_type}: first sample must use ctx-1 (idx init = 2·thres)",
+            );
+        }
+    }
+
+    #[test]
+    fn grounded_context_band_matches_replicated_accumulator() {
+        // Feed the closure variant a predicate that replicates the
+        // §6.4.2 accumulator and assert byte-for-byte agreement with
+        // the grounded path, over an arbitrary mixed codeword stream.
+        for band_type in [5_i8, 6, 7, 8] {
+            let t0 = match band_type {
+                5 => &SV8_Q5_1_TABLE,
+                6 => &SV8_Q6_1_TABLE,
+                7 => &SV8_Q7_1_TABLE,
+                _ => &SV8_Q8_1_TABLE,
+            };
+            // A long run of the shortest ctx-0 codeword. The grounded
+            // path may read some samples through ctx-1 (whose codewords
+            // can be longer), so over-provision the buffer well past 36
+            // codewords so neither path runs out of bits.
+            let entry = t0.lengths[0];
+            let mut p = BitPacker::new();
+            for _ in 0..(SAMPLES_PER_BAND * 4) {
+                p.push(entry.code, entry.length);
+            }
+            let bytes = p.finish();
+
+            // Grounded path.
+            let mut r_g = Sv7BitReader::new(&bytes);
+            let mut out_g = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_context_band_grounded(&mut r_g, band_type, &mut out_g).expect("grounded");
+
+            // Closure path with a hand-rolled §6.4.2 accumulator. The
+            // grounded decoder uses table_ctx() BEFORE update_sample();
+            // the closure form starts from initial_ctx (the init
+            // table_ctx) and updates after each sample, so we mirror the
+            // accumulator's idx exactly.
+            let thres = crate::sv8_context::context_threshold(band_type).unwrap();
+            let mut idx = 2 * thres;
+            let initial_ctx = (idx > thres) as u8;
+            let mut r_c = Sv7BitReader::new(&bytes);
+            let mut out_c = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_context_band(
+                &mut r_c,
+                band_type,
+                initial_ctx,
+                |prev| {
+                    idx = (idx >> 1) + (prev as i32).unsigned_abs();
+                    (idx > thres) as u8
+                },
+                &mut out_c,
+            )
+            .expect("closure");
+
+            assert_eq!(
+                out_g, out_c,
+                "band_type {band_type}: grounded vs replicated"
+            );
+        }
+    }
+
+    #[test]
+    fn grounded_context_band_rejects_band_type_outside_5_8() {
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        for bt in [-1_i8, 0, 1, 2, 3, 4, 9, 17, i8::MAX] {
+            let mut reader = Sv7BitReader::new(&[0xFF; 128]);
+            assert!(matches!(
+                decode_sv8_context_band_grounded(&mut reader, bt, &mut out),
+                Err(Error::UnsupportedBandType(v)) if v == bt,
+            ));
+        }
+    }
+
+    #[test]
+    fn grounded_context_band_propagates_eof() {
+        let mut reader = Sv7BitReader::new(&[0xFF]);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv8_context_band_grounded(&mut reader, 5, &mut out),
+            Err(Error::UnexpectedEof),
+        ));
+    }
+
+    // ─── decode_sv8_grouped3_band_grounded (§6.4.2 case 2) ─────────
+
+    #[test]
+    fn grounded_grouped3_band_starts_in_context_one() {
+        // §6.4.2: idx init = 2·thres[2] = 6 > thres[2] = 3, so the first
+        // group reads from the q2-2 (context-1) table. A stream of
+        // shortest-q2-2 codewords must therefore decode sample 0's
+        // triplet to the q2-2 row-0 symbol.
+        let entry1 = SV8_Q2_2_TABLE.lengths[0];
+        let sym_via_ctx1 = symbol_for_row(&SV8_Q2_2_TABLE, 0);
+        let mut p = BitPacker::new();
+        for _ in 0..GROUPED3_CODEWORDS_PER_BAND {
+            p.push(entry1.code, entry1.length);
+        }
+        let bytes = p.finish();
+        let mut reader = Sv7BitReader::new(&bytes);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        decode_sv8_grouped3_band_grounded(&mut reader, &mut out).expect("decode");
+        let first_triplet = unpack_grouped3_symbol(sym_via_ctx1).unwrap();
+        assert_eq!(
+            &out[0..3],
+            &first_triplet[..],
+            "first group must use q2-2 (ctx-1) per idx init = 2·thres[2]",
+        );
+    }
+
+    #[test]
+    fn grounded_grouped3_band_matches_replicated_accumulator() {
+        // A stream of shortest-q2-1 codewords; verify the grounded path
+        // reproduces a hand-rolled §6.4.2 accumulator driving the q2
+        // table pick per group with the case2_magnitude fold.
+        let entry = SV8_Q2_1_TABLE.lengths[0];
+        let mut p = BitPacker::new();
+        for _ in 0..GROUPED3_CODEWORDS_PER_BAND {
+            p.push(entry.code, entry.length);
+        }
+        let bytes = p.finish();
+
+        let mut r_g = Sv7BitReader::new(&bytes);
+        let mut out_g = [0_i8; SAMPLES_PER_BAND];
+        decode_sv8_grouped3_band_grounded(&mut r_g, &mut out_g).expect("grounded");
+
+        // Replicate the §6.4.2 per-group accumulator by hand (the knob
+        // variant decodes all 12 groups under one fixed ctx, so it
+        // cannot drive a per-group switch — replicate at table level).
+        let thres = crate::sv8_context::context_threshold(2).unwrap();
+        let mut idx = 2 * thres;
+        let mut r_m = Sv7BitReader::new(&bytes);
+        let mut out_m = [0_i8; SAMPLES_PER_BAND];
+        for group in out_m.chunks_exact_mut(3) {
+            let ctx = (idx > thres) as u8;
+            let table = table_for_role(Sv8TableRole::Q2, ctx).unwrap();
+            let symbol = table.decode(&mut r_m).unwrap();
+            group.copy_from_slice(&unpack_grouped3_symbol(symbol).unwrap());
+            idx = (idx >> 1) + crate::sv8_context::case2_magnitude(symbol as i32);
+        }
+        assert_eq!(out_g, out_m, "grounded grouped3 vs replicated accumulator");
+    }
+
+    #[test]
+    fn grounded_grouped3_band_propagates_eof() {
+        let mut reader = Sv7BitReader::new(&[0x00]);
+        let mut out = [0_i8; SAMPLES_PER_BAND];
+        assert!(matches!(
+            decode_sv8_grouped3_band_grounded(&mut reader, &mut out),
             Err(Error::UnexpectedEof),
         ));
     }

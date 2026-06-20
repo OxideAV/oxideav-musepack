@@ -194,8 +194,9 @@ use crate::cns::CnsPrng;
 use crate::huffman::Sv7BitReader;
 use crate::sv7_band_decode::{fill_cns_band, fill_zero_band, SAMPLES_PER_BAND};
 use crate::sv8_sample_decode::{
-    decode_sv8_context_band, decode_sv8_escape_band, decode_sv8_grouped2_band,
-    decode_sv8_grouped3_band, decode_sv8_sparse_band,
+    decode_sv8_context_band, decode_sv8_context_band_grounded, decode_sv8_escape_band,
+    decode_sv8_grouped2_band, decode_sv8_grouped3_band, decode_sv8_grouped3_band_grounded,
+    decode_sv8_sparse_band,
 };
 use crate::{Error, Result};
 
@@ -302,6 +303,69 @@ where
         Sv8BandDecodeCase::LargeCoeffEscape => decode_sv8_escape_band(reader, band_type, out),
         // OutOfRange is not a §3.4-enumerated arm; fail loud rather
         // than emit a silently-wrong band.
+        Sv8BandDecodeCase::OutOfRange => Err(Error::UnsupportedBandType(band_type)),
+    }
+}
+
+/// Decode one SV8 band's 36 samples using the **grounded** §6.4.2
+/// first-order context model for the context arms, removing the
+/// context-selection knobs [`decode_sv8_band`] threads.
+///
+/// This is the canonical frame-walker entry point: where
+/// [`decode_sv8_band`] takes `grouped_ctx` / `initial_ctx` /
+/// `ctx_for_prev` because §3.4 left the table-selection predicate
+/// unspecified, this variant drives the case-2 (`Grouped3`) and
+/// cases-5..=8 (`ContextHuffmanPerSample`) table picks entirely from
+/// the [`crate::sv8_context::Sv8Context`] accumulator that the staged
+/// `spec/musepack-headers-and-coding.md` §6.4.2 now pins (init
+/// `idx = 2 × thres`, select context-1 when `idx > thres`, fold
+/// `idx = (idx >> 1) + |q|` per sample or `+ var[tmp]` per case-2
+/// group). Every other arm (CNS / empty / sparse / grouped-2 / escape)
+/// is identical to [`decode_sv8_band`] — those select their tables
+/// without an accumulator.
+///
+/// A `band_type < -1` yields [`Error::UnsupportedBandType`] (the
+/// fail-loud [`Sv8BandDecodeCase::OutOfRange`] arm).
+pub fn decode_sv8_band_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    band_type: i8,
+    cns: &mut CnsPrng,
+    out: &mut [i32; SAMPLES_PER_BAND],
+) -> Result<()> {
+    match sv8_band_type_case(band_type) {
+        Sv8BandDecodeCase::Cns => {
+            fill_cns_band(cns, out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::Empty => {
+            fill_zero_band(out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::Grouped3 => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_grouped3_band_grounded(reader, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::Grouped2 => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_grouped2_band(reader, band_type, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::ContextHuffmanPerSample => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_context_band_grounded(reader, band_type, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::SparseBand => {
+            let mut tmp = [0_i8; SAMPLES_PER_BAND];
+            decode_sv8_sparse_band(reader, &mut tmp)?;
+            widen_into(&tmp, out);
+            Ok(())
+        }
+        Sv8BandDecodeCase::LargeCoeffEscape => decode_sv8_escape_band(reader, band_type, out),
         Sv8BandDecodeCase::OutOfRange => Err(Error::UnsupportedBandType(band_type)),
     }
 }
@@ -883,6 +947,114 @@ mod tests {
             for (&d, &o) in direct.iter().zip(out.iter()) {
                 assert_eq!(o, d as i32);
             }
+        }
+    }
+
+    // ─── decode_sv8_band_grounded (§6.4.2 canonical path) ──────────
+
+    #[test]
+    fn grounded_dispatch_context_arm_matches_grounded_direct() {
+        // band_type 5..=8 must route through the grounded §6.4.2
+        // context decoder; the dispatcher's widened i32 output must
+        // equal the direct grounded i8 arm sample-for-sample.
+        use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+        for band_type in [5_i8, 6, 7, 8] {
+            let role = match band_type {
+                5 => Sv8TableRole::Q5,
+                6 => Sv8TableRole::Q6,
+                7 => Sv8TableRole::Q7,
+                _ => Sv8TableRole::Q8,
+            };
+            // Grounded path starts in ctx-1; over-provision the buffer.
+            let table = table_for_role(role, 1).expect("ctx1 table");
+            let (code, len) = first_row(table);
+            let mut p = BitPacker::new();
+            for _ in 0..(SAMPLES_PER_BAND * 4) {
+                p.push(code, len);
+            }
+            let bytes = p.finish();
+
+            let mut direct = [0_i8; SAMPLES_PER_BAND];
+            {
+                let mut reader = Sv7BitReader::new(&bytes);
+                crate::sv8_sample_decode::decode_sv8_context_band_grounded(
+                    &mut reader,
+                    band_type,
+                    &mut direct,
+                )
+                .expect("direct grounded context");
+            }
+
+            let mut out = [0_i32; SAMPLES_PER_BAND];
+            let mut prng = CnsPrng::new();
+            let mut reader = Sv7BitReader::new(&bytes);
+            decode_sv8_band_grounded(&mut reader, band_type, &mut prng, &mut out)
+                .expect("grounded context dispatch");
+            for (i, (&d, &o)) in direct.iter().zip(out.iter()).enumerate() {
+                assert_eq!(o, d as i32, "band_type {band_type} sample {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn grounded_dispatch_case_two_matches_grounded_direct() {
+        // band_type 2 routes to the grounded grouped3 arm (no knob).
+        use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+        // Grounded path starts in ctx-1 (q2-2); over-provision buffer.
+        let table = table_for_role(Sv8TableRole::Q2, 1).expect("q2 ctx1");
+        let (code, len) = first_row(table);
+        let mut p = BitPacker::new();
+        for _ in 0..(GROUPED3_CODEWORDS_PER_BAND * 4) {
+            p.push(code, len);
+        }
+        let bytes = p.finish();
+
+        let mut direct = [0_i8; SAMPLES_PER_BAND];
+        {
+            let mut reader = Sv7BitReader::new(&bytes);
+            crate::sv8_sample_decode::decode_sv8_grouped3_band_grounded(&mut reader, &mut direct)
+                .expect("direct grounded grouped3");
+        }
+
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        let mut prng = CnsPrng::new();
+        let mut reader = Sv7BitReader::new(&bytes);
+        decode_sv8_band_grounded(&mut reader, 2, &mut prng, &mut out)
+            .expect("grounded grouped3 dispatch");
+        for (i, (&d, &o)) in direct.iter().zip(out.iter()).enumerate() {
+            assert_eq!(o, d as i32, "case-2 sample {i}");
+        }
+    }
+
+    #[test]
+    fn grounded_dispatch_shares_non_context_arms_with_knob_variant() {
+        // CNS / empty / grouped-2 / escape arms select tables without
+        // an accumulator, so the grounded dispatcher must agree with the
+        // knob variant for them. Empty (band_type 0) and CNS
+        // (band_type -1) need no bitstream.
+        let mut prng_a = CnsPrng::new();
+        let mut prng_b = CnsPrng::new();
+        for bt in [-1_i8, 0] {
+            let mut out_a = [7_i32; SAMPLES_PER_BAND];
+            let mut out_b = [7_i32; SAMPLES_PER_BAND];
+            let mut ra = Sv7BitReader::new(&[]);
+            let mut rb = Sv7BitReader::new(&[]);
+            decode_sv8_band(&mut ra, bt, &mut prng_a, 0, 0, no_ctx, &mut out_a).expect("knob");
+            decode_sv8_band_grounded(&mut rb, bt, &mut prng_b, &mut out_b).expect("grounded");
+            assert_eq!(out_a, out_b, "band_type {bt}");
+        }
+    }
+
+    #[test]
+    fn grounded_dispatch_rejects_out_of_range_band_type() {
+        let mut prng = CnsPrng::new();
+        let mut out = [0_i32; SAMPLES_PER_BAND];
+        for bt in [-2_i8, -5, i8::MIN] {
+            let mut reader = Sv7BitReader::new(&[0xFF; 16]);
+            assert!(matches!(
+                decode_sv8_band_grounded(&mut reader, bt, &mut prng, &mut out),
+                Err(Error::UnsupportedBandType(v)) if v == bt,
+            ));
         }
     }
 }
