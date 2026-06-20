@@ -106,14 +106,28 @@ Musepack ships in two incompatible stream-format generations:
   `decode_sv7_band` dispatcher that walks the §2.5 `switch (band_type)`
   ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`).
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
-  `sv8_scf_header` / `sv8_dscf_loop` — SV8 band-resolution walk,
-  per-band sample-decode dispatcher (CNS / empty / **sparse** /
-  grouped / context-Huffman / large-coefficient escape arms), and
-  scalefactor layer. The sparse arm (§6.4.1) decodes each band as two
-  halves of 18: a `sv8-canonical-q1` non-zero count per half, a §6.5
-  enumerative (combinatorial) position-selection codeword
+  `sv8_context` / `sv8_scf_header` / `sv8_dscf_loop` — SV8
+  band-resolution walk, per-band sample-decode dispatcher (CNS / empty
+  / **sparse** / grouped / context-Huffman / large-coefficient escape
+  arms), and scalefactor layer. The sparse arm (§6.4.1) decodes each
+  band as two halves of 18: a `sv8-canonical-q1` non-zero count per
+  half, a §6.5 enumerative (combinatorial) position-selection codeword
   (binomial-coded, computed — no new tables), and one sign bit per
   present `±1` sample. Every SV8 §3.4 sample-decode arm is now wired.
+- `sv8_context` — the SV8 §6.4.2 first-order context model, now
+  grounded. `Sv8Context` is the running accumulator the context-adaptive
+  sample arms use to pick their canonical-Huffman table half: per `Res`
+  it inits `idx = 2 × thres[Res]` (thresholds `Res 2→3, 5→1, 6→3, 7→4,
+  8→8`), selects context-1 when `idx > thres` else context-0, and folds
+  `idx = (idx >> 1) + |q|` per sample (cases 5..=8) or
+  `idx = (idx >> 1) + var[tmp]` per group (case 2), where `var[tmp]` is
+  the summed magnitude of the three base-5 samples the product index
+  `tmp` encodes (computed from §6.4.2/§5.5, no new table). This closes
+  the two context-selection GAP-knobs `sv8_sample_decode` previously
+  carried; `decode_sv8_context_band_grounded` /
+  `decode_sv8_grouped3_band_grounded` / `decode_sv8_band_grounded` are
+  the knob-free canonical decode paths (the closure-knob variants are
+  retained for callers that need to override the predicate).
 
 ## Not yet wired (DOCS-GAP / downstream)
 

@@ -88,17 +88,23 @@
 //!   isolated inside [`unpack_grouped3_symbol`] /
 //!   [`unpack_grouped2_symbol`] so a future observer trace pinning
 //!   the opposite order is a one-line reverse.
-//! - **The q2 context-pair selection rule.** Case 2 is outside the
-//!   §3.4 `5..=8` first-order-context range, yet the staged tables
-//!   ship a `{ctx0, ctx1}` pair for it. The selection rule is GAP;
-//!   [`decode_sv8_grouped3_band`] takes `ctx` as a caller knob
-//!   (the [`crate::packet_stream::PacketSizeConvention`] precedent
-//!   for parameterising a documented GAP).
-//! - **The `5..=8` context-update predicate.** §3.4 pins that the
-//!   table is "chosen by the previously decoded sample" but not the
-//!   predicate mapping that sample to the `{ctx0, ctx1}` pick;
-//!   [`decode_sv8_context_band`] takes the rule as a caller-supplied
-//!   closure.
+//! - **The q2 context-pair selection rule** — *now grounded.* Case 2
+//!   sits outside the §3.4 `5..=8` first-order-context prose, yet the
+//!   staged tables ship a `{ctx0, ctx1}` pair for it, and
+//!   `spec/musepack-headers-and-coding.md` §6.4.2 pins the selection
+//!   rule: the same `idx > thres[2]` accumulator (`thres[2] = 3`,
+//!   init `idx = 6`) folding `var[tmp]` per group. The grounded path
+//!   [`decode_sv8_grouped3_band_grounded`] drives it from
+//!   [`crate::sv8_context::Sv8Context`]; [`decode_sv8_grouped3_band`]
+//!   keeps the fixed-`ctx` knob form for callers that need it.
+//! - **The `5..=8` context-update predicate** — *now grounded.* §3.4
+//!   pinned only that the table is "chosen by the previously decoded
+//!   sample"; §6.4.2 pins the full predicate (init `idx = 2·thres`,
+//!   select context-1 when `idx > thres`, fold
+//!   `idx = (idx >> 1) + |q|`). [`decode_sv8_context_band_grounded`]
+//!   drives it from [`crate::sv8_context::Sv8Context`];
+//!   [`decode_sv8_context_band`] keeps the caller-supplied-closure
+//!   form for callers that need to override it.
 //! - **Raw-bit field read order (escape arm).** The §3.4 prose
 //!   pins the per-sample read order ("a VLC plus a fixed number of
 //!   raw bits" — VLC first), but not the bit-significance order

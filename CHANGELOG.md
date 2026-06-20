@@ -8,6 +8,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 348** — SV8 §6.4.2 first-order context model, now grounded
+  (was two GAP-knobs). The staged
+  `spec/musepack-headers-and-coding.md` §6.4.2 closes the
+  context-selection predicate the `sv8_sample_decode` arms carried as
+  caller knobs — the cases-5..=8 "table chosen by the previously
+  decoded sample" rule and the wholly-unspecified case-2 (`q2`)
+  context-pair rule.
+  - New `sv8_context` module: `context_threshold()` (per-`Res`
+    thresholds `Res 2→3, 5→1, 6→3, 7→4, 8→8`), `Sv8Context` accumulator
+    (`new()` inits `idx = 2×thres`, `table_ctx()` = context-1 when
+    `idx > thres`, `update_sample()` folds `idx = (idx>>1)+|q|`,
+    `update_group()`/`case2_magnitude()` folds `idx = (idx>>1)+var[tmp]`
+    with `var[tmp]` the summed magnitude of the three base-5 samples
+    `tmp` encodes — computed, no new table).
+  - `decode_sv8_context_band_grounded` (cases 5..=8) and
+    `decode_sv8_grouped3_band_grounded` (case 2): knob-free per-sample /
+    per-group table selection driven by `Sv8Context`.
+  - `decode_sv8_band_grounded`: the canonical band dispatcher routing
+    cases 2 and 5..=8 through the grounded decoders (CNS / empty /
+    sparse / grouped-2 / escape arms unchanged; the knob variants
+    `decode_sv8_context_band` / `decode_sv8_grouped3_band` /
+    `decode_sv8_band` are retained).
+  - 22 new unit tests: threshold/accumulator pins, an exhaustive
+    cross-check that `case2_magnitude` matches `unpack_grouped3_symbol`
+    for all 125 `tmp`, first-sample-uses-ctx-1 (`idx` init), equivalence
+    to a hand-replicated §6.4.2 accumulator for both arms, and
+    dispatcher cross-checks. Crate lib total `394 → 416`.
+
 - **Round 344** — SV7/SV8 §2.6 mid/side (M/S) stereo-undo *structure*,
   new `ms_stereo` module. `undo_ms_stereo(stereo, ms_flags, undo)`
   applies the §2.6 "undo M/S where `msflag` set" reconstruction step
