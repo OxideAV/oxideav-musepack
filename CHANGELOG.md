@@ -8,6 +8,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 356** — SV8 §6.3 SCFI selector decode, now grounded (was a
+  GAP-knob). The freshly-staged `spec/musepack-headers-and-coding.md`
+  §6.3 closes the `scfi-1` vs `scfi-2` context-selection GAP and pins
+  the packed-value L/R split that `decode_scfi_selectors` left to the
+  caller:
+  - **Context** — chosen by the band's non-zero-channel count: `0`/`1`
+    non-zero ⇒ `sv8-canonical-scfi-1` (ctx 0); both ⇒ `-2` (ctx 1).
+  - **Packed L/R split** — `left = value >> (2·cnt)`, `right = value &
+    3`, with `cnt` = additional non-zero channels beyond the first
+    (`1` for a stereo both-non-zero band, else `0`). So a stereo band's
+    single `scfi-2` codeword carries both channels' SCFI selectors and a
+    single-channel band's `scfi-1` codeword is the lone selector.
+  - `decode_sv8_scfi(reader, nonzero_channels) -> Sv8BandScfi {left,
+    right}`: the knob-free §6.3 decode, returning two `0..=3` SCFI
+    selectors ready to drive the SV7-shape granule schedule
+    (`ScfCodingMethod`). The legacy GAP-knob `decode_scfi_selectors`
+    (closure + `RawScfiVlc` output) is retained.
+  - 5 new unit tests: single-channel direct value across `0..=3`, the
+    both-channels packed split across the full `scfi-2` `0..=15`
+    alphabet, exhaustive `(L, R)` combo recovery, a `>2`-channel reject,
+    and grounded EOF.
+
 - **Round 353** — SV8 §6.2 band-resolution (`Res`) header walk, now
   grounded (was two GAP-knobs). The freshly-staged
   `spec/musepack-headers-and-coding.md` §6.2 closes the

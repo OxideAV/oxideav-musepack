@@ -27,6 +27,25 @@
 //!    ascending band order. [`decode_scfi_selectors`] reads exactly one
 //!    SCFI VLC per coded band.
 //!
+//! ## §6.3 now GROUNDS the context rule + the L/R SCFI split
+//!
+//! The staged `spec/musepack-headers-and-coding.md` **§6.3** closes the
+//! `scfi-1` vs `scfi-2` context-selection GAP and pins the packed-value
+//! split that the GAP-knob walk ([`decode_scfi_selectors`]) left to the
+//! caller — both are now grounded by [`decode_sv8_scfi`]:
+//!
+//! - **Context.** §6.3: the SCFI context is chosen by "how many channels
+//!   are non-zero (0 or 1 → `scfi-1`; both → `scfi-2`)". No longer a
+//!   caller closure.
+//! - **The packed L/R split.** §6.3: "one canonical decode yields a
+//!   packed value split into the L SCFI (`value >> (2·cnt)`) and R SCFI
+//!   (`value & 3`)" — so a both-non-zero stereo band's single `scfi-2`
+//!   codeword carries *both* channels' SCFI selectors, and a
+//!   single-channel band's `scfi-1` codeword is the lone selector.
+//!   [`decode_sv8_scfi`] returns the recovered [`Sv8BandScfi`] `{left,
+//!   right}` pair ready to feed the SV7-shape granule schedule
+//!   ([`crate::scf::ScfCodingMethod`]).
+//!
 //! ## What the §3.5 prose does NOT pin (caller knobs / GAP)
 //!
 //! - **The SCFI value → granule-schedule semantics.** SV7's §2.4 SCFI
@@ -162,6 +181,81 @@ where
 /// collide with a genuine band_type rejection. Mirrors the sentinel
 /// [`crate::sv8_band_header::decode_band_resolutions`] uses.
 pub const CONTEXT_FAULT_SENTINEL: i8 = i8::MIN;
+
+/// The two per-channel SCFI coding-method values a single §6.3 SCFI
+/// decode produces for one band.
+///
+/// Each value is the SV7-shape `0..=3` SCFI selector (the Layer-II
+/// SCFSI four-way granule schedule, [`crate::scf::ScfCodingMethod`]):
+/// it says, for that channel's three SCF granules, how many distinct
+/// scalefactor indices are coded and how the three granules share them.
+/// `right` is meaningful only when the band has both channels non-zero;
+/// for a single-non-zero-channel band only `left` is used (the §6.3
+/// packed value degenerates to one field — see [`decode_sv8_scfi`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sv8BandScfi {
+    /// Left- (or sole-) channel SCFI selector (`0..=3`).
+    pub left: u8,
+    /// Right-channel SCFI selector (`0..=3`); meaningful only when
+    /// both channels of the band are non-zero.
+    pub right: u8,
+}
+
+/// Decode the §6.3 SV8 per-band SCFI selector(s), **grounded** by
+/// `spec/musepack-headers-and-coding.md` §6.3 — no caller context knob.
+///
+/// §6.3: "for each used band, a context is chosen by how many channels
+/// are non-zero (0 or 1 → `sv8-canonical-scfi-1`; both → `-2`); one
+/// canonical decode yields a packed value split into the L SCFI
+/// (`value >> (2·cnt)`) and R SCFI (`value & 3`)."
+///
+/// `nonzero_channels` is the count of channels with a non-zero band
+/// resolution for this band (`0`, `1`, or `2`):
+///
+/// - **`0` or `1`** ⇒ context 0 (`sv8-canonical-scfi-1`, the "mono /
+///   single-SCF" half). The decoded value is the single channel's SCFI
+///   directly (`cnt = 0`, so `value >> 0 = value`); `right` is set equal
+///   to `left` for a total surface but is not a coded field.
+/// - **`2`** ⇒ context 1 (`sv8-canonical-scfi-2`). The decoded value
+///   packs both: `left = value >> 2`, `right = value & 3` (`cnt = 1`,
+///   so `2·cnt = 2`). Here `cnt` is the number of *additional* non-zero
+///   channels beyond the first — `1` for a stereo both-non-zero band —
+///   which is the only multiplier making the staged `scfi-2` `0..=15`
+///   alphabet split into two `0..=3` SCFI fields.
+///
+/// The split masks each field to the `0..=3` SCFI range
+/// ([`crate::scf::ScfCodingMethod`]'s domain); the staged `scfi-1` map
+/// is `0..=3` and `scfi-2` is `0..=15`, so both fields land in range for
+/// a well-formed stream.
+///
+/// `nonzero_channels == 0` still reads one `scfi-1` codeword (the §6.3
+/// "0 or 1" context-0 branch covers it); a band with no non-zero channel
+/// would not normally reach the SCFI layer, but the function stays total
+/// over the `0..=2` domain. A `nonzero_channels` above 2 yields
+/// [`Error::ChannelCountInvalid`].
+///
+/// Errors:
+///
+/// - [`Error::UnexpectedEof`] if the reader starves on the SCFI peek.
+/// - [`Error::HuffmanNoMatch`] if the peek matches no row (unreachable
+///   for the staged scfi tables).
+/// - [`Error::ChannelCountInvalid`] if `nonzero_channels > 2`.
+pub fn decode_sv8_scfi(reader: &mut Sv7BitReader<'_>, nonzero_channels: u8) -> Result<Sv8BandScfi> {
+    if nonzero_channels > 2 {
+        return Err(Error::ChannelCountInvalid(nonzero_channels));
+    }
+    // §6.3 context: both channels non-zero ⇒ scfi-2 (ctx 1), else scfi-1.
+    let ctx: u8 = if nonzero_channels == 2 { 1 } else { 0 };
+    let table = table_for_role(Sv8TableRole::Scfi, ctx)
+        .ok_or(Error::UnsupportedBandType(CONTEXT_FAULT_SENTINEL))?;
+    let value = table.decode(reader)? as u16;
+    // `cnt` = additional non-zero channels beyond the first (1 for a
+    // stereo both-non-zero band, else 0); the §6.3 shift is `2·cnt`.
+    let cnt: u32 = if nonzero_channels == 2 { 1 } else { 0 };
+    let left = ((value >> (2 * cnt)) & 0x3) as u8;
+    let right = (value & 0x3) as u8;
+    Ok(Sv8BandScfi { left, right })
+}
 
 #[cfg(test)]
 mod tests {
@@ -362,5 +456,111 @@ mod tests {
         for v in -1i8..=17 {
             assert_ne!(v, CONTEXT_FAULT_SENTINEL);
         }
+    }
+
+    // ─── §6.3 grounded SCFI decode (decode_sv8_scfi) ─────────
+
+    /// Find a `(pattern, length)` codeword of `table` whose decoded
+    /// symbol equals `target`, walking every codeword of every data row.
+    fn codeword_for_symbol(table: &Sv8CanonicalTable, target: i8) -> Option<(u16, u8)> {
+        let mut upper: u32 = 0x1_0000;
+        for e in table.lengths.iter() {
+            if e.length == 0 {
+                continue;
+            }
+            let step = 1u32 << (16 - e.length as u32);
+            let mut pat = e.code as u32;
+            while pat < upper {
+                let mut p = BitPacker::new();
+                p.push(pat as u16, e.length);
+                let bytes = p.finish();
+                let mut r = Sv7BitReader::new(&bytes);
+                if table.decode(&mut r).unwrap() == target {
+                    return Some((pat as u16, e.length));
+                }
+                pat += step;
+            }
+            upper = e.code as u32;
+        }
+        None
+    }
+
+    #[test]
+    fn scfi_single_channel_reads_scfi1_value_directly() {
+        // §6.3: nonzero_channels 0 or 1 ⇒ ctx 0 (scfi-1); the decoded
+        // value is the sole channel's SCFI (cnt = 0, value >> 0).
+        for &target in &[0i8, 1, 2, 3] {
+            let Some((code, len)) = codeword_for_symbol(&SV8_SCFI_1_TABLE, target) else {
+                continue; // scfi-1 spans 0..=3; all four present
+            };
+            for nch in [0u8, 1] {
+                let mut p = BitPacker::new();
+                p.push(code, len);
+                let bytes = p.finish();
+                let mut r = Sv7BitReader::new(&bytes);
+                let scfi = decode_sv8_scfi(&mut r, nch).unwrap();
+                assert_eq!(scfi.left, target as u8, "nch {nch} target {target}");
+                // right mirrors left for the single-channel surface.
+                assert_eq!(scfi.right, target as u8);
+            }
+        }
+    }
+
+    #[test]
+    fn scfi_both_channels_splits_packed_value_into_left_and_right() {
+        // §6.3: nonzero_channels == 2 ⇒ ctx 1 (scfi-2); the value packs
+        // L = value >> 2, R = value & 3. Exercise several packed values
+        // spanning the 0..=15 scfi-2 alphabet.
+        for value in 0i8..=15 {
+            let Some((code, len)) = codeword_for_symbol(&SV8_SCFI_2_TABLE, value) else {
+                continue;
+            };
+            let mut p = BitPacker::new();
+            p.push(code, len);
+            let bytes = p.finish();
+            let mut r = Sv7BitReader::new(&bytes);
+            let scfi = decode_sv8_scfi(&mut r, 2).unwrap();
+            assert_eq!(scfi.left, (value as u8) >> 2, "value {value} left");
+            assert_eq!(scfi.right, (value as u8) & 3, "value {value} right");
+            // Both fields are valid 0..=3 SCFI selectors.
+            assert!(scfi.left <= 3 && scfi.right <= 3);
+        }
+    }
+
+    #[test]
+    fn scfi_both_channels_recovers_each_of_the_four_left_right_combos() {
+        // The four canonical (L, R) combos a stereo band can carry:
+        // packed value 4·L + R must split back exactly.
+        for l in 0u8..=3 {
+            for rgt in 0u8..=3 {
+                let packed = (l * 4 + rgt) as i8; // 0..=15
+                let Some((code, len)) = codeword_for_symbol(&SV8_SCFI_2_TABLE, packed) else {
+                    continue;
+                };
+                let mut p = BitPacker::new();
+                p.push(code, len);
+                let bytes = p.finish();
+                let mut r = Sv7BitReader::new(&bytes);
+                let scfi = decode_sv8_scfi(&mut r, 2).unwrap();
+                assert_eq!((scfi.left, scfi.right), (l, rgt), "packed {packed}");
+            }
+        }
+    }
+
+    #[test]
+    fn scfi_rejects_channel_count_above_two() {
+        for nch in [3u8, 4, u8::MAX] {
+            let mut r = Sv7BitReader::new(&[0xFF; 4]);
+            assert_eq!(
+                decode_sv8_scfi(&mut r, nch),
+                Err(Error::ChannelCountInvalid(nch))
+            );
+        }
+    }
+
+    #[test]
+    fn scfi_grounded_propagates_eof() {
+        let mut r = Sv7BitReader::new(&[]);
+        assert_eq!(decode_sv8_scfi(&mut r, 2), Err(Error::UnexpectedEof));
     }
 }
