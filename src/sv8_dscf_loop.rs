@@ -29,6 +29,29 @@
 //!    [`decode_dscf_deltas`] reads exactly the caller-supplied count for
 //!    each band.
 //!
+//! ## §6.3 now GROUNDS the DSCF → SCF-index arithmetic
+//!
+//! The staged `spec/musepack-headers-and-coding.md` **§6.3** closes the
+//! DSCF symbol → signed-delta centring GAP *and* the base-plus-delta SCF
+//! index reconstruction the GAP-knob walk ([`decode_dscf_deltas`]) left
+//! unscored. [`decode_sv8_band_scf`] is the grounded path:
+//!
+//! - **`SCF[0]`** — if the per-band "new-block" flag is set (key frame or
+//!   first use) read a raw 7-bit absolute index minus 6; otherwise decode
+//!   a delta via `sv8-canonical-dscf-2` (value 64 escape ⇒ `+ raw 6
+//!   bits`) and fold `SCF[0] = ((SCF_prev2 − 25 + delta) & 127) − 6`.
+//! - **`SCF[1]` / `SCF[2]`** — copied from the previous granule when the
+//!   SCFI selector marks them shared, else decoded via
+//!   `sv8-canonical-dscf-1` (value 31 escape ⇒ `64 + raw 6 bits`) and
+//!   folded the same `((prev − 25 + delta) & 127) − 6` way.
+//!
+//! The DSCF context is no longer a caller knob: §6.3 fixes `SCF[0]` to
+//! `dscf-2` and the later granules to `dscf-1`. The SCFI → coded/shared
+//! granule schedule is [`scfi_coded_granules`] (the §5.3 SCFI-case
+//! table). The legacy GAP-knob [`decode_dscf_deltas`] (raw wrapper +
+//! caller context/count closures) is retained for callers that want the
+//! pre-arithmetic raw values.
+//!
 //! ## What the §3.5 prose does NOT pin (caller knobs / GAP)
 //!
 //! - **The per-band delta count.** §2.4 ties the count (1..=3) to the
@@ -172,6 +195,175 @@ where
     Ok(out)
 }
 
+// ─── §6.3 grounded DSCF → SCF-index reconstruction ──────────
+
+/// Number of per-band SCF granules (Layer-II three-granule layout,
+/// §1). One channel's band carries three SCF indices `SCF[0..=2]`.
+pub const SCF_GRANULES_PER_BAND: usize = 3;
+
+/// The §6.3 DSCF folding recentre constant: each decoded SCF index is
+/// `((prev − 25 + delta) & 127) − 6` — a 7-bit ring fold (`& 127`) with
+/// the `−6` recentring and a `−25` bias applied to the running
+/// reference before the delta is added.
+const DSCF_FOLD_PREV_BIAS: i32 = 25;
+/// The §6.3 DSCF post-fold recentre offset (`… ) − 6`).
+const DSCF_FOLD_RECENTRE: i32 = 6;
+/// The §6.3 7-bit DSCF index ring mask (`& 127`).
+const DSCF_RING_MASK: i32 = 127;
+
+/// The §6.3 `dscf-2` escape symbol (value 64): "value 64 is an escape
+/// that adds a further raw 6 bits". Used for the `SCF[0]` delta path.
+const DSCF2_ESCAPE_SYMBOL: i8 = 64;
+/// The §6.3 `dscf-1` escape symbol (value 31): "value 31 is an escape
+/// that switches to `64 + raw 6 bits`". Used for the `SCF[1]`/`SCF[2]`
+/// delta path.
+const DSCF1_ESCAPE_SYMBOL: i8 = 31;
+/// Width of every §6.3 DSCF escape's extra raw field (6 bits).
+const DSCF_ESCAPE_RAW_BITS: u8 = 6;
+/// Width of the §6.3 `SCF[0]` new-block absolute index (`raw 7-bit
+/// index minus 6`).
+const DSCF_NEWBLOCK_ABS_BITS: u8 = 7;
+
+/// Fold one §6.3 DSCF `delta` onto a running reference `prev`:
+/// `SCF = ((prev − 25 + delta) & 127) − 6`. Shared by both the
+/// `SCF[0]` and the `SCF[1]`/`SCF[2]` delta paths (§6.3 applies the
+/// identical fold to all three).
+#[inline]
+const fn dscf_fold(prev: i32, delta: i32) -> i32 {
+    ((prev - DSCF_FOLD_PREV_BIAS + delta) & DSCF_RING_MASK) - DSCF_FOLD_RECENTRE
+}
+
+/// Read the §6.3 `dscf-2` delta for `SCF[0]`: one `sv8-canonical-dscf-2`
+/// codeword, plus — when the symbol is the escape value 64 — a further
+/// 6 raw bits added on. Returns the signed delta to fold.
+///
+/// §6.3: "decode a delta via `sv8-canonical-dscf-2` — value 64 is an
+/// escape that adds a further raw 6 bits".
+fn read_dscf0_delta(reader: &mut Sv7BitReader<'_>) -> Result<i32> {
+    let table = table_for_role(Sv8TableRole::Dscf, 1).ok_or(Error::UnsupportedBandType(i8::MIN))?;
+    let symbol = table.decode(reader)?;
+    let mut delta = symbol as i32;
+    if symbol == DSCF2_ESCAPE_SYMBOL {
+        delta += reader.read_bits(DSCF_ESCAPE_RAW_BITS)? as i32;
+    }
+    Ok(delta)
+}
+
+/// Read the §6.3 `dscf-1` delta for `SCF[1]` / `SCF[2]`: one
+/// `sv8-canonical-dscf-1` codeword, plus — when the symbol is the
+/// escape value 31 — a switch to `64 + raw 6 bits`. Returns the signed
+/// delta to fold.
+///
+/// §6.3: "decoded via `sv8-canonical-dscf-1` (value 31 is an escape that
+/// switches to `64 + raw 6 bits`)".
+fn read_dscf_later_delta(reader: &mut Sv7BitReader<'_>) -> Result<i32> {
+    let table = table_for_role(Sv8TableRole::Dscf, 0).ok_or(Error::UnsupportedBandType(i8::MIN))?;
+    let symbol = table.decode(reader)?;
+    if symbol == DSCF1_ESCAPE_SYMBOL {
+        Ok(64 + reader.read_bits(DSCF_ESCAPE_RAW_BITS)? as i32)
+    } else {
+        Ok(symbol as i32)
+    }
+}
+
+/// Whether each of the three SCF granules is independently *coded*
+/// (`true`) or *copied* from the previous granule (`false`) for a
+/// given SCFI selector value, per the §5.3 SCFI-case table (which §6.3
+/// inherits: `SCF[0]` is always coded; `SCF[1]` / `SCF[2]` are coded
+/// or shared by the SCFI value):
+///
+/// | SCFI | SCF\[0] | SCF\[1]      | SCF\[2]      |
+/// |-----:|---------|--------------|--------------|
+/// | 0    | coded   | coded        | coded        |
+/// | 1    | coded   | coded        | = SCF\[1]    |
+/// | 2    | coded   | = SCF\[0]    | coded        |
+/// | 3    | coded   | = SCF\[0]    | = SCF\[1]    |
+///
+/// `SCF[0]` is always coded; the returned `[bool; 3]` slot 0 is always
+/// `true`. Returns [`Error::InvalidScfCodingMethod`] for `scfi > 3`.
+pub fn scfi_coded_granules(scfi: u8) -> Result<[bool; SCF_GRANULES_PER_BAND]> {
+    let (c1, c2) = match scfi {
+        0 => (true, true),
+        1 => (true, false),
+        2 => (false, true),
+        3 => (false, false),
+        other => return Err(Error::InvalidScfCodingMethod(other as i8)),
+    };
+    Ok([true, c1, c2])
+}
+
+/// Reconstruct one channel's three §6.3 SCF indices for one band,
+/// **grounded** by `spec/musepack-headers-and-coding.md` §6.3.
+///
+/// Inputs:
+///
+/// - `reader` — the band-body bit reader.
+/// - `scfi` — this channel's SCFI selector (`0..=3`, from the §6.3
+///   [`crate::sv8_scf_header::decode_sv8_scfi`] split) deciding which of
+///   `SCF[1]` / `SCF[2]` are coded vs copied ([`scfi_coded_granules`]).
+/// - `new_block` — the per-band "new-block" flag. §6.3: "if the per-band
+///   'new-block' flag is set (key frame or first use), read a raw 7-bit
+///   absolute index minus 6; otherwise decode a delta via
+///   `sv8-canonical-dscf-2`". §6.2 forces this set on every key frame.
+/// - `prev_scf2` — the previous band's `SCF[2]` for this channel (the
+///   `SCF[0]` delta reference); ignored when `new_block` is set.
+///
+/// §6.3 decode:
+///
+/// - **`SCF[0]`** — if `new_block`: `raw7 − 6`. Otherwise:
+///   `SCF[0] = fold(prev_scf2, dscf2_delta)` where `dscf2_delta` is one
+///   `dscf-2` codeword (escape value 64 ⇒ `+ raw6`) and
+///   `fold(p, d) = ((p − 25 + d) & 127) − 6`.
+/// - **`SCF[1]`** — coded (per `scfi`) ⇒ `fold(SCF[0], dscf1_delta)`;
+///   shared ⇒ `= SCF[0]`.
+/// - **`SCF[2]`** — coded ⇒ `fold(SCF[1], dscf1_delta)`; shared ⇒
+///   `= SCF[1]`.
+///
+/// where each `dscf1_delta` is one `dscf-1` codeword (escape value 31 ⇒
+/// `64 + raw6`).
+///
+/// Returns the three absolute SCF indices `[SCF[0], SCF[1], SCF[2]]`.
+///
+/// Errors:
+///
+/// - [`Error::UnexpectedEof`] if the reader starves on any VLC / raw
+///   field.
+/// - [`Error::InvalidScfCodingMethod`] if `scfi > 3`.
+pub fn decode_sv8_band_scf(
+    reader: &mut Sv7BitReader<'_>,
+    scfi: u8,
+    new_block: bool,
+    prev_scf2: i32,
+) -> Result<[i32; SCF_GRANULES_PER_BAND]> {
+    let coded = scfi_coded_granules(scfi)?;
+
+    // SCF[0]: new-block absolute or dscf-2 delta folded off prev_scf2.
+    let scf0 = if new_block {
+        reader.read_bits(DSCF_NEWBLOCK_ABS_BITS)? as i32 - DSCF_FOLD_RECENTRE
+    } else {
+        let delta = read_dscf0_delta(reader)?;
+        dscf_fold(prev_scf2, delta)
+    };
+
+    // SCF[1]: coded (dscf-1 delta folded off SCF[0]) or copied from SCF[0].
+    let scf1 = if coded[1] {
+        let delta = read_dscf_later_delta(reader)?;
+        dscf_fold(scf0, delta)
+    } else {
+        scf0
+    };
+
+    // SCF[2]: coded (dscf-1 delta folded off SCF[1]) or copied from SCF[1].
+    let scf2 = if coded[2] {
+        let delta = read_dscf_later_delta(reader)?;
+        dscf_fold(scf1, delta)
+    } else {
+        scf1
+    };
+
+    Ok([scf0, scf1, scf2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +392,22 @@ mod tests {
             for i in 0..length {
                 let bit = (pattern >> (15 - i)) & 1;
                 self.acc = (self.acc << 1) | bit as u32;
+                self.nbits += 1;
+                if self.nbits == 8 {
+                    self.bytes.push(self.acc as u8);
+                    self.acc = 0;
+                    self.nbits = 0;
+                }
+            }
+        }
+
+        /// Push the low `length` bits of `value` MSB-first (a
+        /// right-justified raw field, the convention §6.3's escape and
+        /// new-block raw reads use).
+        fn push_raw(&mut self, value: u32, length: u8) {
+            for i in (0..length).rev() {
+                let bit = (value >> i) & 1;
+                self.acc = (self.acc << 1) | bit;
                 self.nbits += 1;
                 if self.nbits == 8 {
                     self.bytes.push(self.acc as u8);
@@ -448,5 +656,162 @@ mod tests {
         for v in 0i8..=64 {
             assert_ne!(v, CONTEXT_FAULT_SENTINEL);
         }
+    }
+
+    // ─── §6.3 grounded DSCF → SCF-index reconstruction ──────
+
+    /// Find a `(pattern, length)` codeword of `table` whose decoded
+    /// symbol equals `target`, walking every codeword of every data row.
+    fn codeword_for_symbol(table: &Sv8CanonicalTable, target: i8) -> Option<(u16, u8)> {
+        let mut upper: u32 = 0x1_0000;
+        for e in table.lengths.iter() {
+            if e.length == 0 {
+                continue;
+            }
+            let step = 1u32 << (16 - e.length as u32);
+            let mut pat = e.code as u32;
+            while pat < upper {
+                let mut p = BitPacker::new();
+                p.push(pat as u16, e.length);
+                let bytes = p.finish();
+                let mut r = Sv7BitReader::new(&bytes);
+                if table.decode(&mut r).unwrap() == target {
+                    return Some((pat as u16, e.length));
+                }
+                pat += step;
+            }
+            upper = e.code as u32;
+        }
+        None
+    }
+
+    /// Spec-replica fold so expectations are computed from §6.3, not the
+    /// impl: `SCF = ((prev − 25 + delta) & 127) − 6`.
+    fn fold_ref(prev: i32, delta: i32) -> i32 {
+        ((prev - 25 + delta) & 127) - 6
+    }
+
+    #[test]
+    fn scfi_coded_granules_matches_section_5_3_case_table() {
+        // §5.3 SCFI case table (SCF[0] always coded):
+        assert_eq!(scfi_coded_granules(0).unwrap(), [true, true, true]);
+        assert_eq!(scfi_coded_granules(1).unwrap(), [true, true, false]);
+        assert_eq!(scfi_coded_granules(2).unwrap(), [true, false, true]);
+        assert_eq!(scfi_coded_granules(3).unwrap(), [true, false, false]);
+        for bad in [4u8, 5, 255] {
+            assert_eq!(
+                scfi_coded_granules(bad),
+                Err(Error::InvalidScfCodingMethod(bad as i8))
+            );
+        }
+    }
+
+    #[test]
+    fn band_scf_new_block_reads_raw7_minus_6_for_scf0() {
+        // new_block ⇒ SCF[0] = raw7 − 6. With scfi 2 (SCF[1] shared,
+        // SCF[2] coded) the dscf-1 delta for SCF[2] follows.
+        // Pick an absolute index, then a dscf-1 codeword for SCF[2].
+        let abs: u32 = 70; // arbitrary 7-bit value
+        let (code2, len2) = codeword_for_symbol(&SV8_DSCF_1_TABLE, 3).expect("dscf-1 has symbol 3");
+        let mut p = BitPacker::new();
+        p.push_raw(abs, 7);
+        p.push(code2, len2); // SCF[2] delta (SCF[1] is shared = SCF[0])
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let scf = decode_sv8_band_scf(&mut r, 2, true, 999).unwrap();
+        let scf0 = abs as i32 - 6;
+        let scf2 = fold_ref(scf0, 3);
+        assert_eq!(scf, [scf0, scf0, scf2]); // SCF[1] shared = SCF[0]
+    }
+
+    #[test]
+    fn band_scf_non_new_block_folds_dscf2_delta_off_prev_scf2() {
+        // !new_block ⇒ SCF[0] = fold(prev_scf2, dscf2_delta). scfi 3 ⇒
+        // SCF[1] and SCF[2] both shared, so only the SCF[0] dscf-2 read.
+        let (code0, len0) = codeword_for_symbol(&SV8_DSCF_2_TABLE, 5).expect("dscf-2 has symbol 5");
+        let mut p = BitPacker::new();
+        p.push(code0, len0);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let prev = 40;
+        let scf = decode_sv8_band_scf(&mut r, 3, false, prev).unwrap();
+        let scf0 = fold_ref(prev, 5);
+        assert_eq!(scf, [scf0, scf0, scf0]); // both later granules shared
+    }
+
+    #[test]
+    fn band_scf_scfi0_codes_all_three_granules_with_dscf1_deltas() {
+        // scfi 0 ⇒ SCF[1] and SCF[2] both coded. !new_block ⇒ SCF[0]
+        // dscf-2 delta, then two dscf-1 deltas folding forward.
+        let (c0, l0) = codeword_for_symbol(&SV8_DSCF_2_TABLE, 2).unwrap();
+        let (c1, l1) = codeword_for_symbol(&SV8_DSCF_1_TABLE, 4).unwrap();
+        let (c2, l2) = codeword_for_symbol(&SV8_DSCF_1_TABLE, 1).unwrap();
+        let mut p = BitPacker::new();
+        p.push(c0, l0);
+        p.push(c1, l1);
+        p.push(c2, l2);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let prev = 30;
+        let scf = decode_sv8_band_scf(&mut r, 0, false, prev).unwrap();
+        let scf0 = fold_ref(prev, 2);
+        let scf1 = fold_ref(scf0, 4);
+        let scf2 = fold_ref(scf1, 1);
+        assert_eq!(scf, [scf0, scf1, scf2]);
+    }
+
+    #[test]
+    fn band_scf_dscf2_escape_64_adds_raw6() {
+        // SCF[0] non-new-block via dscf-2 escape symbol 64: delta =
+        // 64 + raw6. scfi 3 ⇒ no later reads.
+        let (c0, l0) = codeword_for_symbol(&SV8_DSCF_2_TABLE, 64).expect("dscf-2 escape symbol 64");
+        let raw6: u32 = 41;
+        let mut p = BitPacker::new();
+        p.push(c0, l0);
+        p.push_raw(raw6, 6);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let prev = 12;
+        let scf = decode_sv8_band_scf(&mut r, 3, false, prev).unwrap();
+        let scf0 = fold_ref(prev, 64 + raw6 as i32);
+        assert_eq!(scf, [scf0, scf0, scf0]);
+    }
+
+    #[test]
+    fn band_scf_dscf1_escape_31_switches_to_64_plus_raw6() {
+        // SCF[1] coded via dscf-1 escape symbol 31: delta = 64 + raw6.
+        // scfi 1 ⇒ SCF[1] coded, SCF[2] shared = SCF[1]. SCF[0] new-block.
+        let (c1, l1) = codeword_for_symbol(&SV8_DSCF_1_TABLE, 31).expect("dscf-1 escape symbol 31");
+        let abs: u32 = 50;
+        let raw6: u32 = 7;
+        let mut p = BitPacker::new();
+        p.push_raw(abs, 7); // SCF[0] absolute
+        p.push(c1, l1); // SCF[1] escape codeword
+        p.push_raw(raw6, 6); // SCF[1] escape raw
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let scf = decode_sv8_band_scf(&mut r, 1, true, 0).unwrap();
+        let scf0 = abs as i32 - 6;
+        let scf1 = fold_ref(scf0, 64 + raw6 as i32);
+        assert_eq!(scf, [scf0, scf1, scf1]); // SCF[2] shared = SCF[1]
+    }
+
+    #[test]
+    fn band_scf_rejects_scfi_above_three() {
+        let mut r = Sv7BitReader::new(&[0xFF; 8]);
+        assert_eq!(
+            decode_sv8_band_scf(&mut r, 4, true, 0),
+            Err(Error::InvalidScfCodingMethod(4))
+        );
+    }
+
+    #[test]
+    fn band_scf_propagates_eof() {
+        // new_block needs 7 bits for SCF[0]; an empty reader starves.
+        let mut r = Sv7BitReader::new(&[]);
+        assert_eq!(
+            decode_sv8_band_scf(&mut r, 3, true, 0),
+            Err(Error::UnexpectedEof)
+        );
     }
 }

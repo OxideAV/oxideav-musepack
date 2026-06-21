@@ -8,6 +8,25 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 356** — SV8 §6.3 DSCF → SCF-index reconstruction, now grounded
+  (was a GAP-knob raw walk). §6.3 pins the full base-plus-delta SCF index
+  decode `decode_sv8_band_scf(reader, scfi, new_block, prev_scf2) ->
+  [i32; 3]`:
+  - **`SCF[0]`** — `new_block` ⇒ raw 7-bit absolute index minus 6; else
+    a `sv8-canonical-dscf-2` delta (escape symbol 64 ⇒ `+ raw 6 bits`)
+    folded `((SCF_prev2 − 25 + delta) & 127) − 6`.
+  - **`SCF[1]` / `SCF[2]`** — copied from the previous granule when the
+    SCFI marks them shared (§5.3 case table, `scfi_coded_granules`), else
+    a `sv8-canonical-dscf-1` delta (escape symbol 31 ⇒ `64 + raw 6 bits`)
+    folded the same way.
+  - The DSCF context is no longer a caller knob: `SCF[0]` reads `dscf-2`,
+    later granules `dscf-1`. The legacy GAP-knob `decode_dscf_deltas` is
+    retained for callers wanting the pre-arithmetic raw values.
+  - 8 new unit tests: the §5.3 coded/shared schedule, the new-block
+    absolute path, the non-new-block dscf-2 fold off `prev_scf2`, all
+    three granules coded with forward-folding dscf-1 deltas, both escape
+    paths (dscf-2 64 / dscf-1 31), a `scfi > 3` reject, and EOF.
+
 - **Round 356** — SV8 §6.3 SCFI selector decode, now grounded (was a
   GAP-knob). The freshly-staged `spec/musepack-headers-and-coding.md`
   §6.3 closes the `scfi-1` vs `scfi-2` context-selection GAP and pins
