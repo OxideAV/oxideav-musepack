@@ -17,7 +17,7 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~436 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~457 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
 
 ## Format outline
@@ -105,6 +105,18 @@ Musepack ships in two incompatible stream-format generations:
   linear-PCM escape ladder, all reachable through the unified
   `decode_sv7_band` dispatcher that walks the §2.5 `switch (band_type)`
   ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`).
+- `sv8_frame_decode` — SV8 single-channel audio-packet frame-body
+  assembler. `decode_sv8_frame_channel` joins the grounded SV8 sub-walks
+  in the documented frame-body phase order (§2.3–§2.6): a §6.2
+  resolution sweep, then per non-zero band a §6.3 SCFI decode, the §6.3
+  per-granule SCF-index reconstruction (threading the previous band's
+  `SCF[2]` forward), and the §3.4 sample decode. Empty bands emit a
+  silent record; CNS bands fill from the shared PRNG with no SCF layer.
+  Output is a per-coded-subband `Sv8BandDecode` sequence (subband index,
+  `band_type`, three SCF indices, 36 sample levels) — the structured
+  input the §2.6/§3.6 reconstruction (dequant + per-granule SCF multiply
+  + synthesis filterbank) consumes. Multi-channel interleaving, the M/S
+  undo, and the cross-phase SCF/sample ordering remain GAP.
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_context` / `sv8_scf_header` / `sv8_dscf_loop` — SV8
   band-resolution walk, per-band sample-decode dispatcher (CNS / empty
@@ -114,6 +126,15 @@ Musepack ships in two incompatible stream-format generations:
   half, a §6.5 enumerative (combinatorial) position-selection codeword
   (binomial-coded, computed — no new tables), and one sign bit per
   present `±1` sample. Every SV8 §3.4 sample-decode arm is now wired.
+  The §6.3 scalefactor layer is now **grounded** too:
+  `sv8_scf_header::decode_sv8_scfi` picks the SCFI context by non-zero
+  channel count and splits the packed value into L/R selectors
+  (`left = value >> (2·cnt)`, `right = value & 3`), and
+  `sv8_dscf_loop::decode_sv8_band_scf` reconstructs the three per-granule
+  SCF indices — `SCF[0]` new-block raw7−6 or `dscf-2` delta (escape 64),
+  `SCF[1]`/`SCF[2]` shared-or-`dscf-1`-delta (escape 31) — each folded
+  `((prev−25+delta) & 127) − 6`. The legacy GAP-knob raw walks are
+  retained.
 - `sv8_band_header` — the §6.2 band-resolution outer walk is now
   **grounded** (was GAP-knobs). `decode_band_resolutions_grounded`
   decodes bands top-down: the top band reads res-1 (context 0), each

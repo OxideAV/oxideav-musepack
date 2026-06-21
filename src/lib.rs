@@ -175,6 +175,22 @@
 //!   keep the GAP SCFI-value → schedule and DSCF-symbol → signed-delta
 //!   centring mappings honest.
 //!
+//! - [`sv8_frame_decode`] — SV8 single-channel audio-packet frame-body
+//!   assembler. [`sv8_frame_decode::decode_sv8_frame_channel`] joins the
+//!   grounded SV8 sub-walks in the documented frame-body phase order: a
+//!   §6.2 resolution sweep ([`sv8_band_header::decode_band_resolutions_grounded`]),
+//!   then per non-zero band a §6.3 SCFI decode
+//!   ([`sv8_scf_header::decode_sv8_scfi`]), the §6.3 per-granule SCF-index
+//!   reconstruction ([`sv8_dscf_loop::decode_sv8_band_scf`], threading the
+//!   previous band's `SCF[2]` forward), and the §3.4 sample decode
+//!   ([`sv8_band_decode::decode_sv8_band_grounded`]). Empty (`band_type
+//!   0`) bands emit a silent record; CNS (`band_type -1`) bands fill from
+//!   the shared PRNG with no SCF layer. The output is a per-coded-subband
+//!   [`sv8_frame_decode::Sv8BandDecode`] sequence — the structured input
+//!   the §2.6 / §3.6 reconstruction (dequant + per-granule SCF multiply +
+//!   synthesis filterbank) consumes. Multi-channel interleaving, the M/S
+//!   undo, and the cross-phase SCF/sample ordering remain GAP.
+//!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
@@ -206,6 +222,7 @@ pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_context;
 pub mod sv8_dscf_loop;
+pub mod sv8_frame_decode;
 pub mod sv8_huffman;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;

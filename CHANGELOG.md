@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 356** — SV8 single-channel audio-packet frame-body assembler
+  (`sv8_frame_decode`). `decode_sv8_frame_channel(reader, nbands,
+  new_block, cns) -> Vec<Sv8BandDecode>` is the integrating layer that
+  joins the grounded SV8 sub-walks in the documented frame-body phase
+  order (§2.3–§2.6):
+  - **Resolution sweep** — one `decode_band_resolutions_grounded` reads
+    every coded band's `band_type` (§6.2, ascending order).
+  - **Per non-zero band** — the §6.3 SCFI decode (`decode_sv8_scfi`,
+    `nonzero_channels = 1`), the §6.3 per-granule SCF reconstruction
+    (`decode_sv8_band_scf`, threading the previous band's `SCF[2]` as the
+    next band's `SCF[0]` reference), then the §3.4 sample decode
+    (`decode_sv8_band_grounded`). Empty (`band_type 0`) bands emit a
+    silent record with no reads; CNS (`band_type -1`) bands fill from the
+    shared PRNG with no SCF layer.
+  - Output `Sv8BandDecode { subband, band_type, granule_scf: [i32; 3],
+    levels: [i32; 36] }` — the structured per-channel decode the §2.6 /
+    §3.6 reconstruction (dequant + per-granule SCF multiply + synthesis
+    filterbank) will consume. Multi-channel interleaving, the M/S undo,
+    and the cross-phase SCF/sample ordering remain GAP.
+  - 8 new unit tests: zero-band, `nbands > 32` reject, single empty band
+    (resolution-only read), single CNS band (PRNG match + state advance,
+    no SCF), single coded band (SCFI → new-block SCF → 36 samples),
+    multi-band `prev_scf2` threading across two coded bands, ascending
+    subband numbering, and resolution-phase EOF. Crate lib `436 → 457`.
+
 - **Round 356** — SV8 §6.3 DSCF → SCF-index reconstruction, now grounded
   (was a GAP-knob raw walk). §6.3 pins the full base-plus-delta SCF index
   decode `decode_sv8_band_scf(reader, scfi, new_block, prev_scf2) ->
