@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 359** — SV8 frame-decode → reconstructed subband-sample bridge
+  (`sv8_reconstruct`). The SV8 counterpart of `frame_reconstruct` for
+  SV7: turns the `Vec<Sv8BandDecode>` output of
+  `decode_sv8_frame_channel` into a per-channel `SubbandMatrix` of `f64`
+  subband samples (dequant + per-granule SCF multiply), ready for the
+  §2.6 M/S undo + synthesis filterbank.
+  - `reconstruct_sv8_band(band, anchor, out)` — per-band dispatch on the
+    signed `Res`: `-1` CNS (CNS dequant constant, no SCF layer), `0`
+    empty (silent), `1..=17` coded (dequant the already-signed levels by
+    the SV7-shared quantiser, then the three signed per-granule SCF gains
+    relative to `anchor`).
+  - `reconstruct_sv8_frame_channel(bands, anchor) -> SubbandMatrix` —
+    lands each band in its `subband` row; uncoded subbands stay silent.
+  - `decode_and_reconstruct_sv8_channel(reader, nbands, new_block, cns,
+    anchor) -> SubbandMatrix` — the single integration point from raw
+    frame-body bits straight to reconstructed subband samples for a mono
+    (or one resolved channel of a stereo) stream.
+  - A **dedicated** SV8 path (not `frame_reconstruct`) because SV8 levels
+    are already-signed/centred for *every* arm (the §6.4 large-coeff
+    escape carries the sign in its symbol), so there is no SV7-style
+    PCM-escape centring; and SV8 SCF indices are signed (`−6..=121`),
+    using the new signed SCF primitives. SV8 reuses the SV7 quantiser
+    (§3), so the `DEQUANT_COEFFICIENT_C` / `QUANTIZER_OFFSET_D` entries
+    are shared by `Res` number.
+  - 12 new unit tests (silence, empty-row, uncoded-stay-zero, direct
+    dequant of centred levels, negative SCF granule scaling, CNS dequant,
+    multi-band rows, subband / band-type rejects, per-band == frame-path
+    agreement, end-to-end == two-step + zero-band silence).
+  - The absolute SCF anchor, multi-channel interleaving, M/S undo
+    arithmetic, and synthesis filterbank remain GAP / out-of-scope-of-
+    `docs/audio/musepack/`. Crate lib `461 → 473`.
+
 - **Round 359** — signed-index SCF gain primitives for the SV8
   reconstruction path (`reconstruct`): `scf_relative_gain_signed(from,
   to) -> f64` and `apply_granule_scf_relative_signed(anchor,

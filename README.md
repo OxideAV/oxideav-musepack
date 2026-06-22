@@ -17,7 +17,7 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~457 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~473 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
 
 ## Format outline
@@ -117,6 +117,18 @@ Musepack ships in two incompatible stream-format generations:
   input the §2.6/§3.6 reconstruction (dequant + per-granule SCF multiply
   + synthesis filterbank) consumes. Multi-channel interleaving, the M/S
   undo, and the cross-phase SCF/sample ordering remain GAP.
+- `sv8_reconstruct` — SV8 frame-decode → reconstructed subband-sample
+  bridge (the SV8 counterpart of `frame_reconstruct`).
+  `reconstruct_sv8_frame_channel` turns the `Vec<Sv8BandDecode>` of
+  `decode_sv8_frame_channel` into a per-channel `SubbandMatrix` of `f64`
+  samples (dequant by the SV7-shared quantiser + the three signed
+  per-granule SCF gains relative to a caller anchor);
+  `decode_and_reconstruct_sv8_channel` runs decode + reconstruct in one
+  call straight from frame-body bits. A dedicated SV8 path because SV8
+  levels are already-signed/centred for every arm (no SV7 PCM-escape
+  centring) and SV8 SCF indices are signed (`−6..=121`, the §6.3 fold).
+  The absolute SCF anchor, multi-channel composition, M/S undo, and the
+  synthesis filterbank remain GAP.
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_context` / `sv8_scf_header` / `sv8_dscf_loop` — SV8
   band-resolution walk, per-band sample-decode dispatcher (CNS / empty
@@ -190,9 +202,11 @@ Musepack ships in two incompatible stream-format generations:
   is the one edit that pins it once a docs trace lands. DOCS-GAP.
 - **32-band polyphase synthesis filterbank** — the reconstruction path
   now reaches the full per-channel dequantised, per-granule-SCF-scaled
-  `f64` subband-sample matrix (`frame_reconstruct::SubbandMatrix`, via
-  `reconstruct_frame_channel` composing the per-band
-  `reconstruct_sv7_band_from_levels`). The final windowing step needs
+  `f64` subband-sample matrix (`frame_reconstruct::SubbandMatrix`) for
+  **both** generations: SV7 via `reconstruct_frame_channel` (composing
+  `reconstruct_sv7_band_from_levels`) and SV8 via the new
+  `sv8_reconstruct::reconstruct_sv8_frame_channel` /
+  `decode_and_reconstruct_sv8_channel`. The final windowing step needs
   the Layer-II synthesis window `D_i` (Table 3-B.3) and the `N_ik`
   matrix, which §1 of the spec states live in the in-repo ISO
   11172-3 PDF under `docs/audio/mp3/` — outside this crate's
