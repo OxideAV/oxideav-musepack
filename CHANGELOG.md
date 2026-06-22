@@ -8,6 +8,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 359** — signed-index SCF gain primitives for the SV8
+  reconstruction path (`reconstruct`): `scf_relative_gain_signed(from,
+  to) -> f64` and `apply_granule_scf_relative_signed(anchor,
+  granule_scf, band)`. The SV8 §6.3 DSCF fold `SCF = ((prev − 25 +
+  delta) & 127) − 6` recenters by `−6`, so a reconstructed SV8 SCF index
+  lies in the signed range `−6..=121` rather than the SV7 `u8` ladder.
+  The SCF gain is purely geometric (`SCF_STEP_RATIO^(to − from)`, anchor-
+  and sign-independent), so these lift the `u8` bound of
+  `scf_relative_gain` / `apply_granule_scf_relative` to `i32` without an
+  offset hack. 4 new unit tests. The absolute anchor gain remains GAP —
+  relative loudness between granules and anchor-sharing bands is exact.
+
 - **Round 356** — SV8 single-channel audio-packet frame-body assembler
   (`sv8_frame_decode`). `decode_sv8_frame_channel(reader, nbands,
   new_block, cns) -> Vec<Sv8BandDecode>` is the integrating layer that

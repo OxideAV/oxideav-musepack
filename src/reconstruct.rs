@@ -201,6 +201,59 @@ pub fn apply_granule_scf_relative(
     }
 }
 
+/// Multiplicative SCF gain at signed index `to` *relative to* signed
+/// index `from`, for SCF indices that fall **outside** the unsigned
+/// `0..=255` [`SCF_INDEX_COUNT`] ladder.
+///
+/// Identical geometry to [`scf_relative_gain`] —
+/// [`crate::requant::SCF_STEP_RATIO`]`^(to − from)` — but accepts the
+/// signed `i32` indices the SV8 §6.3 DSCF fold produces. That fold,
+/// `SCF = ((prev − 25 + delta) & 127) − 6`, recenters the 7-bit ring by
+/// `−6`, so a reconstructed SV8 SCF index lies in the signed range
+/// `−6..=121` rather than the SV7 `u8` ladder. Because the SCF gain is
+/// purely geometric (the `scf-step-ratio.meta` step is anchor- and
+/// sign-independent), the ratio between two indices is well-defined for
+/// any integers; this entry point just lifts the `u8` bound so the SV8
+/// signed indices can be used directly without an offset hack.
+///
+/// `from == to` yields exactly `1.0`; a higher `to` (downward in the
+/// stored direction) yields a gain below `1.0`, a lower `to` a gain
+/// above `1.0` — the same orientation as [`scf_relative_gain`].
+#[inline]
+pub fn scf_relative_gain_signed(from: i32, to: i32) -> f64 {
+    SCF_STEP_RATIO.powi(to - from)
+}
+
+/// Scale a 36-sample dequantised band in place by a **per-granule** SCF
+/// gain, applying each of the three signed granule SCF indices to its
+/// own contiguous 12-sample slice, *relative to* a shared signed
+/// `anchor` index.
+///
+/// The signed-index counterpart of [`apply_granule_scf_relative`] for
+/// the SV8 path: the §6.3 DSCF fold reconstructs each granule SCF index
+/// in the signed range `−6..=121`, so this variant takes `i32` indices
+/// and an `i32` anchor and uses [`scf_relative_gain_signed`]. Samples
+/// `0..12` are scaled by granule 0's gain relative to `anchor`, `12..24`
+/// by granule 1's, and `24..36` by granule 2's.
+///
+/// In-place. Infallible: the geometric gain is total for any integer
+/// indices (the relative-loudness-only convention of
+/// [`apply_granule_scf_relative`] applies — the result is exact up to
+/// the single GAP global anchor constant).
+pub fn apply_granule_scf_relative_signed(
+    anchor: i32,
+    granule_scf: [i32; GRANULES_PER_BAND],
+    band: &mut [f64; SAMPLES_PER_BAND],
+) {
+    for (g, &scf) in granule_scf.iter().enumerate() {
+        let gain = scf_relative_gain_signed(anchor, scf);
+        let start = g * SAMPLES_PER_GRANULE;
+        for slot in band[start..start + SAMPLES_PER_GRANULE].iter_mut() {
+            *slot *= gain;
+        }
+    }
+}
+
 /// Full §2.6 per-band reconstruction for the entropy-Huffman /
 /// PCM-escape range: dequantise 36 already-centred levels by the
 /// `band_type` quantiser, then apply the three per-granule SCF gains
@@ -1114,5 +1167,65 @@ mod tests {
         // And call the internal sanity helper so dead-code analysis
         // can't drop it.
         _sanity_band0_c_is_divisor();
+    }
+
+    // ─── signed (SV8) SCF gain ─────────────────────────────
+
+    #[test]
+    fn scf_relative_gain_signed_matches_unsigned_in_overlapping_range() {
+        // For indices that fit the u8 ladder, the signed variant must
+        // produce bit-identical gains to the u8 entry point.
+        for from in [0_i32, 1, 17, 121] {
+            for to in [0_i32, 1, 25, 121] {
+                let s = scf_relative_gain_signed(from, to);
+                let u = scf_relative_gain(from as u8, to as u8);
+                assert!((s - u).abs() < 1e-15, "from {from} to {to}: {s} vs {u}");
+            }
+        }
+    }
+
+    #[test]
+    fn scf_relative_gain_signed_handles_negative_indices() {
+        // SV8 fold can yield indices down to -6. Equal indices ⇒ 1.0;
+        // a one-step increase ⇒ SCF_STEP_RATIO; symmetry under swap.
+        assert_eq!(scf_relative_gain_signed(-6, -6), 1.0);
+        assert!((scf_relative_gain_signed(-6, -5) - SCF_STEP_RATIO).abs() < 1e-15);
+        // Reciprocal symmetry: gain(a,b) * gain(b,a) == 1.
+        let g = scf_relative_gain_signed(-6, 121);
+        let inv = scf_relative_gain_signed(121, -6);
+        assert!((g * inv - 1.0).abs() < 1e-12);
+        // Higher index = quieter (downward stored direction).
+        assert!(scf_relative_gain_signed(0, 10) < 1.0);
+        assert!(scf_relative_gain_signed(0, -10) > 1.0);
+    }
+
+    #[test]
+    fn apply_granule_scf_relative_signed_scales_each_granule() {
+        let mut band = [1.0_f64; SAMPLES_PER_BAND];
+        // Anchor 0; granule gains: 1.0, ratio, ratio^2.
+        apply_granule_scf_relative_signed(0, [0, 1, 2], &mut band);
+        for s in &band[0..SAMPLES_PER_GRANULE] {
+            assert!((s - 1.0).abs() < 1e-15);
+        }
+        for s in &band[SAMPLES_PER_GRANULE..2 * SAMPLES_PER_GRANULE] {
+            assert!((s - SCF_STEP_RATIO).abs() < 1e-15);
+        }
+        for s in &band[2 * SAMPLES_PER_GRANULE..] {
+            assert!((s - SCF_STEP_RATIO * SCF_STEP_RATIO).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn apply_granule_scf_relative_signed_with_negative_anchor() {
+        // A negative anchor (legal for SV8) still produces 1.0 when a
+        // granule SCF equals the anchor, and the relative loudness
+        // ordering is preserved.
+        let mut band = [2.0_f64; SAMPLES_PER_BAND];
+        apply_granule_scf_relative_signed(-6, [-6, -5, -4], &mut band);
+        // Granule 0 == anchor ⇒ unchanged.
+        assert!((band[0] - 2.0).abs() < 1e-15);
+        // Each later granule is one more downward step ⇒ quieter.
+        assert!(band[SAMPLES_PER_GRANULE].abs() < band[0].abs());
+        assert!(band[2 * SAMPLES_PER_GRANULE].abs() < band[SAMPLES_PER_GRANULE].abs());
     }
 }
