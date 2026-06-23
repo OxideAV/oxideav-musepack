@@ -8,6 +8,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 363** — SV7 §5.1 **grounded** `Res` (band-type) header decode
+  (`sv7_band_header::decode_res_header_grounded`). The staged §5.1 closes
+  the `RawBandTypeVlc → band_type` remap GAP the structural §2.3 walker
+  left open: the header VLC codes a **per-channel `Res` delta chain** that
+  produces the §5.4 sample-switch `band_type` directly.
+  - Band 0: each channel's `Res` is a raw 4-bit absolute.
+  - Bands 1+: `Res[n] = Res[n-1] + idx` off the *same channel's* previous
+    band, with VLC symbol `idx == 4` (`RES_HEADER_ESCAPE_SYMBOL`) an
+    escape to a raw 4-bit absolute.
+  - Per-band M/S bit read only when the stream-wide M/S flag is set, the
+    stream is stereo, and the band has a non-zero channel; surfaced as
+    `Sv7ResBand::ms_flag`.
+  - New `Sv7ResBand` type (per-channel `res` + `ms_flag`) with
+    `has_samples()`; 8 new unit tests (band-0 raw, later-band delta,
+    escape, stereo msflag present/absent/stream-off, channel/max-band
+    rejects, constants).
 - **Round 363** — SV7 §5.3 **grounded** scalefactor decode (`sv7_scf_decode`).
   The staged `spec/musepack-headers-and-coding.md` §5.3 pins the SV7 SCF
   model precisely, and it differs from the simpler Layer-II-schedule path

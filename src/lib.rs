@@ -78,7 +78,14 @@
 //!   [RawBandTypeVlc; 2], ms_flag: Option<bool> }` sequence. The
 //!   raw VLC value is wrapped in [`sv7_band_header::RawBandTypeVlc`]
 //!   to keep the §2.3-VLC-symbol → §2.5-dispatcher-case remap
-//!   honest (the remap shape is DOCS-GAP and not yet wired).
+//!   honest. The staged §5.1 closes that remap GAP:
+//!   [`sv7_band_header::decode_res_header_grounded`] reads the
+//!   per-channel `Res` (= band_type) **delta chain** directly — band 0 a
+//!   raw 4-bit absolute, later bands a header-VLC delta off the same
+//!   channel's previous `Res` with a `idx == 4` raw-4-bit escape, and a
+//!   per-band M/S bit gated on the stream-wide M/S flag — returning
+//!   [`sv7_band_header::Sv7ResBand`] values ready for the §5.4 sample
+//!   switch with no further remap.
 //! - [`sv7_scf_decode`] — SV7 §5.3 **grounded** scalefactor decode: the
 //!   precise SCFI-case model the staged `headers-and-coding` §5.3 pins,
 //!   distinct from the simpler [`scf`] Layer-II-schedule path.

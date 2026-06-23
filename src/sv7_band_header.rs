@@ -40,23 +40,25 @@
 //!    mono extension is the only sensible reading of "if either
 //!    channel is non-zero" when there is one channel.
 //!
+//! ## §5.1 closes the `RawBandTypeVlc → band_type` remap GAP
+//!
+//! The structural §2.3 walker ([`decode_band_header`] /
+//! [`decode_header_loop`]) reads the header VLC as an **opaque symbol**
+//! and wraps it in [`RawBandTypeVlc`] because §2.3 alone did not pin how
+//! that symbol maps onto the §2.5 `band_type` switch. The staged
+//! `spec/musepack-headers-and-coding.md` **§5.1** now closes that GAP:
+//! the header VLC codes a **per-channel delta chain** that produces the
+//! §5.4 `Res` (= band_type) directly — band 0 is a raw 4-bit absolute,
+//! later bands delta off the same channel's previous `Res` with a
+//! `idx == 4` raw-4-bit escape, and the per-band M/S bit is read only
+//! when the stream-wide M/S flag is set. [`decode_res_header_grounded`]
+//! implements this and returns the [`Sv7ResBand`] sequence whose `res`
+//! values feed the §5.4 sample switch with no further remap. The
+//! opaque [`RawBandTypeVlc`] path is retained for callers that want the
+//! raw symbol; the grounded path is the §5.1 closure.
+//!
 //! What this module does **not** do (out-of-scope this round):
 //!
-//! - It does not decide how the raw `i8` value returned by the
-//!   bandtype-header VLC maps onto the §2.5 dispatcher cases. The
-//!   bandtype-header VLC's symbol alphabet (values `-5..=4` per the
-//!   staged `sv7-huffman-bandtype-header.csv`) does not match the §2.5
-//!   case ladder's `-1..=17` range cell-for-cell. The §2.5 prose
-//!   uses `band_type` directly in its `switch`, so an upstream remap
-//!   (e.g. delta-from-previous-band, or a context-keyed transform) is
-//!   implied — but the **shape** of that remap is unspecified in the
-//!   structural prose. The mapping convention is therefore tracked as
-//!   a DOCS-GAP (same family as the §2.5 grouped-case unpack and the
-//!   SV7 §2.2 word-packing, all blocked on the pending workspace
-//!   observer trace). This module returns the raw `i8` VLC value
-//!   inside a typed [`RawBandTypeVlc`] wrapper so callers cannot
-//!   accidentally feed it into a §2.5 dispatcher without an explicit
-//!   remap step that does not yet exist.
 //! - It does not consume the per-frame 20-bit length prefix or the
 //!   "read in 32-LSB units" word packing of §2.2 — those belong to
 //!   the frame-driver round and are still GAP.
@@ -229,6 +231,137 @@ pub fn decode_header_loop(
     let mut out = Vec::with_capacity(band_count);
     for _ in 0..band_count {
         out.push(decode_band_header(reader, nch)?);
+    }
+    Ok(out)
+}
+
+// ─── §5.1 grounded Res (band-type) header decode ──────────────────────
+//
+// The staged `spec/musepack-headers-and-coding.md` §5.1 closes the
+// `RawBandTypeVlc → band_type` remap GAP the structural §2.3 walker
+// above leaves open. §5.1 pins the decode as a **delta chain per
+// channel** that produces the §2.5/§5.4 `band_type` (`Res`) directly:
+//
+// - **Band 0:** each channel's `Res` is a raw **4-bit** value.
+// - **Bands 1..max_band:** each channel's `Res` deltas off the *same
+//   channel's previous band* `Res` via the header VLC
+//   (`sv7-huffman-bandtype-header`): `Res[n] = Res[n-1] + idx`, except
+//   when the VLC symbol `idx == 4`, an **escape** meaning "read a raw
+//   4-bit absolute `Res` instead."
+// - **Per-band M/S:** for each band where either channel's `Res != 0`,
+//   and only if the stream-wide M/S flag is set, a 1-bit per-band M/S
+//   flag follows.
+//
+// So §5.1's `Res` *is* the band_type the §5.4 sample switch consumes
+// directly — no further remap. This is distinct from the structural
+// `decode_band_header` / `decode_header_loop` above, which read the VLC
+// as an opaque symbol with no band-0 raw, no escape, and an
+// unconditional (stream-flag-independent) msflag.
+
+/// The §5.1 band-type-header VLC **escape** symbol: a decoded value of
+/// `4` means "read a raw 4-bit absolute `Res` instead of a delta." The
+/// staged `sv7-huffman-bandtype-header` table carries the literal `4`.
+pub const RES_HEADER_ESCAPE_SYMBOL: i8 = 4;
+
+/// Width, in bits, of a raw absolute `Res` — both the band-0 read and
+/// the [`RES_HEADER_ESCAPE_SYMBOL`] escape read (§5.1: "a raw 4-bit
+/// value" / "a raw 4-bit absolute `Res`").
+pub const RES_RAW_BITS: u8 = 4;
+
+/// One band's grounded §5.1 per-channel `Res` (band_type) plus the
+/// optional per-band M/S flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sv7ResBand {
+    /// Per-channel `Res` (band_type) directly usable by the §5.4 sample
+    /// switch. `res[0]` is the left channel, `res[1]` the right; in mono
+    /// both slots carry the single channel's value.
+    pub res: [i8; 2],
+    /// `Some(true)` mid-side, `Some(false)` left-right, `None` when the
+    /// per-band M/S flag was suppressed (stream M/S off, or both
+    /// channels' `Res == 0`).
+    pub ms_flag: Option<bool>,
+}
+
+impl Sv7ResBand {
+    /// True iff at least one channel carries samples (`Res != 0`).
+    pub const fn has_samples(&self) -> bool {
+        self.res[0] != 0 || self.res[1] != 0
+    }
+}
+
+/// Read one channel's §5.1 `Res`: for band 0, a raw [`RES_RAW_BITS`]-bit
+/// absolute; for later bands, a header-VLC delta off `prev` with the
+/// [`RES_HEADER_ESCAPE_SYMBOL`] raw-absolute escape.
+fn read_res_channel(reader: &mut Sv7BitReader<'_>, band_index: usize, prev: i8) -> Result<i8> {
+    if band_index == 0 {
+        return Ok(reader.read_bits(RES_RAW_BITS)? as i8);
+    }
+    let sym = huffman_decode(reader, &SV7_BANDTYPE_HEADER_TABLE)?;
+    if sym == RES_HEADER_ESCAPE_SYMBOL {
+        Ok(reader.read_bits(RES_RAW_BITS)? as i8)
+    } else {
+        Ok(prev.wrapping_add(sym))
+    }
+}
+
+/// Decode the full §5.1 grounded `Res` (band-type) header over
+/// `0..=max_band`, producing each band's per-channel `Res` and optional
+/// per-band M/S flag.
+///
+/// `nch` is `1` (mono) or `2` (stereo). `stream_ms` is the stream-wide
+/// M/S flag (from the SH packet / SV7 fixed header): the per-band M/S bit
+/// is read only when `stream_ms` is set *and* the band has a non-zero
+/// channel. In mono (`nch == 1`) both `res` slots carry the single
+/// channel's value and no per-band M/S bit is read (the flag is
+/// meaningless with one channel — `stream_ms` would not be set for a mono
+/// stream).
+///
+/// The returned `Vec` has length `max_band as usize + 1`, in ascending
+/// band order. Each band's `Res` is the §5.4 sample-switch `band_type`
+/// directly — no further remap.
+///
+/// # Errors
+///
+/// - [`Error::ChannelCountInvalid`] if `nch` is neither 1 nor 2.
+/// - [`Error::MaxBandOutOfRange`] if `max_band > SV7_MAX_BAND_INCLUSIVE`.
+/// - [`Error::UnexpectedEof`] / [`Error::HuffmanNoMatch`] from a raw
+///   read or VLC mid-loop.
+pub fn decode_res_header_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    max_band: u8,
+    nch: u8,
+    stream_ms: bool,
+) -> Result<Vec<Sv7ResBand>> {
+    if !channels_valid(nch) {
+        return Err(Error::ChannelCountInvalid(nch));
+    }
+    if max_band > SV7_MAX_BAND_INCLUSIVE {
+        return Err(Error::MaxBandOutOfRange(max_band));
+    }
+    let band_count = max_band as usize + 1;
+    let mut out = Vec::with_capacity(band_count);
+    // Per-channel running previous Res (band 0 ignores it).
+    let mut prev = [0_i8; 2];
+    for i in 0..band_count {
+        let left = read_res_channel(reader, i, prev[0])?;
+        let right = if nch == 2 {
+            read_res_channel(reader, i, prev[1])?
+        } else {
+            left
+        };
+        prev = [left, right];
+        let band = Sv7ResBand {
+            res: [left, right],
+            ms_flag: None,
+        };
+        // §5.1: per-band M/S bit only when stream M/S is set, the band
+        // has a non-zero channel, and the stream is stereo.
+        let ms_flag = if stream_ms && nch == 2 && band.has_samples() {
+            Some(reader.read_bits(1)? & 1 == 1)
+        } else {
+            None
+        };
+        out.push(Sv7ResBand { ms_flag, ..band });
     }
     Ok(out)
 }
@@ -639,5 +772,194 @@ mod tests {
         // The only ways to extract are as_i8 and is_nonzero.
         assert_eq!(w.as_i8(), 3);
         assert!(w.is_nonzero());
+    }
+
+    // ─── §5.1 grounded Res header decode ──────────────────────────────
+
+    /// MSB-first packer for the grounded §5.1 tests: `push` a VLC
+    /// codeword (left-justified), `push_raw` a raw `Res` / msflag field,
+    /// `finish` flushes + two zero bytes so peek16 never starves.
+    struct ResPacker {
+        bytes: Vec<u8>,
+        acc: u32,
+        nbits: u8,
+    }
+
+    impl ResPacker {
+        fn new() -> Self {
+            ResPacker {
+                bytes: Vec::new(),
+                acc: 0,
+                nbits: 0,
+            }
+        }
+        fn push(&mut self, pattern: u16, length: u8) {
+            for i in 0..length {
+                let bit = (pattern >> (15 - i)) & 1;
+                self.acc = (self.acc << 1) | bit as u32;
+                self.nbits += 1;
+                if self.nbits == 8 {
+                    self.bytes.push(self.acc as u8);
+                    self.acc = 0;
+                    self.nbits = 0;
+                }
+            }
+        }
+        fn push_raw(&mut self, value: u32, length: u8) {
+            for i in (0..length).rev() {
+                let bit = (value >> i) & 1;
+                self.acc = (self.acc << 1) | bit;
+                self.nbits += 1;
+                if self.nbits == 8 {
+                    self.bytes.push(self.acc as u8);
+                    self.acc = 0;
+                    self.nbits = 0;
+                }
+            }
+        }
+        fn finish(mut self) -> Vec<u8> {
+            if self.nbits > 0 {
+                self.bytes.push((self.acc << (8 - self.nbits)) as u8);
+            }
+            self.bytes.push(0);
+            self.bytes.push(0);
+            self.bytes
+        }
+    }
+
+    /// Codeword `(pattern, length)` for a band-type-header VLC symbol,
+    /// hand-read from the staged `sv7-huffman-bandtype-header` `Code`
+    /// column.
+    fn hdr_code(value: i8) -> (u16, u8) {
+        match value {
+            0 => (0x8000, 1),
+            1 => (0x6000, 3),
+            -4 => (0x5e00, 7),
+            3 => (0x5d80, 9),
+            4 => (0x5d00, 9),
+            -5 => (0x5c00, 8),
+            2 => (0x5800, 6),
+            -3 => (0x5000, 5),
+            -2 => (0x4000, 4),
+            -1 => (0x0000, 2),
+            _ => unreachable!("unmapped hdr symbol {value}"),
+        }
+    }
+
+    #[test]
+    fn res_header_band0_reads_raw_four_bit_per_channel() {
+        // Mono, single band 0: raw 4-bit Res = 5.
+        let mut p = ResPacker::new();
+        p.push_raw(5, RES_RAW_BITS);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 0, 1, false).unwrap();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].res, [5, 5]);
+        assert_eq!(bands[0].ms_flag, None);
+        assert!(bands[0].has_samples());
+    }
+
+    #[test]
+    fn res_header_later_band_deltas_off_same_channel_previous() {
+        // Mono, two bands: band0 raw=7, band1 delta=+2 ⇒ Res=9.
+        let mut p = ResPacker::new();
+        p.push_raw(7, RES_RAW_BITS);
+        let (c, l) = hdr_code(2);
+        p.push(c, l);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 1, 1, false).unwrap();
+        assert_eq!(bands[0].res, [7, 7]);
+        assert_eq!(bands[1].res, [9, 9]);
+    }
+
+    #[test]
+    fn res_header_escape_reads_raw_absolute_for_later_band() {
+        // band0 raw=3, band1 VLC symbol 4 (escape) ⇒ raw absolute = 12,
+        // ignoring the delta chain.
+        let mut p = ResPacker::new();
+        p.push_raw(3, RES_RAW_BITS);
+        let (ec, el) = hdr_code(RES_HEADER_ESCAPE_SYMBOL);
+        p.push(ec, el);
+        p.push_raw(12, RES_RAW_BITS);
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 1, 1, false).unwrap();
+        assert_eq!(bands[0].res, [3, 3]);
+        assert_eq!(bands[1].res, [12, 12]);
+    }
+
+    #[test]
+    fn res_header_stereo_msflag_present_only_when_stream_ms_and_nonzero() {
+        // Stereo, stream_ms = true, single band 0: left raw=2, right
+        // raw=0 ⇒ non-zero band ⇒ one msflag bit (set to 1 = M/S).
+        let mut p = ResPacker::new();
+        p.push_raw(2, RES_RAW_BITS); // left
+        p.push_raw(0, RES_RAW_BITS); // right
+        p.push_raw(1, 1); // msflag = M/S
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 0, 2, true).unwrap();
+        assert_eq!(bands[0].res, [2, 0]);
+        assert_eq!(bands[0].ms_flag, Some(true));
+    }
+
+    #[test]
+    fn res_header_stereo_msflag_absent_when_band_all_zero() {
+        // Stereo, stream_ms = true, single band 0 with both channels 0
+        // ⇒ no msflag bit. The next read must therefore land on band-1
+        // data, not consume a phantom flag bit. Use two bands to prove
+        // alignment: band0 = (0,0) no flag; band1 left delta +1 off 0
+        // ⇒ 1, right delta +1 ⇒ 1, then a flag bit.
+        let mut p = ResPacker::new();
+        p.push_raw(0, RES_RAW_BITS); // band0 left = 0
+        p.push_raw(0, RES_RAW_BITS); // band0 right = 0  (no msflag)
+        let (c1, l1) = hdr_code(1);
+        p.push(c1, l1); // band1 left delta +1 ⇒ 1
+        p.push(c1, l1); // band1 right delta +1 ⇒ 1
+        p.push_raw(0, 1); // band1 msflag = L/R
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 1, 2, true).unwrap();
+        assert_eq!(bands[0].res, [0, 0]);
+        assert_eq!(bands[0].ms_flag, None);
+        assert_eq!(bands[1].res, [1, 1]);
+        assert_eq!(bands[1].ms_flag, Some(false));
+    }
+
+    #[test]
+    fn res_header_stream_ms_off_never_reads_a_flag() {
+        // Stereo, stream_ms = false: even a non-zero band reads no flag.
+        let mut p = ResPacker::new();
+        p.push_raw(3, RES_RAW_BITS); // left
+        p.push_raw(4, RES_RAW_BITS); // right
+                                     // No msflag bit; immediately the buffer ends (finish pads).
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let bands = decode_res_header_grounded(&mut r, 0, 2, false).unwrap();
+        assert_eq!(bands[0].res, [3, 4]);
+        assert_eq!(bands[0].ms_flag, None);
+    }
+
+    #[test]
+    fn res_header_rejects_bad_channel_count_and_max_band() {
+        let bytes = [0xFFu8; 8];
+        let mut r = Sv7BitReader::new(&bytes);
+        assert_eq!(
+            decode_res_header_grounded(&mut r, 0, 3, false),
+            Err(Error::ChannelCountInvalid(3))
+        );
+        let mut r = Sv7BitReader::new(&bytes);
+        assert_eq!(
+            decode_res_header_grounded(&mut r, 32, 2, false),
+            Err(Error::MaxBandOutOfRange(32))
+        );
+    }
+
+    #[test]
+    fn res_header_constants_match_spec() {
+        assert_eq!(RES_HEADER_ESCAPE_SYMBOL, 4);
+        assert_eq!(RES_RAW_BITS, 4);
     }
 }
