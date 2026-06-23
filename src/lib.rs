@@ -79,6 +79,18 @@
 //!   raw VLC value is wrapped in [`sv7_band_header::RawBandTypeVlc`]
 //!   to keep the §2.3-VLC-symbol → §2.5-dispatcher-case remap
 //!   honest (the remap shape is DOCS-GAP and not yet wired).
+//! - [`sv7_scf_decode`] — SV7 §5.3 **grounded** scalefactor decode: the
+//!   precise SCFI-case model the staged `headers-and-coding` §5.3 pins,
+//!   distinct from the simpler [`scf`] Layer-II-schedule path.
+//!   [`sv7_scf_decode::decode_sv7_band_scf`] reads the SCFI selector then
+//!   `1..=3` DSCF indices where `SCF[0]` is always coded (Δ vs the
+//!   *previous band's* `SCF[2]`, threaded via
+//!   [`sv7_scf_decode::Sv7BandScf::last_index`]) and `SCF[1]`/`SCF[2]`
+//!   are each coded-off-the-preceding-index or copied per the §5.3 table.
+//!   The §5.3 `idx == 8` raw-6-bit absolute escape
+//!   ([`sv7_scf_decode::DSCF_ESCAPE_SYMBOL`]) applies to every coded
+//!   index, and the §5.3 "index > 1024 ⇒ sentinel" clamp is surfaced as
+//!   [`sv7_scf_decode::Sv7BandScf::clamped`].
 //! - [`sv8_band_decode`] — SV8 §3.4 per-band sample-decode case
 //!   classifier mirroring [`sv7_band_decode::BandDecodeCase`] for
 //!   the SV8 ladder shape (`Cns` / `Empty` / `SparseBand` /
@@ -218,6 +230,7 @@ pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
 pub mod sv7_header;
+pub mod sv7_scf_decode;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_context;

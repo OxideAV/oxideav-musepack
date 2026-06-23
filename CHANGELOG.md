@@ -8,6 +8,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 363** — SV7 §5.3 **grounded** scalefactor decode (`sv7_scf_decode`).
+  The staged `spec/musepack-headers-and-coding.md` §5.3 pins the SV7 SCF
+  model precisely, and it differs from the simpler Layer-II-schedule path
+  in `scf`. New `decode_sv7_band_scf(reader, prev_band_scf2) -> Sv7BandScf`:
+  - `SCF[0]` is **always** independently coded, delta vs the *previous
+    band's* `SCF[2]` (threaded forward via `Sv7BandScf::last_index`) — not
+    a free caller anchor.
+  - `SCF[1]`/`SCF[2]` are each coded (delta off the *immediately preceding
+    index*) or copied from it, per the cell-for-cell §5.3 SCFI table
+    (`0`→code,code,code; `1`→code,code,copy; `2`→code,copy,code;
+    `3`→code,copy,copy). The "code off a copied predecessor" case (SCFI 2)
+    is one the `scf` slot table cannot express.
+  - The §5.3 `idx == 8` DSCF **escape** (`DSCF_ESCAPE_SYMBOL`) switches any
+    coded index to a raw 6-bit absolute, ignoring its delta reference.
+  - The §5.3 "decoded index exceeding 1024 ⇒ sentinel" clamp is surfaced
+    as the observable `Sv7BandScf::clamped` flag (indices returned
+    verbatim; silent-band substitution left to reconstruction).
+  - 10 new unit tests (all four SCFI cases, escape on `SCF[0]` and on a
+    later index, prev-band threading, clamp trip/no-trip, read-count
+    helper, EOF propagation).
 - **Round 359** — SV8 frame-decode → reconstructed subband-sample bridge
   (`sv8_reconstruct`). The SV8 counterpart of `frame_reconstruct` for
   SV7: turns the `Vec<Sv8BandDecode>` output of
