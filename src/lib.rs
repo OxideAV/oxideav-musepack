@@ -210,6 +210,21 @@
 //!   synthesis filterbank) consumes. Multi-channel interleaving, the M/S
 //!   undo, and the cross-phase SCF/sample ordering remain GAP.
 //!
+//! - [`sv7_frame_decode`] — SV7 single-channel frame-body assembler, the
+//!   SV7 counterpart of [`sv8_frame_decode`].
+//!   [`sv7_frame_decode::decode_sv7_frame_channel`] takes one channel's
+//!   §5.1 `Res` (band_type) sequence and walks each band in the §5
+//!   phase order: empty (`0`) ⇒ silent (no record); CNS (`-1`) ⇒ 36 PRNG
+//!   samples, no SCF; coded (`1..=17`) ⇒ the §5.3 SCF decode
+//!   ([`sv7_scf_decode::decode_sv7_band_scf`], threading the previous
+//!   band's `SCF[2]`), the §5.4 **1-bit context selector** (read only for
+//!   the grouped / per-sample-Huffman cases, gated by
+//!   [`sv7_frame_decode::band_type_uses_context_selector`]), then the 36
+//!   sample levels ([`sv7_band_decode::decode_sv7_band`]). Output is a
+//!   [`frame_reconstruct::BandLevels`] sequence ready for
+//!   [`frame_reconstruct::reconstruct_frame_channel`]. Cross-channel
+//!   interleaving, the M/S undo, and the absolute SCF anchor remain GAP.
+//!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
@@ -236,6 +251,7 @@ pub mod sh_header;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod sv7_frame_decode;
 pub mod sv7_header;
 pub mod sv7_scf_decode;
 pub mod sv8_band_decode;

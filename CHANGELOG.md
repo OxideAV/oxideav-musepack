@@ -8,6 +8,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 363** — SV7 single-channel **frame-body assembler**
+  (`sv7_frame_decode`), the SV7 counterpart of `sv8_frame_decode`.
+  `decode_sv7_frame_channel(reader, res_per_band, first_scf_ref, cns)`
+  takes one channel's §5.1 `Res` sequence and walks each band in the §5
+  phase order, emitting a `frame_reconstruct::BandLevels` sequence ready
+  for `reconstruct_frame_channel`:
+  - `Res == 0` (empty) ⇒ no record (subband stays silent);
+  - `Res == -1` (CNS) ⇒ 36 PRNG samples, no SCF layer;
+  - `Res` in `1..=17` (coded) ⇒ the §5.3 SCF decode (threading the
+    previous coded band's `SCF[2]`), the §5.4 **1-bit context selector**
+    (read only for the grouped `1`/`2` and per-sample-Huffman `3..=7`
+    cases — gated by `band_type_uses_context_selector`), then 36 sample
+    levels via `decode_sv7_band`.
+  - Negative pre-anchor SCF indices saturate to `0` in the `BandLevels`
+    `u32` triple (relative-anchor convention).
+  - 11 new unit tests (selector predicate, empty/CNS/coded/PCM-escape
+    bands, prev-band SCF threading, subband-index interleaving, negative
+    SCF saturation, EOF propagation, band-count + band-type rejects).
+  - Cross-channel interleaving, the M/S undo, and the absolute SCF anchor
+    remain GAP (the same gaps the SV8 assembler documents).
 - **Round 363** — SV7 §5.1 **grounded** `Res` (band-type) header decode
   (`sv7_band_header::decode_res_header_grounded`). The staged §5.1 closes
   the `RawBandTypeVlc → band_type` remap GAP the structural §2.3 walker

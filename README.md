@@ -17,7 +17,7 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~473 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~502 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
 
 ## Format outline
@@ -104,7 +104,26 @@ Musepack ships in two incompatible stream-format generations:
   q1 triplets / base-5 q2 pairs), per-sample Huffman (Q3..Q7), and the
   linear-PCM escape ladder, all reachable through the unified
   `decode_sv7_band` dispatcher that walks the §2.5 `switch (band_type)`
-  ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`).
+  ladder end to end (the SV7 sibling of SV8's `decode_sv8_band`). The
+  §5.1-grounded `decode_res_header_grounded` reads the per-channel `Res`
+  delta chain directly (band-0 raw-4-bit, later-band header-VLC delta
+  with the `idx == 4` raw-4-bit escape, stream-gated per-band M/S),
+  closing the `RawBandTypeVlc → band_type` remap gap.
+- `sv7_scf_decode` — SV7 §5.3 grounded scalefactor decode:
+  `decode_sv7_band_scf` reads the SCFI selector then the per-band DSCF
+  indices where `SCF[0]` is always coded (delta vs the previous band's
+  `SCF[2]`) and `SCF[1]`/`SCF[2]` are coded-off-the-preceding-index or
+  copied per the cell-for-cell §5.3 SCFI table, with the `idx == 8`
+  raw-6-bit absolute escape and the `index > 1024` clamp flag.
+- `sv7_frame_decode` — SV7 single-channel frame-body assembler (the SV7
+  counterpart of `sv8_frame_decode`). `decode_sv7_frame_channel` takes a
+  channel's §5.1 `Res` sequence and walks each band in the §5 phase
+  order — silent empties, CNS PRNG bands (no SCF), and coded bands (§5.3
+  SCF threaded off the previous band's `SCF[2]`, the §5.4 1-bit context
+  selector for the grouped / per-sample-Huffman cases, then 36 sample
+  levels) — emitting a `frame_reconstruct::BandLevels` sequence ready for
+  `reconstruct_frame_channel`. Cross-channel interleaving, the M/S undo,
+  and the absolute SCF anchor remain GAP.
 - `sv8_frame_decode` — SV8 single-channel audio-packet frame-body
   assembler. `decode_sv8_frame_channel` joins the grounded SV8 sub-walks
   in the documented frame-body phase order (§2.3–§2.6): a §6.2
