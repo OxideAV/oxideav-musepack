@@ -8,6 +8,59 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 366** — the §2.6 final step: the **32-band polyphase
+  synthesis subband filter** (`synthesis`), the last stage that turns a
+  frame's reconstructed `frame_reconstruct::SubbandMatrix` into PCM
+  samples. This closes the largest standing reconstruction gap and is
+  the PCM-producing stage for **both** stream generations (SV7 and SV8
+  share the identical inherited Layer-II filterbank, spec §1 lines
+  55-66). The §2.6 "GAP" framing was resolved: the algorithm + tables
+  live in the in-repo ISO/IEC 11172-3:1993 PDF under `docs/audio/mp3/`,
+  a standards-body source the Musepack spec (§1, source S3) explicitly
+  authorises transcribing — not a gap.
+  - `SynthesisFilter` holds the persistent 1024-entry `V` FIFO
+    (zero-initialised at startup per ISO Figure 3-A.2 footnote 1) and
+    its `synthesize(&[f64; 32]) -> [f64; 32]` runs the five-step
+    reconstruction the ISO Annex A Figure A.2 "Synthesis subband filter
+    flow chart" lays out **verbatim**: (1) shift the `V` FIFO up by 64,
+    (2) matrix `V[i] = Σ_k N_ik·S_k` into `V[0..64]`, (3) build the
+    512-value `U` vector by the documented `V[i·128+…]` gather, (4)
+    window `W[i] = U[i]·D[i]`, (5) sum 16 windowed taps per output
+    sample `out_j = Σ_{i=0}^{15} W[j+32i]`. `reset()` re-zeroes the FIFO
+    at a seek / channel boundary.
+  - `SYNTHESIS_WINDOW: [f64; 512]` — ISO Table 3-B.3 "Coefficients D_i
+    of the synthesis window", all 512 values transcribed verbatim by
+    visual reading of 400-DPI page renders of the in-repo ISO PDF
+    (Annex B). The table is the artefact of the original numerical-
+    optimisation run (not closed-form), so it is loaded as data; it is
+    magnitude-symmetric about D[256] (the windowed-sinc peak
+    1.144989014). Transcription was cross-checked region-by-region for
+    the sign-transition boundaries the table's multi-lobe structure
+    makes error-prone (D[128]/D[192]/D[320]/D[377] etc.).
+  - `matrix_coefficient(i, k)` — the matrixing coefficient
+    `N_ik = cos[(16+i)(2k+1)π/64]`, computed from the closed-form
+    formula the ISO figure prints (no `N_ik` table is transcribed; the
+    spec gives the formula, not a table).
+  - `synthesize_frame_channel(filter, matrix) -> [f64; 1152]` — the
+    frame driver: consumes a per-channel `SubbandMatrix` **column by
+    column** (one sample from every subband per time slot) over the 36
+    time slots, emitting the 1152 PCM samples of one channel-frame in
+    output order. The `filter` carries inter-frame `V` overlap and must
+    be reused across consecutive frames of one channel.
+  - 15 new unit tests: window length / endpoints / peak-at-256 /
+    full magnitude-symmetry over all 255 mirror pairs (the strongest
+    transcription guard) / sign-boundary pins; `N_ik` formula endpoints
+    (cos π/4, cos π/2, cos π); fresh-FIFO-is-zero, zero-in-zero-out,
+    first-slot-uses-only-fresh-V, filter linearity
+    (`synth(a·x)=a·synth(x)`), inter-call state carry, reset; and
+    frame-driver silence, slot-by-slot-driver agreement, and full-1152
+    geometry. Crate lib `502 → 517`.
+  - Still downstream of PCM: the M/S undo arithmetic and the absolute
+    SCF anchor gain remain GAP (both documented), and a stream-level
+    decode loop that wires header → frame-decode → reconstruct → M/S →
+    this filterbank → interleaved PCM output is the next integration
+    step.
+
 - **Round 363** — SV7 single-channel **frame-body assembler**
   (`sv7_frame_decode`), the SV7 counterpart of `sv8_frame_decode`.
   `decode_sv7_frame_channel(reader, res_per_band, first_scf_ref, cns)`

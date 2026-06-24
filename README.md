@@ -17,8 +17,9 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~502 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
-`[Unreleased]`.
+(~517 lib tests), now including the §2.6 synthesis filterbank that
+produces PCM from the reconstructed subband matrix. Remaining gaps are
+tracked in `CHANGELOG.md` `[Unreleased]`.
 
 ## Format outline
 
@@ -89,6 +90,20 @@ Musepack ships in two incompatible stream-format generations:
   reconstruct to silence (the §2.3 / §2.5 "data stored only for
   non-zero bands" convention). Pure composition — no new format facts;
   fail-loud on out-of-range subband / SCF-ladder index / band_type.
+- `synthesis` — the §2.6 final step: the **32-band polyphase synthesis
+  subband filter** that turns a per-channel reconstructed
+  `frame_reconstruct::SubbandMatrix` into PCM. Inherited unchanged from
+  MPEG-1 Layer I/II (§1); the algorithm + window table live in the
+  in-repo ISO/IEC 11172-3 PDF under `docs/audio/mp3/`, a standards-body
+  source the spec (§1, S3) authorises transcribing. `SynthesisFilter`
+  carries the persistent 1024-entry `V` FIFO and runs ISO Figure 3-A.2's
+  five steps (shift / matrix `N_ik = cos[(16+i)(2k+1)π/64]` / build-`U` /
+  window by the 512-tap `D_i` of Table 3-B.3 / sum) per time slot;
+  `synthesize_frame_channel` drives it column-by-column over the matrix
+  for the 1152 PCM samples of one channel-frame. The 512 `D_i`
+  coefficients (`SYNTHESIS_WINDOW`) are transcribed verbatim from the ISO
+  Annex B page renders, guarded by a full magnitude-symmetry test over
+  all 255 mirror pairs.
 - `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo *structure*:
   `undo_ms_stereo(stereo, ms_flags, undo)` walks a stereo pair of
   `SubbandMatrix` rows, transforming each `msflag`-set subband's
@@ -219,19 +234,21 @@ Musepack ships in two incompatible stream-format generations:
   anywhere under `docs/audio/musepack/`** and is threaded as a
   caller-supplied closure (the crate's GAP-knob pattern). The closure
   is the one edit that pins it once a docs trace lands. DOCS-GAP.
-- **32-band polyphase synthesis filterbank** — the reconstruction path
-  now reaches the full per-channel dequantised, per-granule-SCF-scaled
-  `f64` subband-sample matrix (`frame_reconstruct::SubbandMatrix`) for
-  **both** generations: SV7 via `reconstruct_frame_channel` (composing
-  `reconstruct_sv7_band_from_levels`) and SV8 via the new
-  `sv8_reconstruct::reconstruct_sv8_frame_channel` /
-  `decode_and_reconstruct_sv8_channel`. The final windowing step needs
-  the Layer-II synthesis window `D_i` (Table 3-B.3) and the `N_ik`
-  matrix, which §1 of the spec states live in the in-repo ISO
-  11172-3 PDF under `docs/audio/mp3/` — outside this crate's
-  `docs/audio/musepack/` source-of-truth scope. Staging those two
-  tables (or their facts) under `docs/audio/musepack/tables/` would
-  unblock the PCM step.
+- **32-band polyphase synthesis filterbank** — **WIRED** (round 366,
+  `synthesis`). The reconstruction path now runs end-to-end to PCM for
+  both generations: per-band decode → dequant + per-granule-SCF multiply
+  → per-channel `frame_reconstruct::SubbandMatrix` (SV7 via
+  `reconstruct_frame_channel`, SV8 via
+  `sv8_reconstruct::reconstruct_sv8_frame_channel`) →
+  `synthesis::synthesize_frame_channel` → 1152 PCM samples. The
+  synthesis window `D_i` (ISO Table 3-B.3) and the `N_ik` matrixing
+  formula were transcribed from the in-repo ISO 11172-3 PDF under
+  `docs/audio/mp3/` — the spec (§1, source S3) authorises transcribing
+  that repo-resident standards document, so this was never a docs-gap.
+  Output is still **relative** loudness (the absolute SCF anchor below),
+  and the stream-level decode loop (header → per-frame decode/recon →
+  M/S undo → this filterbank → interleaved output) is the next
+  integration step.
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive

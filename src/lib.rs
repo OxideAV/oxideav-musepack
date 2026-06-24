@@ -225,6 +225,20 @@
 //!   [`frame_reconstruct::reconstruct_frame_channel`]. Cross-channel
 //!   interleaving, the M/S undo, and the absolute SCF anchor remain GAP.
 //!
+//! - [`synthesis`] — the §2.6 final step: the 32-band polyphase
+//!   **synthesis subband filter** inherited from MPEG-1 Layer I/II
+//!   (spec §1 lines 55-66). [`synthesis::SynthesisFilter`] holds the
+//!   persistent 1024-entry `V` FIFO and runs ISO 11172-3 Figure 3-A.2's
+//!   five-step reconstruction (shift / matrix / build-U / window / sum)
+//!   per time slot, turning 32 subband samples into 32 PCM samples;
+//!   [`synthesis::synthesize_frame_channel`] drives it column-by-column
+//!   over a [`frame_reconstruct::SubbandMatrix`] for the 1152 PCM
+//!   samples of one channel-frame. The window coefficients
+//!   ([`synthesis::SYNTHESIS_WINDOW`], ISO Table 3-B.3) are transcribed
+//!   from the in-repo ISO PDF page renders under `docs/audio/mp3/`; the
+//!   matrixing coefficient ([`synthesis::matrix_coefficient`]) is the
+//!   closed-form `cos[(16+i)(2k+1)π/64]` the figure gives.
+//!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
@@ -263,6 +277,7 @@ pub mod sv8_huffman;
 pub mod sv8_reconstruct;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;
+pub mod synthesis;
 pub mod typed_packet;
 
 /// Total subband samples per frame per channel, inherited from
