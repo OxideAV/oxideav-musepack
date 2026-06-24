@@ -47,14 +47,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     time slots, emitting the 1152 PCM samples of one channel-frame in
     output order. The `filter` carries inter-frame `V` overlap and must
     be reused across consecutive frames of one channel.
-  - 15 new unit tests: window length / endpoints / peak-at-256 /
+  - `MultiChannelSynthesis` — persistent multi-channel synthesis state
+    holding one `SynthesisFilter` per channel (`new(nch)` for `nch` ∈
+    {1, 2}). Because the filterbank's windowed sum reaches back into the
+    previous 15 frames' matrixed `V` blocks, a stream needs one filter
+    **per channel reused across all frames**; this type owns them so the
+    per-frame driver continues the overlap rather than discontinuing it
+    every 1152 samples. `synthesize_channel_frame(ch, matrix)` advances
+    one channel's filter; `reset()` re-zeroes all.
+    `synthesize_stereo_frame_interleaved(state, left, right)` runs both
+    channels and interleaves them into `2 × 1152` PCM samples in
+    `L, R, L, R, …` order (the post-M/S-undo L/R matrices in, ready for
+    a PCM sink).
+  - 22 new unit tests: window length / endpoints / peak-at-256 /
     full magnitude-symmetry over all 255 mirror pairs (the strongest
     transcription guard) / sign-boundary pins; `N_ik` formula endpoints
     (cos π/4, cos π/2, cos π); fresh-FIFO-is-zero, zero-in-zero-out,
     first-slot-uses-only-fresh-V, filter linearity
     (`synth(a·x)=a·synth(x)`), inter-call state carry, reset; and
     frame-driver silence, slot-by-slot-driver agreement, and full-1152
-    geometry. Crate lib `502 → 517`.
+    geometry; plus multi-channel bad-`nch` rejection, per-channel
+    overlap == standalone-filter agreement across two consecutive
+    frames, channel independence, out-of-range channel + mono-state
+    rejects, reset, and stereo-interleave `L,R,…` ordering vs the
+    per-channel reference. Crate lib `502 → 524`.
   - Still downstream of PCM: the M/S undo arithmetic and the absolute
     SCF anchor gain remain GAP (both documented), and a stream-level
     decode loop that wires header → frame-decode → reconstruct → M/S →

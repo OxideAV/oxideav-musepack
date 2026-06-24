@@ -17,7 +17,7 @@ facts-only per the *Feist v. Rural* exception).
 The codec is **not yet wired into the `oxideav-core` registry** and
 cannot decode a full stream end-to-end. The crate today is a set of
 verified building-block modules with extensive unit-test coverage
-(~517 lib tests), now including the §2.6 synthesis filterbank that
+(~524 lib tests), now including the §2.6 synthesis filterbank that
 produces PCM from the reconstructed subband matrix. Remaining gaps are
 tracked in `CHANGELOG.md` `[Unreleased]`.
 
@@ -103,7 +103,11 @@ Musepack ships in two incompatible stream-format generations:
   for the 1152 PCM samples of one channel-frame. The 512 `D_i`
   coefficients (`SYNTHESIS_WINDOW`) are transcribed verbatim from the ISO
   Annex B page renders, guarded by a full magnitude-symmetry test over
-  all 255 mirror pairs.
+  all 255 mirror pairs. `MultiChannelSynthesis` owns one persistent
+  filter per channel (the filterbank's overlap spans the previous 15
+  frames, so each channel's filter must be reused across all frames) and
+  `synthesize_stereo_frame_interleaved` produces interleaved `2 × 1152`
+  `L, R, …` PCM from the post-M/S-undo L/R subband matrices.
 - `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo *structure*:
   `undo_ms_stereo(stereo, ms_flags, undo)` walks a stereo pair of
   `SubbandMatrix` rows, transforming each `msflag`-set subband's

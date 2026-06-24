@@ -773,6 +773,106 @@ pub fn synthesize_frame_channel(
     pcm
 }
 
+/// A persistent multi-channel synthesis state: one [`SynthesisFilter`]
+/// per channel, each carrying its own `V` FIFO overlap across the frames
+/// of a stream.
+///
+/// The synthesis filterbank is per-channel and stateful — the windowed
+/// sum at frame `n` reaches back into the `V` blocks matrixed during
+/// frames `n-1..n-15`. Decoding a multi-frame (or multi-channel) stream
+/// therefore needs **one filter instance per channel, reused across all
+/// frames**; resetting between frames would zero that overlap and inject
+/// a discontinuity every 1152 samples. [`MultiChannelSynthesis`] holds
+/// the `nch` filters and the per-frame drivers reuse them in place.
+///
+/// `nch` is `1` (mono) or `2` (stereo); the SV8 "level 3 = 8 channels"
+/// upgrade would extend this, but the rest of the pipeline is wired for
+/// 1-2 channels.
+#[derive(Clone, Debug)]
+pub struct MultiChannelSynthesis {
+    filters: Vec<SynthesisFilter>,
+}
+
+impl MultiChannelSynthesis {
+    /// A fresh multi-channel synthesis state with `nch` zero-initialised
+    /// filters.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::ChannelCountInvalid`] if `nch` is not `1` or `2`.
+    pub fn new(nch: usize) -> crate::Result<Self> {
+        if nch != 1 && nch != 2 {
+            return Err(crate::Error::ChannelCountInvalid(nch as u8));
+        }
+        Ok(Self {
+            filters: vec![SynthesisFilter::new(); nch],
+        })
+    }
+
+    /// The number of channels (filter instances) this state drives.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        self.filters.len()
+    }
+
+    /// Reset every channel's `V` FIFO to all-zero (e.g. at a stream
+    /// seek).
+    pub fn reset(&mut self) {
+        for f in &mut self.filters {
+            f.reset();
+        }
+    }
+
+    /// Synthesise one frame of one channel through that channel's
+    /// persistent filter, returning its 1152 PCM samples. The filter
+    /// state advances so the next frame of the same channel continues
+    /// the overlap.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::ChannelCountInvalid`] if `channel >= channels()`.
+    pub fn synthesize_channel_frame(
+        &mut self,
+        channel: usize,
+        matrix: &SubbandMatrix,
+    ) -> crate::Result<[f64; SAMPLES_PER_FRAME_PER_CHANNEL]> {
+        let filter = self
+            .filters
+            .get_mut(channel)
+            .ok_or(crate::Error::ChannelCountInvalid(channel as u8))?;
+        Ok(synthesize_frame_channel(filter, matrix))
+    }
+}
+
+/// Synthesise one **stereo** frame and interleave the two channels into
+/// `2 × 1152` PCM samples in `L, R, L, R, …` order.
+///
+/// Each channel runs through its own persistent filter in `state`
+/// (which must have `channels() == 2`), so consecutive calls continue
+/// the per-channel overlap. The two channel matrices are the L/R (post
+/// M/S-undo) reconstructed subband matrices for the frame.
+///
+/// # Errors
+///
+/// [`crate::Error::ChannelCountInvalid`] if `state.channels() != 2`.
+pub fn synthesize_stereo_frame_interleaved(
+    state: &mut MultiChannelSynthesis,
+    left: &SubbandMatrix,
+    right: &SubbandMatrix,
+) -> crate::Result<Vec<f64>> {
+    if state.channels() != 2 {
+        return Err(crate::Error::ChannelCountInvalid(state.channels() as u8));
+    }
+    let l = state.synthesize_channel_frame(0, left)?;
+    let r = state.synthesize_channel_frame(1, right)?;
+    let mut out = vec![0.0_f64; 2 * SAMPLES_PER_FRAME_PER_CHANNEL];
+    for (i, (&ls, &rs)) in l.iter().zip(r.iter()).enumerate() {
+        out[2 * i] = ls;
+        out[2 * i + 1] = rs;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,5 +1081,99 @@ mod tests {
         let pcm = synthesize_frame_channel(&mut f, &m);
         assert_eq!(pcm.len(), 1152);
         assert!(pcm.iter().any(|&x| x.abs() > 1e-12));
+    }
+
+    fn ramp_matrix(seed: usize) -> crate::frame_reconstruct::SubbandMatrix {
+        let mut m = crate::frame_reconstruct::zero_subband_matrix();
+        for (b, row) in m.iter_mut().enumerate() {
+            for (t, x) in row.iter_mut().enumerate() {
+                *x = (((b + seed) * 5 + t) as f64 * 0.002).cos();
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn multichannel_rejects_bad_channel_count() {
+        assert!(MultiChannelSynthesis::new(0).is_err());
+        assert!(MultiChannelSynthesis::new(3).is_err());
+        assert_eq!(MultiChannelSynthesis::new(1).unwrap().channels(), 1);
+        assert_eq!(MultiChannelSynthesis::new(2).unwrap().channels(), 2);
+    }
+
+    #[test]
+    fn multichannel_channel_frame_matches_standalone_filter() {
+        // Driving channel 1 through MultiChannelSynthesis must equal a
+        // standalone SynthesisFilter across two consecutive frames
+        // (state carries between calls).
+        let mut state = MultiChannelSynthesis::new(2).unwrap();
+        let mut standalone = SynthesisFilter::new();
+
+        for frame in 0..2 {
+            let m = ramp_matrix(frame);
+            let via_state = state.synthesize_channel_frame(1, &m).unwrap();
+            let direct = synthesize_frame_channel(&mut standalone, &m);
+            for (a, b) in via_state.iter().zip(direct.iter()) {
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn multichannel_channels_are_independent() {
+        // Channel 0 and channel 1 keep separate V state: feeding channel
+        // 0 then channel 1 the same matrix from fresh gives identical
+        // outputs (each starts from its own zeroed FIFO).
+        let mut state = MultiChannelSynthesis::new(2).unwrap();
+        let m = ramp_matrix(7);
+        let c0 = state.synthesize_channel_frame(0, &m).unwrap();
+        let c1 = state.synthesize_channel_frame(1, &m).unwrap();
+        assert_eq!(c0, c1);
+    }
+
+    #[test]
+    fn multichannel_out_of_range_channel_errs() {
+        let mut state = MultiChannelSynthesis::new(2).unwrap();
+        let m = crate::frame_reconstruct::zero_subband_matrix();
+        assert!(state.synthesize_channel_frame(2, &m).is_err());
+    }
+
+    #[test]
+    fn multichannel_reset_zeroes_all_filters() {
+        let mut state = MultiChannelSynthesis::new(2).unwrap();
+        let m = ramp_matrix(1);
+        let _ = state.synthesize_channel_frame(0, &m).unwrap();
+        let _ = state.synthesize_channel_frame(1, &m).unwrap();
+        state.reset();
+        // After reset, a zero matrix yields pure-zero output again.
+        let z = crate::frame_reconstruct::zero_subband_matrix();
+        let out = state.synthesize_channel_frame(0, &z).unwrap();
+        assert!(out.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn stereo_interleave_orders_lr_and_matches_per_channel() {
+        let mut state = MultiChannelSynthesis::new(2).unwrap();
+        let left = ramp_matrix(3);
+        let right = ramp_matrix(11);
+
+        // Reference: drive each channel separately on a parallel state.
+        let mut ref_state = MultiChannelSynthesis::new(2).unwrap();
+        let l = ref_state.synthesize_channel_frame(0, &left).unwrap();
+        let r = ref_state.synthesize_channel_frame(1, &right).unwrap();
+
+        let inter = synthesize_stereo_frame_interleaved(&mut state, &left, &right).unwrap();
+        assert_eq!(inter.len(), 2 * SAMPLES_PER_FRAME_PER_CHANNEL);
+        for i in 0..SAMPLES_PER_FRAME_PER_CHANNEL {
+            assert_eq!(inter[2 * i], l[i], "L sample {i}");
+            assert_eq!(inter[2 * i + 1], r[i], "R sample {i}");
+        }
+    }
+
+    #[test]
+    fn stereo_interleave_rejects_mono_state() {
+        let mut mono = MultiChannelSynthesis::new(1).unwrap();
+        let m = crate::frame_reconstruct::zero_subband_matrix();
+        assert!(synthesize_stereo_frame_interleaved(&mut mono, &m, &m).is_err());
     }
 }
