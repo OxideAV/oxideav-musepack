@@ -279,6 +279,7 @@ pub mod sv8_huffman;
 pub mod sv8_reconstruct;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;
+pub mod sv8_stream;
 pub mod synthesis;
 pub mod typed_packet;
 
