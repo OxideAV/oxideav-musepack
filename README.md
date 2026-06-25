@@ -14,12 +14,17 @@ against the staged structural spec at
 under `docs/audio/musepack/tables/` (CSV + `.meta` sidecars, extracted
 facts-only per the *Feist v. Rural* exception).
 
-The codec is **not yet wired into the `oxideav-core` registry** and
-cannot decode a full stream end-to-end. The crate today is a set of
+The codec is **not yet wired into the `oxideav-core` registry**, but the
+decode pipeline now runs **end-to-end to PCM** for the grounded subset:
+an SV7 stereo stream (`sv7_stream`) and an SV8 mono keyframe stream
+(`sv8_decode` → `sv8_stream`) both decode header → per-frame
+decode/reconstruct → M/S undo (SV7) → synthesis filterbank → interleaved
+or mono PCM, with the filterbank overlap + CNS PRNG threaded across
+frames. Output is **relative** loudness (the absolute SCF anchor and the
+M/S-undo arithmetic remain DOCS-GAPs — see below). The crate is a set of
 verified building-block modules with extensive unit-test coverage
-(~524 lib tests), now including the §2.6 synthesis filterbank that
-produces PCM from the reconstructed subband matrix. Remaining gaps are
-tracked in `CHANGELOG.md` `[Unreleased]`.
+(~547 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+`[Unreleased]`.
 
 ## Format outline
 
@@ -165,8 +170,43 @@ Musepack ships in two incompatible stream-format generations:
   call straight from frame-body bits. A dedicated SV8 path because SV8
   levels are already-signed/centred for every arm (no SV7 PCM-escape
   centring) and SV8 SCF indices are signed (`−6..=121`, the §6.3 fold).
-  The absolute SCF anchor, multi-channel composition, M/S undo, and the
-  synthesis filterbank remain GAP.
+- `sv7_stereo_frame` — SV7 §5 **two-channel** frame decode +
+  reconstruction. `decode_sv7_stereo_frame` composes the §5.1 shared
+  band-type header (both channels + per-band M/S flags), the §5.3/§5.4
+  "Left channel is decoded first, then right" per-channel body sweeps,
+  and per-channel `reconstruct_frame_channel` into an `Sv7StereoFrame
+  { channels: StereoSubbandMatrix, ms_flags }` — exactly the input
+  `ms_stereo::undo_ms_stereo` + the synthesis filterbank consume. The
+  shared CNS PRNG threads across both channels in decode order; the two
+  §2.6 GAPs (absolute SCF anchor, M/S-undo arithmetic) stay caller knobs.
+- `sv7_stream` — SV7 **stereo stream driver**. `Sv7StreamDecoder` owns
+  the cross-frame state (one persistent `MultiChannelSynthesis` — the
+  filterbank overlap spans 15 frames — a shared CNS PRNG, and the §2.6
+  M/S-undo closure); `decode_frame` runs the full §2.6 per-frame pipeline
+  (stereo decode + reconstruct → M/S undo → synthesis, interleaved L,R,…)
+  over a caller-positioned `Sv7BitReader`; `decode_frames` loops it across
+  the non-byte-aligned (§2.2) continuous bit run. The whole-stream
+  word-swap body bit-alignment (§2.2/§4) is *not* assumed — the driver
+  takes a positioned reader, leaving byte-level body extraction to a
+  future fixture round.
+- `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
+  the SV8 counterpart of `sv7_stream` for one channel: a persistent
+  single-channel `SynthesisFilter` + shared CNS PRNG threaded across the
+  `block_power`-derived frames of an `AP` packet; `decode_frame` runs §6
+  decode + §2.6/§3.6 reconstruct + synthesis per frame, with the per-frame
+  `Sv8FrameParams { nbands, new_block }` caller-supplied.
+- `sv8_decode` — SV8 **packet-stream → audio integration** (first wiring
+  of the packet layer to the audio decode). `decode_sv8_mono_stream`
+  walks an `MPCK` buffer, reads the `SH` header, and drives an
+  `Sv8MonoStreamDecoder` over every `AP` packet as one §6.2 key frame
+  (reading its own `Max_used_Band` log code), emitting `Sv8DecodedStream
+  { header, audio_packets, pcm }`. Supported subset is mono +
+  `block_power == 0` + key-frame `AP`; out-of-subset streams are rejected
+  with precise errors (`ChannelCountInvalid` / `UnsupportedBlockPower`).
+  SV8 stereo + multi-frame-packet wait on the per-channel-interleaving +
+  per-frame-`Max_used_Band` DOCS-GAPs. The SV7/SV8 multi-channel
+  composition is now wired (SV7 stereo via `sv7_stream`); only the §2.6
+  M/S-undo *arithmetic* and the absolute SCF anchor remain GAP.
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_context` / `sv8_scf_header` / `sv8_dscf_loop` — SV8
   band-resolution walk, per-band sample-decode dispatcher (CNS / empty
@@ -249,10 +289,19 @@ Musepack ships in two incompatible stream-format generations:
   formula were transcribed from the in-repo ISO 11172-3 PDF under
   `docs/audio/mp3/` — the spec (§1, source S3) authorises transcribing
   that repo-resident standards document, so this was never a docs-gap.
-  Output is still **relative** loudness (the absolute SCF anchor below),
-  and the stream-level decode loop (header → per-frame decode/recon →
-  M/S undo → this filterbank → interleaved output) is the next
-  integration step.
+  Output is still **relative** loudness (the absolute SCF anchor below).
+- **Stream-level decode loop** — **WIRED** (round 371). The full pipeline
+  (header → per-frame decode/recon → M/S undo → filterbank → interleaved
+  / mono output) now runs end-to-end for the grounded subset: SV7 stereo
+  via `sv7_stream::Sv7StreamDecoder`, and SV8 mono keyframe streams via
+  `sv8_decode::decode_sv8_mono_stream` → `sv8_stream::Sv8MonoStreamDecoder`,
+  with the filterbank overlap + CNS PRNG threaded across frames. Out of
+  scope still: the SV8 **stereo** path (per-channel band interleaving is
+  GAP), the SV8 **multi-frame `AP`** path (`block_power > 0` — the
+  per-frame `Max_used_Band` position is GAP), and the SV7 **whole-stream
+  word-swap body bit-alignment** (§2.2/§4 — the byte-level body extraction
+  that positions the bit reader; no in-repo SV7 fixture corpus to validate
+  it, so `Sv7StreamDecoder` takes a caller-positioned reader).
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive

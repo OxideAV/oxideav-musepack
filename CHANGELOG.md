@@ -8,6 +8,45 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 371** — the **stream-level decode loop**, taking the
+  reconstruction path end-to-end to PCM (relative loudness) for the
+  grounded subset of both stream generations:
+  - `sv7_stereo_frame::decode_sv7_stereo_frame` — SV7 §5 **two-channel**
+    frame decode + reconstruction. Composes the §5.1 shared band-type
+    header (both channels + per-band M/S flags), the §5.3/§5.4 "Left
+    channel is decoded first, then right" per-channel body sweeps, and
+    per-channel `reconstruct_frame_channel` into an `Sv7StereoFrame
+    { channels, ms_flags }` — the input `ms_stereo::undo_ms_stereo` + the
+    synthesis filterbank consume. Shared CNS PRNG threads across both
+    channels. No new format facts (composition of grounded sub-walks in
+    the documented §5 phase order).
+  - `sv7_stream::Sv7StreamDecoder` — SV7 **stereo stream driver** owning
+    the cross-frame state (persistent `MultiChannelSynthesis` — the
+    filterbank overlap spans 15 frames — shared CNS PRNG, §2.6 M/S-undo
+    closure). `decode_frame` runs the full §2.6 per-frame pipeline
+    (stereo decode + reconstruct → M/S undo → synthesis, interleaved);
+    `decode_frames` loops it across the non-byte-aligned (§2.2) bit run.
+    The whole-stream word-swap body bit-alignment (§2.2/§4) is *not*
+    assumed — takes a caller-positioned reader.
+  - `sv8_stream::Sv8MonoStreamDecoder` — SV8 **mono stream driver**, the
+    SV8 counterpart: persistent single-channel `SynthesisFilter` + shared
+    CNS PRNG threaded across the `block_power`-derived frames of an `AP`
+    packet; `decode_frame`/`decode_frames` over a per-frame
+    `Sv8FrameParams { nbands, new_block }` schedule.
+  - `sv8_decode::decode_sv8_mono_stream` — first wiring of the SV8
+    **packet layer → audio decode**: walks an `MPCK` buffer, reads the
+    `SH` header, drives an `Sv8MonoStreamDecoder` over every `AP` packet
+    as one §6.2 key frame (own `Max_used_Band` log code), emitting
+    `Sv8DecodedStream { header, audio_packets, pcm }`. Supported subset
+    is mono + `block_power == 0` + key-frame `AP`; out-of-subset streams
+    are rejected with precise errors (`ChannelCountInvalid`,
+    new `Error::UnsupportedBlockPower`) rather than decoded wrong.
+  - 23 new tests; lib suite 524 → 547.
+  - **Still GAP** (unchanged): the §2.6 M/S-undo *arithmetic* (closure
+    knob), the absolute SCF anchor gain, the SV8 per-channel band
+    interleaving, the SV8 per-frame `Max_used_Band` position in a
+    multi-frame `AP`, and the SV7 whole-stream word-swap body
+    bit-alignment (no in-repo SV7 fixture corpus to validate it).
 - **Round 366** — the §2.6 final step: the **32-band polyphase
   synthesis subband filter** (`synthesis`), the last stage that turns a
   frame's reconstructed `frame_reconstruct::SubbandMatrix` into PCM
