@@ -268,6 +268,7 @@ pub mod sv7_band_header;
 pub mod sv7_frame_decode;
 pub mod sv7_header;
 pub mod sv7_scf_decode;
+pub mod sv7_stereo_frame;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_context;
