@@ -273,6 +273,7 @@ pub mod sv7_stream;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_context;
+pub mod sv8_decode;
 pub mod sv8_dscf_loop;
 pub mod sv8_frame_decode;
 pub mod sv8_huffman;
@@ -358,6 +359,13 @@ pub enum Error {
     /// (`spec/musepack-headers-and-coding.md` §2). The offending value
     /// is included for diagnostic logging.
     InvalidReplayGainVersion(u8),
+    /// The SV8 stream-level decode
+    /// ([`sv8_decode::decode_sv8_mono_stream`]) encountered a `block_power`
+    /// other than `0` (more than one frame per `AP` packet). The
+    /// multi-frame-per-packet path is a DOCS-GAP (the per-frame
+    /// `Max_used_Band` read position is not pinned cell-for-cell); the
+    /// offending value is included for diagnostic logging.
+    UnsupportedBlockPower(u8),
 }
 
 impl core::fmt::Display for Error {
@@ -409,6 +417,10 @@ impl core::fmt::Display for Error {
             Error::InvalidReplayGainVersion(v) => write!(
                 f,
                 "oxideav-musepack: SV8 RG packet version byte {v} is not the required value 1",
+            ),
+            Error::UnsupportedBlockPower(bp) => write!(
+                f,
+                "oxideav-musepack: SV8 block_power {bp} (>0, multi-frame AP) is not yet wired in the stream-level decode",
             ),
         }
     }
