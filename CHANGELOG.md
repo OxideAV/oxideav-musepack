@@ -22,6 +22,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   load in natural order). 12 unit tests (single/multi-word reversal, all
   three trailing-partial-word cases, word-padded output length, in-place
   vs allocating agreement, double-swap identity, LE→BE equivalence).
+- **Round 378** — `sv7_stream::Sv7StreamDecoder::from_header` builds a
+  stream decoder straight from a parsed `sv7_header::Sv7HeaderFields`,
+  pulling `max_band` (§1 field 4) and the stream-wide M/S flag (field 3)
+  from the header rather than having the caller re-extract them. The §1
+  word-swap is now defined once: `sv7_header`'s private `word_swap_sv7`
+  is a `#[cfg(test)]` alias of `sv7_word_swap::word_swap_sv7_body` and
+  the header `parse` path calls the shared module directly (the SV7
+  header and body share the identical §4 swap). `Sv7HeaderFields` gains
+  a `Default` derive for ergonomic construction. 2 tests.
 - **Round 378** — `sv7_stream::Sv7StreamDecoder::decode_body_bytes`
   wires the §4 swap into the stereo stream driver: it takes a **raw**
   (non-swapped) SV7 body byte buffer, applies `word_swap_sv7_body`

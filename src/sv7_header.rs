@@ -65,7 +65,7 @@ pub const SV7_MAX_BAND_INCLUSIVE: u8 = 31;
 /// concern). Fields a conformant decoder reads but does not use
 /// (`max_level`, `link`, `reserved`) are surfaced verbatim rather than
 /// dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sv7HeaderFields {
     /// Number of audio frames (§1, field 1). Each frame carries
     /// [`SV7_SAMPLES_PER_FRAME`] samples per channel.
@@ -165,7 +165,7 @@ impl Sv7HeaderFields {
         // reversed). Pad the final partial word with zeros so the swap
         // is well-defined; the field reader never consumes past the
         // declared 200-bit (prefix + fields) span.
-        let swapped = word_swap_sv7(&input[..HEADER_LEN]);
+        let swapped = crate::sv7_word_swap::word_swap_sv7_body(&input[..HEADER_LEN]);
 
         let mut reader = Sv7BitReader::new(&swapped);
 
@@ -266,21 +266,15 @@ fn read_u32(reader: &mut Sv7BitReader<'_>) -> Result<u32> {
 /// byte-swap: each aligned 4-byte group is reversed (§4). A final
 /// partial group is zero-padded to a full word before being reversed,
 /// so the returned buffer length is rounded up to a multiple of 4.
+///
+/// The SV7 header and body share the identical §4 word-swap; this is a
+/// thin re-export of [`crate::sv7_word_swap::word_swap_sv7_body`] so the
+/// header parser and the body stream driver use one definition. The
+/// `parse` path calls the shared module directly; this alias is retained
+/// for the module's own swap-behaviour tests.
+#[cfg(test)]
 fn word_swap_sv7(bytes: &[u8]) -> Vec<u8> {
-    let words = bytes.len().div_ceil(4);
-    let mut out = vec![0u8; words * 4];
-    for w in 0..words {
-        let mut word = [0u8; 4];
-        for (j, slot) in word.iter_mut().enumerate() {
-            let src = w * 4 + j;
-            if src < bytes.len() {
-                *slot = bytes[src];
-            }
-        }
-        word.reverse();
-        out[w * 4..w * 4 + 4].copy_from_slice(&word);
-    }
-    out
+    crate::sv7_word_swap::word_swap_sv7_body(bytes)
 }
 
 #[cfg(test)]

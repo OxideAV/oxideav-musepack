@@ -127,6 +127,32 @@ where
         })
     }
 
+    /// Build a stream decoder straight from a parsed SV7 fixed header,
+    /// pulling `max_band` and the stream-wide M/S flag from the header
+    /// fields rather than having the caller re-extract them.
+    ///
+    /// `header` is the result of
+    /// [`crate::sv7_header::Sv7HeaderFields::parse`]; this reads its
+    /// [`max_band`](crate::sv7_header::Sv7HeaderFields::max_band) and
+    /// [`mid_side`](crate::sv7_header::Sv7HeaderFields::mid_side) fields
+    /// (§1, fields 4 and 3). `anchor` is the §2.6 absolute SCF anchor
+    /// (GAP; pass `0`) and `undo` is the §2.6 M/S-undo arithmetic
+    /// closure (GAP).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::MaxBandOutOfRange`] if the header's `max_band` exceeds
+    ///   the §1 Layer-II 32-subband inclusive bound (31). (A header from
+    ///   `parse` has already passed this gate, so this only fires for a
+    ///   hand-constructed `header`.)
+    pub fn from_header(
+        header: &crate::sv7_header::Sv7HeaderFields,
+        anchor: u8,
+        undo: U,
+    ) -> Result<Self> {
+        Self::new(header.max_band, header.mid_side, anchor, undo)
+    }
+
     /// The number of frames decoded so far.
     #[must_use]
     pub fn frames_decoded(&self) -> u64 {
@@ -429,6 +455,31 @@ mod tests {
         assert_eq!(body_pcm, ref_pcm);
         assert_eq!(body_dec.frames_decoded(), ref_dec.frames_decoded());
         assert!(body_pcm.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn from_header_pulls_max_band_and_ms_flag() {
+        use crate::sv7_header::Sv7HeaderFields;
+        let header = Sv7HeaderFields {
+            max_band: 17,
+            mid_side: true,
+            ..Default::default()
+        };
+        let dec = Sv7StreamDecoder::from_header(&header, 0, test_undo).unwrap();
+        assert_eq!(dec.max_band, 17);
+        assert!(dec.stream_ms);
+        assert_eq!(dec.frames_decoded(), 0);
+    }
+
+    #[test]
+    fn from_header_rejects_out_of_range_max_band() {
+        use crate::sv7_header::Sv7HeaderFields;
+        let header = Sv7HeaderFields {
+            max_band: 32,
+            ..Default::default()
+        };
+        let err = Sv7StreamDecoder::from_header(&header, 0, test_undo).err();
+        assert_eq!(err, Some(Error::MaxBandOutOfRange(32)));
     }
 
     #[test]

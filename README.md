@@ -185,10 +185,15 @@ Musepack ships in two incompatible stream-format generations:
   M/S-undo closure); `decode_frame` runs the full §2.6 per-frame pipeline
   (stereo decode + reconstruct → M/S undo → synthesis, interleaved L,R,…)
   over a caller-positioned `Sv7BitReader`; `decode_frames` loops it across
-  the non-byte-aligned (§2.2) continuous bit run. The whole-stream
-  word-swap body bit-alignment (§2.2/§4) is *not* assumed — the driver
-  takes a positioned reader, leaving byte-level body extraction to a
-  future fixture round.
+  the non-byte-aligned (§2.2) continuous bit run; `decode_body_bytes`
+  takes a **raw** (non-swapped) body buffer and applies the §4
+  `sv7_word_swap` internally so the caller need not hand-swap; and
+  `from_header` constructs the driver straight from a parsed
+  `sv7_header::Sv7HeaderFields` (`max_band` + M/S flag). The whole-stream
+  *byte-level positioning* (where the §1 header ends and the body begins)
+  is still *not* assumed — there is no in-repo SV7 fixture corpus to
+  validate it, so the driver takes the body bytes (or a positioned
+  reader), leaving full-file extraction to a future fixture round.
 - `sv7_word_swap` — the §4 SV7 **32-bit-word body byte-swap**.
   `word_swap_sv7_body(raw)` turns a raw SV7 body buffer (the continuous
   bit run after the §1 fixed header) into the byte order the
@@ -201,7 +206,10 @@ Musepack ships in two incompatible stream-format generations:
   allocation-free variant for already-word-aligned buffers. SV8 needs no
   analogue (§4: SV8 loads bytes in natural order). This is the transform
   that lets `sv7_stream::Sv7StreamDecoder::decode_body_bytes` take a raw
-  body rather than a pre-swapped, hand-positioned reader.
+  body rather than a pre-swapped, hand-positioned reader. The SV7 header
+  parser (`sv7_header`) shares this one definition (its private swap is
+  now a test-only alias), so header and body word-swap are no longer
+  duplicated.
 - `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
   the SV8 counterpart of `sv7_stream` for one channel: a persistent
   single-channel `SynthesisFilter` + shared CNS PRNG threaded across the
