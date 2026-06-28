@@ -270,6 +270,7 @@ pub mod sv7_header;
 pub mod sv7_scf_decode;
 pub mod sv7_stereo_frame;
 pub mod sv7_stream;
+pub mod sv7_word_swap;
 pub mod sv8_band_decode;
 pub mod sv8_band_header;
 pub mod sv8_context;

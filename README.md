@@ -189,6 +189,19 @@ Musepack ships in two incompatible stream-format generations:
   word-swap body bit-alignment (§2.2/§4) is *not* assumed — the driver
   takes a positioned reader, leaving byte-level body extraction to a
   future fixture round.
+- `sv7_word_swap` — the §4 SV7 **32-bit-word body byte-swap**.
+  `word_swap_sv7_body(raw)` turns a raw SV7 body buffer (the continuous
+  bit run after the §1 fixed header) into the byte order the
+  `huffman::Sv7BitReader` walks: each aligned 4-byte group is reversed
+  (a little-endian 32-bit word re-serialised big-endian, so the
+  MSB-first reader visits the word's bits high-to-low), the historic
+  "read in 32-LSB units" packing. A partial trailing group zero-extends
+  to a full word before reversal so every real body byte lands at its
+  word-swapped position; `word_swap_sv7_body_in_place` is the
+  allocation-free variant for already-word-aligned buffers. SV8 needs no
+  analogue (§4: SV8 loads bytes in natural order). This is the transform
+  that lets `sv7_stream::Sv7StreamDecoder::decode_body_bytes` take a raw
+  body rather than a pre-swapped, hand-positioned reader.
 - `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
   the SV8 counterpart of `sv7_stream` for one channel: a persistent
   single-channel `SynthesisFilter` + shared CNS PRNG threaded across the
@@ -299,9 +312,14 @@ Musepack ships in two incompatible stream-format generations:
   scope still: the SV8 **stereo** path (per-channel band interleaving is
   GAP), the SV8 **multi-frame `AP`** path (`block_power > 0` — the
   per-frame `Max_used_Band` position is GAP), and the SV7 **whole-stream
-  word-swap body bit-alignment** (§2.2/§4 — the byte-level body extraction
-  that positions the bit reader; no in-repo SV7 fixture corpus to validate
-  it, so `Sv7StreamDecoder` takes a caller-positioned reader).
+  word-swap body bit-alignment** (§2.2/§4). The §4 32-bit-word body
+  byte-swap itself is now wired (`sv7_word_swap`, round 378), and
+  `Sv7StreamDecoder::decode_body_bytes` takes a raw body buffer directly;
+  what remains is the *whole-stream byte-level positioning* (locating
+  where the §1 header ends and the body begins, and any per-frame
+  length prefix), which has no in-repo SV7 fixture corpus to validate
+  against, so the driver still needs the caller to hand it the body
+  bytes (or a positioned reader) rather than a whole `.mpc` file.
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive

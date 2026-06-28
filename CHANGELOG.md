@@ -8,6 +8,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 378** — the SV7 **32-bit-word body byte-swap** (`sv7_word_swap`),
+  closing the body-byte-extraction half of the standing SV7 whole-stream
+  word-swap gap. `word_swap_sv7_body` turns a raw SV7 body buffer (the
+  continuous bit run after the §1 fixed header) into the byte order the
+  `huffman::Sv7BitReader` walks: each aligned 4-byte group is reversed
+  (little-endian 32-bit word → big-endian byte order for the MSB-first
+  reader), per `spec/musepack-headers-and-coding.md` §4 ("read in 32-LSB
+  units"). A partial trailing group zero-extends to a full word before
+  the reversal so every real body byte lands at its word-swapped
+  position; `word_swap_sv7_body_in_place` is the allocation-free variant
+  for already-word-aligned buffers. SV8 needs no analogue (§4: SV8 bytes
+  load in natural order). 12 unit tests (single/multi-word reversal, all
+  three trailing-partial-word cases, word-padded output length, in-place
+  vs allocating agreement, double-swap identity, LE→BE equivalence).
+- **Round 378** — `sv7_stream::Sv7StreamDecoder::decode_body_bytes`
+  wires the §4 swap into the stereo stream driver: it takes a **raw**
+  (non-swapped) SV7 body byte buffer, applies `word_swap_sv7_body`
+  internally, and runs the existing frame loop — so a caller no longer
+  has to hand-swap the body before constructing the bit reader. The
+  whole-stream *positioning* (where the header ends / body begins) stays
+  the caller's job; this method owns only the word-swap once the body
+  bytes are in hand. 2 tests (PCM-identical to the pre-swapped-reader
+  path over three silent frames; empty-body → no PCM). Lib suite
+  547 → 561.
 - **Round 371** — the **stream-level decode loop**, taking the
   reconstruction path end-to-end to PCM (relative loudness) for the
   grounded subset of both stream generations:

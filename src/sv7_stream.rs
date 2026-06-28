@@ -220,6 +220,41 @@ where
         }
         Ok(pcm)
     }
+
+    /// Decode up to `max_frames` frames directly from a **raw SV7 body
+    /// byte buffer**, performing the §4 32-bit-word byte-swap internally.
+    ///
+    /// The other entry points
+    /// ([`Self::decode_frame`] / [`Self::decode_frames`]) take a
+    /// [`Sv7BitReader`] the caller has *already* positioned over the
+    /// word-swapped body. This method removes that obligation for the
+    /// common case where the caller holds the raw, non-swapped SV7 body
+    /// bytes: it applies
+    /// [`crate::sv7_word_swap::word_swap_sv7_body`] (the historic
+    /// "read in 32-LSB units" packing, §4) and then runs the same frame
+    /// loop as [`Self::decode_frames`] over the swapped buffer.
+    ///
+    /// `raw_body` is the continuous SV7 audio bit run **after** the
+    /// fixed header (§1) — the bytes that carry the per-frame band /
+    /// SCF / sample data. The whole-stream *positioning* of that body
+    /// (where the header ends and the body begins at the byte level)
+    /// is still the caller's responsibility; this method owns only the
+    /// word-swap once the body bytes are in hand.
+    ///
+    /// Returns the concatenated interleaved `L, R, …` PCM, stopping
+    /// cleanly at end-of-buffer exactly as [`Self::decode_frames`] does.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a mid-frame decode error (a frame that began but
+    /// could not finish before the buffer's coded bits ran out, when
+    /// that buffer still has bits — i.e. a genuine malformed body,
+    /// distinct from the clean end-of-stream stop).
+    pub fn decode_body_bytes(&mut self, raw_body: &[u8], max_frames: u64) -> Result<Vec<f64>> {
+        let swapped = crate::sv7_word_swap::word_swap_sv7_body(raw_body);
+        let mut reader = Sv7BitReader::new(&swapped);
+        self.decode_frames(&mut reader, max_frames)
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +394,48 @@ mod tests {
     #[test]
     fn pcm_len_constant_is_two_channels_of_a_frame() {
         assert_eq!(STEREO_FRAME_PCM_LEN, 2 * 1152);
+    }
+
+    #[test]
+    fn decode_body_bytes_matches_pre_swapped_reader() {
+        // Build a continuous bit run of three silent frames as the
+        // bytes the reader walks (already word-swapped order).
+        let mut p = Packer::new();
+        for _ in 0..3 {
+            silent_frame_bits(&mut p);
+        }
+        let mut swapped_view = p.finish();
+        // Pad to a whole number of 32-bit words so the §4 swap is its
+        // own exact inverse (a partial trailing word zero-extends, which
+        // is not bit-for-bit reversible).
+        while swapped_view.len() % 4 != 0 {
+            swapped_view.push(0);
+        }
+
+        // Reference: feed the already-swapped bytes straight to the
+        // positioned-reader path.
+        let mut ref_dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let mut r = Sv7BitReader::new(&swapped_view);
+        let ref_pcm = ref_dec.decode_frames(&mut r, 100).unwrap();
+
+        // The raw body that produces `swapped_view` under the §4 swap is
+        // its inverse; the swap is its own inverse for whole words, so
+        // un-swapping = swapping again.
+        let raw_body = crate::sv7_word_swap::word_swap_sv7_body(&swapped_view);
+
+        let mut body_dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let body_pcm = body_dec.decode_body_bytes(&raw_body, 100).unwrap();
+
+        assert_eq!(body_pcm, ref_pcm);
+        assert_eq!(body_dec.frames_decoded(), ref_dec.frames_decoded());
+        assert!(body_pcm.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn decode_body_bytes_empty_yields_no_pcm() {
+        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let pcm = dec.decode_body_bytes(&[], 100).unwrap();
+        assert!(pcm.is_empty());
+        assert_eq!(dec.frames_decoded(), 0);
     }
 }
