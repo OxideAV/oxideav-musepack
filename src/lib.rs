@@ -265,6 +265,7 @@ pub mod sh_header;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod sv7_bitwriter;
 pub mod sv7_frame_decode;
 pub mod sv7_header;
 pub mod sv7_scf_decode;
@@ -367,6 +368,19 @@ pub enum Error {
     /// `Max_used_Band` read position is not pinned cell-for-cell); the
     /// offending value is included for diagnostic logging.
     UnsupportedBlockPower(u8),
+    /// An SV7 entropy **encoder** was asked to emit a symbol that has no
+    /// codeword in the target `mpc_huffman` table (its value is outside
+    /// the table's symbol alphabet). The offending symbol is reported.
+    /// Distinct from [`Error::HuffmanNoMatch`] (a *decode*-side "no code
+    /// matched the peeked bits"): this is the encode-side "no code
+    /// exists for this symbol".
+    SymbolNotEncodable(i32),
+    /// An SV7 sample **encoder** was handed a level outside the range its
+    /// band-type arm can represent (a grouped digit outside `-1..=1`
+    /// (case 1) / `-2..=2` (case 2), or a linear-PCM-escape level that
+    /// does not fit the arm's `band_type - 1` raw bits). The offending
+    /// level is reported.
+    SampleOutOfRange(i32),
 }
 
 impl core::fmt::Display for Error {
@@ -422,6 +436,14 @@ impl core::fmt::Display for Error {
             Error::UnsupportedBlockPower(bp) => write!(
                 f,
                 "oxideav-musepack: SV8 block_power {bp} (>0, multi-frame AP) is not yet wired in the stream-level decode",
+            ),
+            Error::SymbolNotEncodable(sym) => write!(
+                f,
+                "oxideav-musepack: symbol {sym} has no codeword in the target SV7 mpc_huffman table",
+            ),
+            Error::SampleOutOfRange(level) => write!(
+                f,
+                "oxideav-musepack: sample level {level} is outside the range its SV7 band-type arm can encode",
             ),
         }
     }
