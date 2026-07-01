@@ -265,6 +265,7 @@ pub mod sh_header;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;
+pub mod sv7_band_header_encode;
 pub mod sv7_bitwriter;
 pub mod sv7_frame_decode;
 pub mod sv7_header;
