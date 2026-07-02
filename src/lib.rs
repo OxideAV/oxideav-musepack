@@ -275,6 +275,7 @@ pub mod sv7_sample_encode;
 pub mod sv7_scf_decode;
 pub mod sv7_scf_encode;
 pub mod sv7_stereo_frame;
+pub mod sv7_stereo_frame_encode;
 pub mod sv7_stream;
 pub mod sv7_word_swap;
 pub mod sv8_band_decode;
