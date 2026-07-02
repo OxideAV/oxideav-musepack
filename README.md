@@ -23,8 +23,14 @@ or mono PCM, with the filterbank overlap + CNS PRNG threaded across
 frames. Output is **relative** loudness (the absolute SCF anchor and the
 M/S-undo arithmetic remain DOCS-GAPs — see below). The crate is a set of
 verified building-block modules with extensive unit-test coverage
-(~547 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~629 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
+
+The crate now also grows an **SV7 bitstream encode side** (round 382):
+a clean-room-invertible encoder for the SV7 frame body that round-trips
+every decode path bit-for-bit against the readers/decoders already in
+the crate. Encoding is the exact algebraic inverse of the documented §5
+decode — no new format facts. See the `sv7_*_encode` modules below.
 
 ## Format outline
 
@@ -210,6 +216,27 @@ Musepack ships in two incompatible stream-format generations:
   parser (`sv7_header`) shares this one definition (its private swap is
   now a test-only alias), so header and body word-swap are no longer
   duplicated.
+- `sv7_bitwriter` / `sv7_huffman_encode` / `sv7_band_header_encode` /
+  `sv7_scf_encode` / `sv7_sample_encode` / `sv7_frame_encode` /
+  `sv7_stereo_frame_encode` — the **SV7 encode side** (round 382): the
+  exact inverse of the SV7 decode path, each module round-tripped
+  bit-for-bit against its decode counterpart. `Sv7BitWriter` is the
+  MSB-first inverse of `huffman::Sv7BitReader`; `write_symbol` inverts
+  `huffman::decode` (symbol → `mpc_huffman` codeword — valid because each
+  staged table is a canonical prefix code); `encode_res_header_grounded`
+  inverts the §5.1 `Res` header (band-0 raw + delta-or-escape later
+  bands + gated M/S bit); `encode_sv7_band_scf` / `choose_scfi` invert
+  the §5.2/§5.3 SCFI+DSCF layer (with sharing-maximal SCFI selection);
+  `encode_sv7_band` inverts the §2.5 sample switch (base-3/base-5 grouped
+  packs, per-sample Huffman, linear-PCM escape; CNS/empty emit no bits);
+  `encode_sv7_frame_channel` composes the single-channel §5 body
+  (SCF → context-selector → samples per coded band); and
+  `encode_sv7_stereo_frame` composes the two-channel body (shared §5.1
+  header + left-then-right bodies, CNS PRNG threading intact). The
+  escape-vs-delta and SCFI *choices* are encoder policy; no new format
+  facts. Emits frame **bodies** — a full `.mpc` writer waits on the §1
+  fixed-header writer and the standing SCF-anchor / M/S / byte-position
+  gaps.
 - `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
   the SV8 counterpart of `sv7_stream` for one channel: a persistent
   single-channel `SynthesisFilter` + shared CNS PRNG threaded across the

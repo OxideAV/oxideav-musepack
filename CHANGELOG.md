@@ -8,6 +8,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 382** — the **SV7 bitstream encode side**, a full
+  clean-room-invertible encoder for the SV7 frame body that round-trips
+  every decode path bit-for-bit against the readers/decoders already in
+  the crate. Encoding is the exact algebraic inverse of the documented
+  §5 decode — no new format facts; the escape-vs-delta *choices* are
+  encoder policy, and every module's tests prove the inversion by
+  decoding the produced bits back through the existing decoder. Seven new
+  modules, all CI-green:
+  - `sv7_bitwriter` — an MSB-first `Sv7BitWriter`, the exact inverse of
+    `huffman::Sv7BitReader`. `write_bits(value, n)` appends the low `n`
+    bits MSB-first; `write_left_justified(code, length)` emits a
+    left-justified `mpc_huffman` codeword's high `length` bits. Emits the
+    logical post-word-swap bit run (the §4 32-bit-word body swap remains
+    the separate involutive `sv7_word_swap`). 9 tests.
+  - `sv7_huffman_encode` — `encode_symbol` / `write_symbol`: symbol →
+    `mpc_huffman` codeword, the inverse of `huffman::decode`. Because
+    each staged table is a valid canonical prefix code, emitting the
+    first row carrying a value always decodes back to it. 7 tests
+    exhaustively round-trip every symbol of every SV7 table
+    (bandtype-header / scfi / dscf / q1..q7 both context halves).
+  - `sv7_band_header_encode` — `encode_res_header_grounded`: the §5.1
+    `Res` (band-type) header, band-0 raw-4-bit + delta-or-escape later
+    bands + the stream-gated per-band M/S bit, inverse of
+    `decode_res_header_grounded`. 11 tests.
+  - `sv7_scf_encode` — `encode_sv7_band_scf` / `_auto` + `choose_scfi`:
+    the §5.2/§5.3 SCFI selector + DSCF deltas (delta-or-escape), inverse
+    of `decode_sv7_band_scf`, with automatic sharing-maximal SCFI
+    selection. 11 tests.
+  - `sv7_sample_encode` — `encode_sv7_band` and its arms: the §2.5
+    per-band sample switch (base-3/base-5 grouped packs, per-sample
+    Huffman, linear-PCM escape; CNS/empty emit no bits), inverse of
+    `decode_sv7_band`. 11 tests.
+  - `sv7_frame_encode` — `encode_sv7_frame_channel` over an `Sv7EncBand`
+    sequence: the §5 single-channel frame **body** (SCF → context
+    selector → samples per coded band, threading `SCF[2]`), inverse of
+    `decode_sv7_frame_channel`. Includes a §5.1-header + body compose
+    test. 10 tests.
+  - `sv7_stereo_frame_encode` — `encode_sv7_stereo_frame`: the two-channel
+    body (shared §5.1 header + left-then-right bodies), inverse of the
+    bitstream `decode_sv7_stereo_frame` reads, CNS PRNG threading and all.
+    7 tests.
+  - Two new fail-loud `Error` variants: `SymbolNotEncodable` (a symbol
+    outside a table's alphabet) and `SampleOutOfRange` (a level an arm
+    cannot represent). Lib suite 561 → 629.
+  - **Still GAP** (unchanged, encode inherits the decode gaps): the
+    absolute SCF anchor, the M/S-undo arithmetic, and the SV7
+    whole-stream byte positioning (no in-repo fixture corpus). The
+    encoder produces frame **bodies**; a full `.mpc` file writer waits on
+    those + a §1 fixed-header writer.
 - **Round 378** — the SV7 **32-bit-word body byte-swap** (`sv7_word_swap`),
   closing the body-byte-extraction half of the standing SV7 whole-stream
   word-swap gap. `word_swap_sv7_body` turns a raw SV7 body buffer (the
