@@ -270,6 +270,7 @@ pub mod sv7_bitwriter;
 pub mod sv7_frame_decode;
 pub mod sv7_header;
 pub mod sv7_huffman_encode;
+pub mod sv7_sample_encode;
 pub mod sv7_scf_decode;
 pub mod sv7_scf_encode;
 pub mod sv7_stereo_frame;
