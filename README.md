@@ -23,7 +23,7 @@ or mono PCM, with the filterbank overlap + CNS PRNG threaded across
 frames. Output is **relative** loudness (the absolute SCF anchor and the
 M/S-undo arithmetic remain DOCS-GAPs — see below). The crate is a set of
 verified building-block modules with extensive unit-test coverage
-(~629 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
+(~670 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
 `[Unreleased]`.
 
 The crate now also grows an **SV7 bitstream encode side** (round 382):
@@ -31,6 +31,14 @@ a clean-room-invertible encoder for the SV7 frame body that round-trips
 every decode path bit-for-bit against the readers/decoders already in
 the crate. Encoding is the exact algebraic inverse of the documented §5
 decode — no new format facts. See the `sv7_*_encode` modules below.
+
+Round 385 completes the **SV7 `.mpc` file layer** on both sides: a §1
+fixed-header encoder, a whole-stream composer (`encode_sv7_file` + the
+incremental `Sv7FileWriter`), a whole-file decoder (`decode_sv7_file`:
+header → §1.1 continuous body run from bit 200 → gapless trim), and a
+unified magic-dispatched entry (`mpc_decode::decode_mpc_stream`) that
+routes `MP+` / `MPCK` buffers to the matching whole-stream decoder.
+Write → decode round-trips are proven across every §5.4 band-type arm.
 
 ## Format outline
 
@@ -195,11 +203,11 @@ Musepack ships in two incompatible stream-format generations:
   takes a **raw** (non-swapped) body buffer and applies the §4
   `sv7_word_swap` internally so the caller need not hand-swap; and
   `from_header` constructs the driver straight from a parsed
-  `sv7_header::Sv7HeaderFields` (`max_band` + M/S flag). The whole-stream
-  *byte-level positioning* (where the §1 header ends and the body begins)
-  is still *not* assumed — there is no in-repo SV7 fixture corpus to
-  validate it, so the driver takes the body bytes (or a positioned
-  reader), leaving full-file extraction to a future fixture round.
+  `sv7_header::Sv7HeaderFields` (`max_band` + M/S flag). The driver
+  itself stays positioning-agnostic (body bytes or a positioned
+  reader); the whole-file positioning (§1.1: the body run begins at
+  bit 200 of the word-swapped stream) is owned by `sv7_file_decode`
+  (round 385).
 - `sv7_word_swap` — the §4 SV7 **32-bit-word body byte-swap**.
   `word_swap_sv7_body(raw)` turns a raw SV7 body buffer (the continuous
   bit run after the §1 fixed header) into the byte order the
@@ -234,9 +242,26 @@ Musepack ships in two incompatible stream-format generations:
   `encode_sv7_stereo_frame` composes the two-channel body (shared §5.1
   header + left-then-right bodies, CNS PRNG threading intact). The
   escape-vs-delta and SCFI *choices* are encoder policy; no new format
-  facts. Emits frame **bodies** — a full `.mpc` writer waits on the §1
-  fixed-header writer and the standing SCF-anchor / M/S / byte-position
-  gaps.
+  facts. The full `.mpc` writer above these bodies landed in round 385
+  (`sv7_header_encode` / `sv7_file_encode`).
+- `sv7_header_encode` / `sv7_file_encode` / `sv7_file_decode` /
+  `mpc_decode` — the **SV7 whole-file layer** (round 385).
+  `sv7_header_encode` is the exact inverse of `sv7_header::parse`
+  (the logical 200-bit header run, or the standalone 28-byte on-disk
+  header; fail-loud per-field width validation via
+  `Error::HeaderFieldOutOfRange`). `encode_sv7_file` composes header
+  + the §1.1 continuous audio bit run (frame bodies back-to-back from
+  bit 200, no per-frame length prefix) + the single §4 word-swap;
+  `Sv7FileWriter` is the incremental push-frame builder
+  (byte-identical output, auto `frame_count`, `finish_gapless` for §1
+  fields 13/14). `decode_sv7_file` walks the whole file back to
+  interleaved PCM (exactly `frame_count` frames, fail-loud on
+  truncation, gapless trim via
+  `Sv7HeaderFields::effective_total_samples`); and
+  `decode_mpc_stream` dispatches a raw buffer by magic to the SV7 or
+  SV8 whole-stream decoder. Self-decodable and spec-grounded
+  (§1/§1.1/§4); byte-for-byte interop with externally-encoded files
+  awaits a fixture corpus (none under `docs/audio/musepack/`).
 - `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
   the SV8 counterpart of `sv7_stream` for one channel: a persistent
   single-channel `SynthesisFilter` + shared CNS PRNG threaded across the
@@ -345,16 +370,17 @@ Musepack ships in two incompatible stream-format generations:
   `sv8_decode::decode_sv8_mono_stream` → `sv8_stream::Sv8MonoStreamDecoder`,
   with the filterbank overlap + CNS PRNG threaded across frames. Out of
   scope still: the SV8 **stereo** path (per-channel band interleaving is
-  GAP), the SV8 **multi-frame `AP`** path (`block_power > 0` — the
-  per-frame `Max_used_Band` position is GAP), and the SV7 **whole-stream
-  word-swap body bit-alignment** (§2.2/§4). The §4 32-bit-word body
-  byte-swap itself is now wired (`sv7_word_swap`, round 378), and
-  `Sv7StreamDecoder::decode_body_bytes` takes a raw body buffer directly;
-  what remains is the *whole-stream byte-level positioning* (locating
-  where the §1 header ends and the body begins, and any per-frame
-  length prefix), which has no in-repo SV7 fixture corpus to validate
-  against, so the driver still needs the caller to hand it the body
-  bytes (or a positioned reader) rather than a whole `.mpc` file.
+  GAP) and the SV8 **multi-frame `AP`** path (`block_power > 0` — the
+  per-frame `Max_used_Band` position is GAP). The SV7 **whole-file
+  path is closed** (round 385): the §4 swap (`sv7_word_swap`, round
+  378) plus the §1/§1.1 positioning (`sv7_file_decode` — the body run
+  begins at bit 200, immediately after header field 17) take a raw
+  `.mpc` buffer end-to-end to PCM, and `sv7_file_encode` writes the
+  same layout (round-trip proven). What remains open on SV7 files is
+  *external* byte-for-byte validation: there is no in-repo SV7
+  fixture corpus, and §1.1's in-stream 11-bit last-frame-sample read
+  is not pinned to an exact bit position (the file layer carries that
+  quantity in header field 14, which the parser surfaces).
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive

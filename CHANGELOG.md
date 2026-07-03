@@ -8,6 +8,67 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 385** — the **full SV7 `.mpc` file layer**: whole-stream
+  writer, whole-file decoder, and a unified magic-dispatched decode
+  entry, closing the "a full `.mpc` writer waits on the §1
+  fixed-header writer" gap round 382 left. Six modules/commits, all
+  round-tripped both ways (write → decode and decode-vs-reference),
+  grounded in `spec/musepack-headers-and-coding.md` §1 (header
+  fields), §1.1 (the audio body is one continuous non-byte-aligned
+  bit run with no per-frame length prefix, beginning after field 17 —
+  bit 200, since §1 fixes the field span at 168 bits after the 4-byte
+  prefix) and §4 (one 32-bit-LE-word byte-swap over the whole
+  stream):
+  - `sv7_header_encode` — the §1 fixed-header **encoder**, exact
+    inverse of `Sv7HeaderFields::parse`: `write_sv7_header_fields`
+    appends the logical 200-bit header run (reversed prefix word +
+    the 17 fields in order) to an `Sv7BitWriter`, landing the writer
+    exactly at the body bit position; `encode_sv7_header[_with_version]`
+    serialises the standalone 28-byte on-disk header (raw `MP+` magic
+    first). Fail-loud field validation via the new
+    `Error::HeaderFieldOutOfRange(&'static str)` (max_band keeps its
+    dedicated gate). 10 tests; parse↔encode round-trips every field.
+  - `sv7_file_encode` — the whole-stream composer
+    `encode_sv7_file[_with_version](header, frames, anchor)`: §1
+    header + every `Sv7EncStereoFrame` body back-to-back in the §1.1
+    continuous run + one §4 swap. Validates `frame_count ==
+    frames.len()` and per-frame band count == `max_band + 1`. A body-
+    positioning pin test proves the first frame's §5.1 bits land at
+    bit 200 exactly.
+  - `sv7_file_decode` — the whole-file decoder `decode_sv7_file`
+    (the SV7 counterpart of `sv8_decode`): §1 parse → §4 swap (+ one
+    word of reader-lookahead slack for the 16-bit VLC peek at the
+    tail — reader mechanics, not a format fact) → skip 200 bits →
+    exactly `frame_count` frames through `Sv7StreamDecoder` → the §1
+    field-13/14 gapless trim. Fail-loud on truncation and on a
+    gapless count above the 1152-sample geometry. Returns
+    `Sv7DecodedFile { header, frames_decoded, pcm }`.
+  - `Sv7FileWriter` — incremental push-frame builder over the
+    byte-aligned 200-bit header boundary (frames accumulate in their
+    own bit run; the header, with `frame_count` = pushed count, is
+    serialised at `finish`), **byte-identical** to the one-shot
+    composer (test-proven). `finish_gapless(n)` sets §1 fields 13/14
+    with the 1152 gate. Plus
+    `Sv7HeaderFields::effective_total_samples()` (the gapless-
+    adjusted per-channel total; the decoder's trim now uses it).
+  - **Every §5.4 band-type arm through the file layer** — depth
+    tests: two 19-band walks (delta-chain-reachable orderings — the
+    §5.1 raw/escape fields carry only `0..=15`, so CNS/16/17 must
+    arrive by delta) covering CNS, empty, grouped q1/q2, per-sample
+    q3..q7 on both contexts, the full PCM-escape ladder 8..=17, all
+    four SCFI sharing cases, per-band M/S flags, a deliberate §5.1
+    escape jump, encode determinism, and the builder + gapless path.
+  - `mpc_decode` — the unified entry `decode_mpc_stream`: routes a
+    raw buffer by magic (`MP+` → `decode_sv7_file`, `MPCK` →
+    `decode_sv8_mono_stream`), GAP knobs threaded;
+    `MpcDecodedStream` surfaces PCM / channels / sample-rate across
+    both generations. Lib suite 629 → 670.
+  - **Still GAP** (unchanged): the absolute SCF anchor, the M/S-undo
+    arithmetic, SV8 stereo / multi-frame-`AP`, and byte-for-byte
+    interop with externally-encoded SV7 files (no fixture corpus
+    under `docs/audio/musepack/`; §1.1's in-stream 11-bit
+    last-frame-sample read is not pinned to a bit position — the
+    file layer carries that quantity in header field 14).
 - **Round 382** — the **SV7 bitstream encode side**, a full
   clean-room-invertible encoder for the SV7 frame body that round-trips
   every decode path bit-for-bit against the readers/decoders already in
