@@ -270,6 +270,7 @@ pub mod sv7_bitwriter;
 pub mod sv7_frame_decode;
 pub mod sv7_frame_encode;
 pub mod sv7_header;
+pub mod sv7_header_encode;
 pub mod sv7_huffman_encode;
 pub mod sv7_sample_encode;
 pub mod sv7_scf_decode;
@@ -387,6 +388,12 @@ pub enum Error {
     /// does not fit the arm's `band_type - 1` raw bits). The offending
     /// level is reported.
     SampleOutOfRange(i32),
+    /// The SV7 fixed-header **encoder** was handed a field value that
+    /// does not fit the field's §1 bit width (e.g. a `profile` above the
+    /// 4-bit range or `reserved` above 19 bits). The field is named so a
+    /// caller can log which one overflowed. (`max_band` violations keep
+    /// their dedicated [`Error::MaxBandOutOfRange`] channel.)
+    HeaderFieldOutOfRange(&'static str),
 }
 
 impl core::fmt::Display for Error {
@@ -450,6 +457,10 @@ impl core::fmt::Display for Error {
             Error::SampleOutOfRange(level) => write!(
                 f,
                 "oxideav-musepack: sample level {level} is outside the range its SV7 band-type arm can encode",
+            ),
+            Error::HeaderFieldOutOfRange(field) => write!(
+                f,
+                "oxideav-musepack: SV7 fixed-header field `{field}` exceeds its spec §1 bit width",
             ),
         }
     }
