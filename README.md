@@ -1,5 +1,7 @@
 # oxideav-musepack
 
+[![CI](https://github.com/OxideAV/oxideav-musepack/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-musepack/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-musepack.svg)](https://crates.io/crates/oxideav-musepack) [![docs.rs](https://docs.rs/oxideav-musepack/badge.svg)](https://docs.rs/oxideav-musepack) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust Musepack (SV7 + SV8) audio codec for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) framework.
 
