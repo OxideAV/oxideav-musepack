@@ -312,6 +312,160 @@ mod tests {
         assert!(out.pcm.is_empty());
     }
 
+    /// Build one coded band for `band_type` with arm-valid levels:
+    /// grouped digits for 1/2, table-alphabet values for 3..=7 (per
+    /// context), raw-unsigned `band_type − 1`-bit levels for the
+    /// PCM-escape ladder 8..=17. `seed` varies the pattern per band.
+    fn band_for(band_type: i8, ctx: usize, seed: i32, scf: [i32; 3]) -> Sv7EncBand {
+        use crate::huffman::{sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx};
+        let levels: [i32; SAMPLES_PER_BAND] = match band_type {
+            1 => core::array::from_fn(|i| (i as i32 + seed).rem_euclid(3) - 1),
+            2 => core::array::from_fn(|i| (i as i32 + seed).rem_euclid(5) - 2),
+            3..=7 => {
+                let table = match band_type {
+                    3 => sv7_q3_ctx(ctx),
+                    4 => sv7_q4_ctx(ctx),
+                    5 => sv7_q5_ctx(ctx),
+                    6 => sv7_q6_ctx(ctx),
+                    _ => sv7_q7_ctx(ctx),
+                };
+                let mut alpha: Vec<i32> = table.iter().map(|e| e.value as i32).collect();
+                alpha.dedup();
+                core::array::from_fn(|i| alpha[(i + seed as usize) % alpha.len()])
+            }
+            8..=17 => {
+                let span = 1i32 << (band_type - 1);
+                core::array::from_fn(|i| (i as i32 * 7 + seed).rem_euclid(span))
+            }
+            _ => unreachable!("coded band_type only"),
+        };
+        Sv7EncBand::Coded {
+            band_type,
+            ctx,
+            scf,
+            levels,
+        }
+    }
+
+    /// An SCF triple whose sharing pattern drives SCFI case `i % 4`
+    /// (all-coded / share-tail / share-head / share-all), values within
+    /// the raw-6-bit DSCF escape reach (0..=63).
+    fn scf_pattern(i: usize) -> [i32; 3] {
+        let b = 5 + ((i as i32 * 3) % 40);
+        match i % 4 {
+            0 => [b, b + 4, b + 1], // SCFI 0: all three coded
+            1 => [b, b + 4, b + 4], // SCFI 1: SCF[2] copies SCF[1]
+            2 => [b, b, b + 6],     // SCFI 2: SCF[1] copies SCF[0]
+            _ => [b, b, b],         // SCFI 3: both copy
+        }
+    }
+
+    /// A channel covering the given band-type ladder.
+    fn ladder_channel(types: &[i8], ctx: usize, seed: i32) -> Vec<Sv7EncBand> {
+        types
+            .iter()
+            .enumerate()
+            .map(|(i, &bt)| match bt {
+                -1 => Sv7EncBand::Cns,
+                0 => Sv7EncBand::Empty,
+                _ => band_for(bt, ctx, seed + i as i32, scf_pattern(i)),
+            })
+            .collect()
+    }
+
+    /// Every §5.4 band-type arm (CNS −1, empty 0, grouped 1/2,
+    /// per-sample Huffman 3..=7 on both contexts, the full PCM-escape
+    /// ladder 8..=17), all four SCFI sharing cases, and per-band M/S
+    /// flags — through the whole-file writer and decoder, PCM-equal to
+    /// the manually-positioned stream-driver reference.
+    #[test]
+    fn every_band_type_arm_survives_the_file_layer() {
+        // 19 bands: two walks that each visit every band type exactly
+        // once (left on ctx 0, right on ctx 1). The §5.1 header can
+        // carry −1 / 16 / 17 only through the delta chain (band-0 raw
+        // and the escape are 4-bit absolutes, 0..=15), so both walks
+        // keep every step within delta −5..=3 of its predecessor —
+        // except one deliberate escape in the rotated variants.
+        let ladder: Vec<i8> = vec![
+            3, -1, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+        ];
+        let right_walk: Vec<i8> = vec![
+            7, 2, -1, 0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+        ];
+        let max_band = (ladder.len() - 1) as u8; // 18
+        let ms_flags: Vec<bool> = (0..ladder.len()).map(|i| i % 2 == 0).collect();
+
+        // Second frame rotates the walks so band/type pairings (and the
+        // cross-band SCF threading) differ across frames; the rotation
+        // introduces one large negative jump that exercises the §5.1
+        // raw-absolute escape (17 → 3 and 17 → 7, both within 0..=15).
+        let mut rotated = ladder.clone();
+        rotated.rotate_left(5);
+        let mut rotated_rev = right_walk.clone();
+        rotated_rev.rotate_left(5);
+
+        let frames = vec![
+            Sv7EncStereoFrame {
+                left: ladder_channel(&ladder, 0, 0),
+                right: ladder_channel(&right_walk, 1, 3),
+                ms_flags: ms_flags.clone(),
+            },
+            Sv7EncStereoFrame {
+                left: ladder_channel(&rotated, 1, 11),
+                right: ladder_channel(&rotated_rev, 0, 7),
+                ms_flags: ms_flags.iter().map(|f| !f).collect(),
+            },
+        ];
+        let hdr = header(2, max_band, true);
+        let anchor = 2u8;
+
+        let raw = encode_sv7_file(&hdr, &frames, anchor).expect("encode");
+        // Determinism: the composer is a pure function of its inputs.
+        assert_eq!(raw, encode_sv7_file(&hdr, &frames, anchor).unwrap());
+
+        let out = decode_sv7_file(&raw, anchor, test_undo).expect("decode");
+        assert_eq!(out.header, hdr);
+        assert_eq!(out.frames_decoded, 2);
+        assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
+        assert!(out.pcm.iter().any(|&s| s != 0.0));
+
+        // Reference: manual §4-swap + slack + 200-bit skip + driver.
+        let mut swapped = crate::sv7_word_swap::word_swap_sv7_body(&raw);
+        swapped.extend_from_slice(&[0u8; 4]);
+        let mut reader = Sv7BitReader::new(&swapped);
+        skip_bits(&mut reader, SV7_HEADER_BITS).unwrap();
+        let mut dec = Sv7StreamDecoder::from_header(&hdr, anchor, test_undo).unwrap();
+        let ref_pcm = dec.decode_frames(&mut reader, 2).unwrap();
+        assert_eq!(out.pcm, ref_pcm);
+    }
+
+    /// The incremental builder path produces the same decoded stream as
+    /// the one-shot for the all-arm corpus (positioning + gapless).
+    #[test]
+    fn builder_all_arm_file_decodes_with_gapless_trim() {
+        use crate::sv7_file_encode::Sv7FileWriter;
+        let ladder: Vec<i8> = vec![
+            3, -1, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+        ];
+        let max_band = (ladder.len() - 1) as u8;
+        let frame = Sv7EncStereoFrame {
+            left: ladder_channel(&ladder, 0, 1),
+            right: ladder_channel(&ladder, 1, 2),
+            ms_flags: vec![false; ladder.len()],
+        };
+        let mut w = Sv7FileWriter::new(header(0, max_band, false), 0).unwrap();
+        w.push_frame(&frame).unwrap();
+        w.push_frame(&frame).unwrap();
+        let raw = w.finish_gapless(700).unwrap();
+
+        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        assert_eq!(out.frames_decoded, 2);
+        assert!(out.header.true_gapless);
+        assert_eq!(out.header.effective_total_samples(), 1152 + 700);
+        assert_eq!(out.pcm.len(), 2 * (1152 + 700));
+        assert!(out.pcm.iter().any(|&s| s != 0.0));
+    }
+
     #[test]
     fn ms_undo_closure_reaches_the_output() {
         // The same M/S-flagged file decoded under two different undo
