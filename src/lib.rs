@@ -255,6 +255,7 @@ pub mod ei_header;
 pub mod frame_reconstruct;
 pub mod framing;
 pub mod huffman;
+pub mod mpc_decode;
 pub mod ms_stereo;
 pub mod packet_stream;
 pub mod reconstruct;
