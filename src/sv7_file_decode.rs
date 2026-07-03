@@ -116,10 +116,7 @@ where
     }
 
     // 4. §1 fields 13/14: gapless trim of the final frame.
-    if header.true_gapless && header.last_frame_samples != 0 && frame_count > 0 {
-        let per_channel = (frame_count - 1) * SV7_SAMPLES_PER_FRAME + last;
-        pcm.truncate((2 * per_channel) as usize);
-    }
+    pcm.truncate((2 * header.effective_total_samples()) as usize);
 
     Ok(Sv7DecodedFile {
         header,

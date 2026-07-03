@@ -251,6 +251,24 @@ impl Sv7HeaderFields {
     pub fn total_samples(&self) -> u64 {
         u64::from(self.frame_count) * SV7_SAMPLES_PER_FRAME
     }
+
+    /// Total *valid* sample count per channel after the §1 gapless
+    /// adjustment (fields 13/14): when the true-gapless flag is set and
+    /// the last-frame sample count is non-zero, the final frame
+    /// contributes only that many samples (`0` means a full 1152).
+    /// Equal to [`Self::total_samples`] otherwise. Saturates at a
+    /// last-frame count above the frame geometry (callers that must
+    /// reject such a header do so explicitly — see
+    /// [`crate::sv7_file_decode::decode_sv7_file`]).
+    pub fn effective_total_samples(&self) -> u64 {
+        let total = self.total_samples();
+        if self.true_gapless && self.last_frame_samples != 0 && self.frame_count > 0 {
+            let last = u64::from(self.last_frame_samples).min(SV7_SAMPLES_PER_FRAME);
+            total - SV7_SAMPLES_PER_FRAME + last
+        } else {
+            total
+        }
+    }
 }
 
 /// Read a 32-bit big-endian-assembled value from two 16-bit MSB-first
@@ -470,6 +488,30 @@ mod tests {
         assert_eq!(h.channels(), 2);
         assert_eq!(h.sample_rate_hz(), Some(37800));
         assert_eq!(h.total_samples(), 100 * 1152);
+    }
+
+    #[test]
+    fn effective_total_samples_applies_gapless_fields() {
+        // No gapless flag: field 14 is ignored.
+        let mut h = Sv7HeaderFields {
+            frame_count: 3,
+            max_band: 10,
+            last_frame_samples: 500,
+            ..Default::default()
+        };
+        assert_eq!(h.effective_total_samples(), 3 * 1152);
+        // Gapless with a partial final frame.
+        h.true_gapless = true;
+        assert_eq!(h.effective_total_samples(), 2 * 1152 + 500);
+        // Gapless with 0 means the final frame is fully valid.
+        h.last_frame_samples = 0;
+        assert_eq!(h.effective_total_samples(), 3 * 1152);
+        // A count above the frame geometry saturates at 1152.
+        h.last_frame_samples = 2000;
+        assert_eq!(h.effective_total_samples(), 3 * 1152);
+        // Zero frames stay zero.
+        h.frame_count = 0;
+        assert_eq!(h.effective_total_samples(), 0);
     }
 
     #[test]

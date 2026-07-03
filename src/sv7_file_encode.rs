@@ -158,6 +158,152 @@ pub fn encode_sv7_file_with_version(
     Ok(crate::sv7_word_swap::word_swap_sv7_body(&logical))
 }
 
+/// Incremental SV7 `.mpc` stream builder — the push-frame counterpart
+/// of the one-shot [`encode_sv7_file`].
+///
+/// The §1 header carries the frame count (field 1), which an
+/// incremental encoder does not know until the last frame is pushed.
+/// This builder exploits the fact that the §1 field span ends at
+/// logical bit 200 — a whole **byte** boundary (25 bytes), though not a
+/// word boundary — so the audio run can be accumulated in its own
+/// continuous bit run and the header serialised afterwards, prepended
+/// byte-for-byte: `finish` produces output identical to the one-shot
+/// composer (byte-equality is test-proven).
+///
+/// `template` supplies every §1 field except `frame_count` (overridden
+/// with the pushed-frame count at finish) and — for
+/// [`Sv7FileWriter::finish_gapless`] — the true-gapless flag and
+/// last-frame sample count (fields 13/14, overridden by that method).
+#[derive(Debug, Clone)]
+pub struct Sv7FileWriter {
+    template: Sv7HeaderFields,
+    version_byte: u8,
+    anchor: u8,
+    body: Sv7BitWriter,
+    frames: u32,
+}
+
+impl Sv7FileWriter {
+    /// Start a builder with the default version byte. See
+    /// [`Sv7FileWriter::with_version`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Sv7FileWriter::with_version`].
+    pub fn new(template: Sv7HeaderFields, anchor: u8) -> Result<Self> {
+        Self::with_version(template, anchor, SV7_DEFAULT_VERSION_BYTE)
+    }
+
+    /// Start a builder from a §1 header `template` (validated
+    /// immediately, fail-loud) and the §2.6 SCF-anchor GAP knob.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::UnsupportedVersion`] if `version_byte`'s low nibble is
+    ///   not 7.
+    /// - [`Error::MaxBandOutOfRange`] / [`Error::HeaderFieldOutOfRange`]
+    ///   for a template field outside its §1 width (the template's
+    ///   `frame_count` is ignored — it is overridden at finish).
+    pub fn with_version(template: Sv7HeaderFields, anchor: u8, version_byte: u8) -> Result<Self> {
+        if version_byte & 0x0F != crate::framing::SV7_VERSION_NIBBLE {
+            return Err(Error::UnsupportedVersion(version_byte));
+        }
+        crate::sv7_header_encode::validate_sv7_header_fields(&template)?;
+        Ok(Self {
+            template,
+            version_byte,
+            anchor,
+            body: Sv7BitWriter::new(),
+            frames: 0,
+        })
+    }
+
+    /// Append one stereo frame to the §1.1 continuous audio run.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::MaxBandOutOfRange`] if the frame's band vectors do not
+    ///   cover exactly `template.max_band + 1` subbands.
+    /// - [`Error::HeaderFieldOutOfRange`]`("frame_count")` if the pushed
+    ///   count would overflow the 32-bit §1 frame-count field.
+    /// - Any frame-body encode error.
+    pub fn push_frame(&mut self, frame: &Sv7EncStereoFrame) -> Result<()> {
+        let bands = self.template.max_band as usize + 1;
+        if frame.left.len() != bands || frame.right.len() != bands || frame.ms_flags.len() != bands
+        {
+            let implied = frame
+                .left
+                .len()
+                .max(frame.right.len())
+                .max(frame.ms_flags.len())
+                .saturating_sub(1)
+                .min(u8::MAX as usize) as u8;
+            return Err(Error::MaxBandOutOfRange(implied));
+        }
+        if self.frames == u32::MAX {
+            return Err(Error::HeaderFieldOutOfRange("frame_count"));
+        }
+        encode_sv7_stereo_frame(
+            &mut self.body,
+            &frame.left,
+            &frame.right,
+            &frame.ms_flags,
+            self.template.mid_side,
+            i32::from(self.anchor),
+        )?;
+        self.frames += 1;
+        Ok(())
+    }
+
+    /// Number of frames pushed so far.
+    #[must_use]
+    pub fn frames_pushed(&self) -> u32 {
+        self.frames
+    }
+
+    /// Serialise the complete raw `.mpc` stream: the §1 header (with
+    /// `frame_count` = the pushed count) followed by the accumulated
+    /// audio run, §4 word-swapped. Consumes the builder.
+    ///
+    /// # Errors
+    ///
+    /// Header-layer validation errors (the template was validated at
+    /// construction, so these only fire for values that became invalid
+    /// through [`Sv7FileWriter::finish_gapless`]'s overrides — see
+    /// there).
+    pub fn finish(self) -> Result<Vec<u8>> {
+        let mut header = self.template;
+        header.frame_count = self.frames;
+        let mut writer = Sv7BitWriter::new();
+        write_sv7_header_fields(&mut writer, &header, self.version_byte)?;
+        // The header run is exactly 200 bits = 25 whole bytes, so the
+        // audio run (whose logical bit 0 is stream bit 200) appends
+        // byte-for-byte.
+        let mut logical = writer.finish();
+        debug_assert_eq!(logical.len(), 25);
+        logical.extend_from_slice(&self.body.finish());
+        Ok(crate::sv7_word_swap::word_swap_sv7_body(&logical))
+    }
+
+    /// [`Sv7FileWriter::finish`] with the §1 gapless fields set: the
+    /// true-gapless flag (field 13) and the final frame's valid-sample
+    /// count (field 14; `0` means the last frame is fully valid).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::HeaderFieldOutOfRange`]`("last_frame_samples")` if
+    ///   `last_frame_samples` exceeds the 1152-sample frame geometry.
+    /// - See [`Sv7FileWriter::finish`].
+    pub fn finish_gapless(mut self, last_frame_samples: u16) -> Result<Vec<u8>> {
+        if u64::from(last_frame_samples) > crate::sv7_header::SV7_SAMPLES_PER_FRAME {
+            return Err(Error::HeaderFieldOutOfRange("last_frame_samples"));
+        }
+        self.template.true_gapless = true;
+        self.template.last_frame_samples = last_frame_samples;
+        self.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +491,102 @@ mod tests {
         let raw = encode_sv7_file(&hdr, &[], 0).unwrap();
         assert_eq!(raw.len(), crate::sv7_header_encode::SV7_HEADER_DISK_LEN);
         assert_eq!(Sv7HeaderFields::parse(&raw).unwrap(), hdr);
+    }
+
+    /// Two mixed frames over three bands for builder-vs-one-shot tests.
+    fn builder_frames() -> Vec<Sv7EncStereoFrame> {
+        let coded = |scf0: i32| Sv7EncBand::Coded {
+            band_type: 3,
+            ctx: 0,
+            scf: [scf0, scf0 + 1, scf0],
+            levels: q3_levels(),
+        };
+        vec![
+            Sv7EncStereoFrame {
+                left: vec![coded(7), Sv7EncBand::Cns, Sv7EncBand::Empty],
+                right: vec![coded(9), Sv7EncBand::Empty, Sv7EncBand::Cns],
+                ms_flags: vec![true, false, false],
+            },
+            Sv7EncStereoFrame {
+                left: vec![Sv7EncBand::Empty, coded(12), Sv7EncBand::Cns],
+                right: vec![coded(5), Sv7EncBand::Cns, Sv7EncBand::Empty],
+                ms_flags: vec![false, true, true],
+            },
+        ]
+    }
+
+    #[test]
+    fn builder_output_is_byte_identical_to_one_shot() {
+        let hdr = header(2, 2, true);
+        let frames = builder_frames();
+        let anchor = 4u8;
+        let one_shot = encode_sv7_file(&hdr, &frames, anchor).unwrap();
+
+        // The builder's template frame_count is ignored; set it wrong on
+        // purpose to prove the override.
+        let mut template = hdr;
+        template.frame_count = 999;
+        let mut w = Sv7FileWriter::new(template, anchor).unwrap();
+        for f in &frames {
+            w.push_frame(f).unwrap();
+        }
+        assert_eq!(w.frames_pushed(), 2);
+        let built = w.finish().unwrap();
+
+        assert_eq!(built, one_shot);
+    }
+
+    #[test]
+    fn builder_zero_frames_is_header_only() {
+        let hdr = header(0, 5, false);
+        let built = Sv7FileWriter::new(hdr, 0).unwrap().finish().unwrap();
+        assert_eq!(built, encode_sv7_file(&hdr, &[], 0).unwrap());
+    }
+
+    #[test]
+    fn builder_rejects_bad_template_immediately() {
+        let mut hdr = header(0, 5, false);
+        hdr.link = 4;
+        assert_eq!(
+            Sv7FileWriter::new(hdr, 0).err(),
+            Some(Error::HeaderFieldOutOfRange("link")),
+        );
+        assert_eq!(
+            Sv7FileWriter::with_version(header(0, 5, false), 0, 0x08).err(),
+            Some(Error::UnsupportedVersion(0x08)),
+        );
+    }
+
+    #[test]
+    fn builder_rejects_wrong_band_count_frame() {
+        let mut w = Sv7FileWriter::new(header(0, 3, false), 0).unwrap();
+        assert_eq!(
+            w.push_frame(&Sv7EncStereoFrame::silent(2)),
+            Err(Error::MaxBandOutOfRange(1)),
+        );
+        assert_eq!(w.frames_pushed(), 0);
+    }
+
+    #[test]
+    fn builder_finish_gapless_sets_fields_13_and_14() {
+        let mut w = Sv7FileWriter::new(header(0, 1, false), 0).unwrap();
+        for _ in 0..3 {
+            w.push_frame(&Sv7EncStereoFrame::silent(2)).unwrap();
+        }
+        let raw = w.finish_gapless(500).unwrap();
+        let parsed = Sv7HeaderFields::parse(&raw).unwrap();
+        assert_eq!(parsed.frame_count, 3);
+        assert!(parsed.true_gapless);
+        assert_eq!(parsed.last_frame_samples, 500);
+    }
+
+    #[test]
+    fn builder_finish_gapless_rejects_count_above_frame_geometry() {
+        let w = Sv7FileWriter::new(header(0, 1, false), 0).unwrap();
+        assert_eq!(
+            w.finish_gapless(1153).err(),
+            Some(Error::HeaderFieldOutOfRange("last_frame_samples")),
+        );
     }
 
     #[test]
