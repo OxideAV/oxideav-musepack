@@ -9,6 +9,8 @@
 //! every fact asserted here is pinned by the corpus itself, not by the
 //! crate's own writer.
 
+use oxideav_musepack::mpc_decode::{decode_mpc_stream, MpcDecodedStream};
+use oxideav_musepack::sv7_file_decode::decode_sv7_file;
 use oxideav_musepack::sv7_header::Sv7HeaderFields;
 
 /// One fixture's expected §1 header facts, from the corpus notes.
@@ -88,6 +90,80 @@ fn corpus_headers_parse_to_pinned_fields() {
         assert_eq!(h.encoder_version, 116, "{}: encoder version", e.name);
         assert_eq!(h.sample_rate_hz(), Some(44100), "{}: rate", e.name);
         assert_eq!(h.channels(), 2, "{}: channels", e.name);
+    }
+}
+
+/// Whole-file decode conformance: every fixture decodes end-to-end —
+/// which by construction verifies each frame body against its 20-bit
+/// bit-length prefix (any syntax divergence fails loudly) — and the
+/// in-stream 11-bit trailer equals header field 14.
+#[test]
+fn corpus_streams_decode_with_exact_frame_budgets() {
+    for e in &CORPUS {
+        let bytes = fixture_bytes(e.name, "input.mpc");
+        let out = decode_sv7_file(&bytes)
+            .unwrap_or_else(|err| panic!("{}: whole-file decode failed: {err}", e.name));
+        assert_eq!(out.frames_decoded, u64::from(e.frames), "{}", e.name);
+        assert_eq!(
+            out.stream_last_frame_samples,
+            Some(e.last_frame_samples),
+            "{}: trailer",
+            e.name
+        );
+        // Gapless-trimmed output length.
+        let want = 2 * (u64::from(e.frames - 1) * 1152 + u64::from(e.last_frame_samples));
+        assert_eq!(out.pcm.len() as u64, want, "{}: trimmed pcm len", e.name);
+    }
+}
+
+/// PCM conformance gate against the FFmpeg `mpc7` oracle: every decoded
+/// sample within ±1 LSB, and at least 70% bit-exact. (The oracle runs
+/// f32 DSP; this crate's synthesis is f64 — a systematic error in any
+/// pinned fact (SCF law, M/S undo, dequant, synthesis window) blows far
+/// past 1 LSB, so this is a tight gate on the arithmetic.)
+#[test]
+fn corpus_pcm_matches_oracle_within_one_lsb() {
+    for e in &CORPUS {
+        let bytes = fixture_bytes(e.name, "input.mpc");
+        let oracle: Vec<i16> = fixture_bytes(e.name, "expected.pcm")
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let out = decode_sv7_file(&bytes).expect("decode");
+        let ours = out.pcm_s16();
+        // The oracle is untrimmed; compare over the trimmed length.
+        assert!(ours.len() <= oracle.len(), "{}", e.name);
+        let mut exact = 0usize;
+        for (i, (&a, &b)) in ours.iter().zip(oracle.iter()).enumerate() {
+            let err = (i32::from(a) - i32::from(b)).abs();
+            assert!(err <= 1, "{}: sample {i}: {a} vs oracle {b}", e.name);
+            if err == 0 {
+                exact += 1;
+            }
+        }
+        assert!(
+            exact * 10 >= ours.len() * 7,
+            "{}: only {exact}/{} samples bit-exact",
+            e.name,
+            ours.len()
+        );
+    }
+}
+
+/// The magic-dispatched unified entry point routes the corpus streams
+/// to the same SV7 decode.
+#[test]
+fn corpus_streams_decode_through_unified_entry() {
+    let e = &CORPUS[0];
+    let bytes = fixture_bytes(e.name, "input.mpc");
+    let out = decode_mpc_stream(&bytes, 0).expect("decode");
+    assert_eq!(out.channels(), 2);
+    assert_eq!(out.sample_rate_hz(), Some(44100));
+    match out {
+        MpcDecodedStream::Sv7(f) => {
+            assert_eq!(f, decode_sv7_file(&bytes).unwrap());
+        }
+        MpcDecodedStream::Sv8(_) => panic!("expected SV7"),
     }
 }
 
