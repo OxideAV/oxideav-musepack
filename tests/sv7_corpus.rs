@@ -167,6 +167,69 @@ fn corpus_streams_decode_through_unified_entry() {
     }
 }
 
+/// The `exact-multiple-16-frames` fixture carries mppenc's undeclared
+/// **flush frame** after the 11-bit trailer: one more
+/// `[20-bit length][body]` unit that decoders must ignore (the oracle
+/// emits exactly 16 frames). Prove (a) the whole-file decoder ignores
+/// it, and (b) it is nonetheless a syntactically valid SV7 frame that
+/// consumes exactly its declared bit budget — a 73rd independent
+/// frame-syntax check.
+#[test]
+fn corpus_flush_frame_after_trailer_is_valid_and_ignored() {
+    use oxideav_musepack::huffman::Sv7BitReader;
+    use oxideav_musepack::sv7_stream::Sv7StreamDecoder;
+    use oxideav_musepack::sv7_word_swap::word_swap_sv7_body;
+
+    let bytes = fixture_bytes("exact-multiple-16-frames", "input.mpc");
+    let header = Sv7HeaderFields::parse(&bytes).unwrap();
+    assert_eq!(decode_sv7_file(&bytes).unwrap().frames_decoded, 16);
+
+    // Re-walk the framing manually to reach the tail.
+    let mut swapped = word_swap_sv7_body(&bytes);
+    swapped.extend_from_slice(&[0u8; 4]);
+    let mut r = Sv7BitReader::new(&swapped);
+    let total = r.bits_remaining();
+    let skip = |r: &mut Sv7BitReader<'_>, mut n: u64| {
+        while n > 0 {
+            let step = n.min(16) as u8;
+            r.read_bits(step).unwrap();
+            n -= u64::from(step);
+        }
+    };
+    skip(&mut r, 200);
+    let read20 = |r: &mut Sv7BitReader<'_>| -> u64 {
+        let hi = u64::from(r.read_bits(16).unwrap());
+        let lo = u64::from(r.read_bits(4).unwrap());
+        (hi << 4) | lo
+    };
+    // A stream decoder consuming the declared frames keeps the state
+    // (SCF memory, PRNG) the flush frame was encoded against.
+    let mut dec = Sv7StreamDecoder::from_header(&header).unwrap();
+    for _ in 0..16 {
+        let len = read20(&mut r);
+        let start = total - r.bits_remaining();
+        dec.decode_frame(&mut r).unwrap();
+        assert_eq!(total - r.bits_remaining() - start, len);
+    }
+    let trailer = r.read_bits(11).unwrap();
+    assert_eq!(trailer, 1152);
+
+    // The tail: one more prefixed, budget-exact, decodable frame.
+    let flush_len = read20(&mut r);
+    assert!(flush_len > 0);
+    let start = total - r.bits_remaining();
+    dec.decode_frame(&mut r).expect("flush frame decodes");
+    assert_eq!(
+        total - r.bits_remaining() - start,
+        flush_len,
+        "flush frame consumes its declared budget"
+    );
+    // Nothing but word padding remains.
+    let file_bits = (bytes.len() * 8) as u64;
+    let pos = total - r.bits_remaining();
+    assert!(file_bits - pos < 32, "only padding after the flush frame");
+}
+
 /// The oracle PCM length is exactly `frames × 1152` samples per channel
 /// (the FFmpeg oracle does not gapless-trim), and the header's derived
 /// totals agree with it.
