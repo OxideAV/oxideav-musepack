@@ -8,6 +8,76 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 390** — **external SV7 validation + corpus-pinned wire
+  corrections + registry integration.** The SV7 fixture corpus staged
+  at `docs/audio/musepack/fixtures/` (docs commit `af1b888`: four
+  independent mppenc 1.16 streams + FFmpeg `mpc7` s16 oracles) is
+  imported under `tests/fixtures/sv7/` and used to validate — and fix —
+  the whole SV7 layer byte-for-byte:
+  - **Header conformance** (`tests/sv7_corpus.rs`): every fixture's §1
+    header parses to the corpus-pinned fields; the 11-bit
+    `last_frame_samples` position (bits 161–171) is pinned including
+    the full-width literal `1152`.
+  - **Wire framing (corrected):** every frame body is preceded by a
+    **20-bit bit-length prefix** and an **11-bit last-frame-samples
+    trailer** (== header field 14) follows the final body — r385's
+    "continuous run with no per-frame prefix" reading is corpus-
+    disproven. `decode_sv7_file` walks the prefixes, verifies each
+    frame's exact bit consumption (`Error::FrameBitLengthMismatch`),
+    checks the trailer (`Error::LastFrameTrailerMismatch`), ignores
+    the tail after it (mppenc emits an undeclared flush frame), and
+    surfaces the trailer as `stream_last_frame_samples`;
+    `encode_sv7_file` / `Sv7FileWriter` write the same layout
+    (`Sv7BitWriter::append` joins pre-measured bodies).
+  - **Frame-body syntax (corrected):** the §5 layers are four
+    sequential band-major/channel-minor passes — `Res` header, SCFI
+    pass, DSCF pass, samples pass (`sv7_stereo_frame` +
+    `sv7_stereo_frame_encode`; `sv7_scf_decode`/`sv7_scf_encode` grew
+    split SCFI/DSCF entry points) — not r385's whole-channel sweeps.
+    Only this layout consumes prefix-exact bits on all 72 corpus
+    frames. The channel-major `sv7_frame_decode` module is removed.
+  - **SCF[0] reference (corrected; staged §5.3 erratum):** per-band
+    per-channel cross-frame memory (`Sv7ScfMemory` — the same
+    subband's previous-frame `SCF[2]`, zero-init), not the previous
+    band of the same frame.
+  - **Absolute SCF anchor (GAP closed):**
+    `reconstruct::sv7_absolute_scf_gain` — gain `SCF_STEP_RATIO^(idx−1)`
+    with the `C` coefficients unnormalised, i.e. reconstruction
+    directly in the s16 domain (`reconstruct_sv7_band_absolute`);
+    fitted global scale = `65536 / SCF_STEP_RATIO` to 5 significant
+    figures.
+  - **M/S undo (GAP closed):** `ms_stereo::ms_to_lr` — `L = M + S`,
+    `R = M − S` (no normalisation); `undo_ms_stereo_pinned` is the
+    file-layer entry. `Sv7StreamDecoder` drops both GAP knobs and owns
+    the SCF memory; SV7 PCM is now **absolute** s16-domain
+    (`Sv7DecodedFile::pcm_s16`).
+  - **CNS bands carry the SCF layer** (§5.2 `Res ≠ 0` + the structural
+    spec's "noise scaled by the band's scalefactor"); `Sv7EncBand::Cns`
+    gained its `scf` triple. Corpus-unvalidated (no CNS bands present)
+    but a wrong convention now fails the per-frame bit budget loudly.
+  - **Corpus CI gates:** all four fixtures decode with every frame
+    budget-exact, trailer matched, gapless-trimmed lengths exact, and
+    PCM within **±1 LSB of the FFmpeg oracle** (≥ 70 % bit-exact
+    gate; actual 75–88 %).
+  - **`oxideav-core` registry integration** (`registry`): a
+    whole-stream `Decoder` impl (packet accumulation, S16 interleaved
+    1152-sample frames, `DecoderLimits`-capped input, `reset`), the
+    dual-API `registry::make_decoder` factory, `register(ctx)` +
+    `oxideav_core::register!("musepack", …)` with the entry point
+    re-exported at crate root for `oxideav-meta`.
+
+### Changed (round 390, unreleased-API breaking)
+
+- `decode_sv7_file(bytes)` / `decode_mpc_stream(bytes, sv8_anchor)` —
+  the SV7 `anchor` / M/S-undo closure parameters are gone (pinned);
+  `encode_sv7_file` / `Sv7FileWriter::new` likewise lost `anchor`.
+- `decode_sv7_stereo_frame` / `encode_sv7_stereo_frame` now take
+  `&mut Sv7ScfMemory`; `Sv7StreamDecoder::{new, from_header}` lost
+  their knob parameters; `Sv7StreamDecoder::decode_body_bytes` is
+  removed (real bodies are length-prefixed; use `decode_sv7_file`).
+- `sv7_frame_decode` (channel-major walk) removed;
+  `band_type_uses_context_selector` moved to `sv7_band_decode`.
+
 - **Round 385** — the **full SV7 `.mpc` file layer**: whole-stream
   writer, whole-file decoder, and a unified magic-dispatched decode
   entry, closing the "a full `.mpc` writer waits on the §1

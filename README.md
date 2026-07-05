@@ -16,17 +16,37 @@ against the staged structural spec at
 under `docs/audio/musepack/tables/` (CSV + `.meta` sidecars, extracted
 facts-only per the *Feist v. Rural* exception).
 
-The codec is **not yet wired into the `oxideav-core` registry**, but the
-decode pipeline now runs **end-to-end to PCM** for the grounded subset:
-an SV7 stereo stream (`sv7_stream`) and an SV8 mono keyframe stream
-(`sv8_decode` → `sv8_stream`) both decode header → per-frame
-decode/reconstruct → M/S undo (SV7) → synthesis filterbank → interleaved
-or mono PCM, with the filterbank overlap + CNS PRNG threaded across
-frames. Output is **relative** loudness (the absolute SCF anchor and the
-M/S-undo arithmetic remain DOCS-GAPs — see below). The crate is a set of
-verified building-block modules with extensive unit-test coverage
-(~670 lib tests). Remaining gaps are tracked in `CHANGELOG.md`
-`[Unreleased]`.
+**Round 390: the SV7 decoder is externally validated and registered.**
+The SV7 fixture corpus staged at `docs/audio/musepack/fixtures/`
+(four independent mppenc 1.16 streams + FFmpeg `mpc7` PCM oracles,
+imported under `tests/fixtures/sv7/`) pinned every fact the file layer
+previously carried as a GAP knob, and several it had wrong:
+
+- **wire framing** — every frame body is preceded by a **20-bit
+  bit-length prefix**, and an **11-bit last-frame-samples trailer**
+  (equal to header field 14) follows the final body; the decoder
+  verifies every frame against its bit budget and fails loud;
+- **frame-body syntax** — four sequential band-major/channel-minor
+  passes (`Res` header → SCFI → DSCF → samples), not the whole-channel
+  sweep previously implemented;
+- **SCF[0] reference** — per-band per-channel memory (the same
+  subband's previous-frame `SCF[2]`), not the within-frame chain;
+- **absolute reconstruction** — `level × C[Res+1] ×
+  SCF_STEP_RATIO^(scf−1)` directly in the s16 domain (anchor = unity
+  at index 1);
+- **M/S undo** — `L = M + S`, `R = M − S`, no normalisation.
+
+Result: all four corpus streams decode end-to-end with every one of
+their 72 frames bit-budget-exact and PCM within **±1 LSB of the FFmpeg
+oracle** (~75–88 % bit-exact; the residue is the oracle's f32 DSP vs
+this crate's f64 synthesis) — pinned as CI conformance gates
+(`tests/sv7_corpus.rs`). The decoder is wired into the
+**`oxideav-core` registry** (`registry::register` /
+`oxideav_core::register!`) with a directly-callable
+`registry::make_decoder` factory. The SV8 grounded subset (mono,
+keyframe `AP`) still decodes at relative loudness — no SV8 corpus
+exists yet. ~670 lib tests + the corpus integration gates; remaining
+gaps tracked in `CHANGELOG.md` `[Unreleased]`.
 
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
@@ -34,13 +54,14 @@ every decode path bit-for-bit against the readers/decoders already in
 the crate. Encoding is the exact algebraic inverse of the documented §5
 decode — no new format facts. See the `sv7_*_encode` modules below.
 
-Round 385 completes the **SV7 `.mpc` file layer** on both sides: a §1
+Round 385 built the **SV7 `.mpc` file layer** on both sides (round 390
+corrected its wire framing against the corpus, above): a §1
 fixed-header encoder, a whole-stream composer (`encode_sv7_file` + the
-incremental `Sv7FileWriter`), a whole-file decoder (`decode_sv7_file`:
-header → §1.1 continuous body run from bit 200 → gapless trim), and a
-unified magic-dispatched entry (`mpc_decode::decode_mpc_stream`) that
-routes `MP+` / `MPCK` buffers to the matching whole-stream decoder.
-Write → decode round-trips are proven across every §5.4 band-type arm.
+incremental `Sv7FileWriter`), a whole-file decoder (`decode_sv7_file`),
+and a unified magic-dispatched entry (`mpc_decode::decode_mpc_stream`)
+that routes `MP+` / `MPCK` buffers to the matching whole-stream
+decoder. Write → decode round-trips are proven across every §5.4
+band-type arm.
 
 ## Format outline
 
@@ -337,22 +358,22 @@ Musepack ships in two incompatible stream-format generations:
 
 ## Not yet wired (DOCS-GAP / downstream)
 
-- Absolute SCF anchor gain (the relative ladder + per-granule multiply
-  are wired; the reference-index gain value is unspecified in the
-  structural prose).
+- **SV7 absolute SCF anchor — CLOSED (round 390, corpus-pinned):**
+  `reconstruct::sv7_absolute_scf_gain` (unity at index 1, s16 domain).
+  The **SV8** absolute anchor remains open (no SV8 corpus).
+- **SV7 M/S undo arithmetic — CLOSED (round 390, corpus-pinned):**
+  `ms_stereo::ms_to_lr` (`L = M + S`, `R = M − S`). The generic
+  closure entry point remains for the SV8 path.
+- **CNS scalefactor participation** — CNS bands (`Res == −1`) now read
+  SCFI + DSCF like coded bands (the §5.2 "`Res ≠ 0`" gate + the
+  structural spec's "noise scaled by the band's scalefactor"), but the
+  corpus contains **no CNS bands**, so this is grounded-but-unvalidated;
+  a wrong convention now fails the per-frame bit budget loudly. A
+  CNS-bearing fixture (mppenc `--pns`?) would pin it.
 - The `SO` / `ST` packet payload field maps (the `SH` / `RG` / `EI`
   field maps are now wired — see `sh_header` / `rg_header` /
   `ei_header`; the `SO` seek-table-offset and `ST` seek-table layouts
-  remain GAP in `spec/musepack-headers-and-coding.md` and are the next
-  pick).
-- **M/S undo arithmetic** — the §2.6 M/S-undo *structure* is now wired
-  in `ms_stereo` (`undo_ms_stereo` gates each subband on its `msflag`,
-  pairs the two channels' rows, passes L/R rows through unchanged), but
-  the exact per-sample channel arithmetic (whether `L = M + S` /
-  `R = M − S`, and any 0.5 / √2 normalisation) is **not specified
-  anywhere under `docs/audio/musepack/`** and is threaded as a
-  caller-supplied closure (the crate's GAP-knob pattern). The closure
-  is the one edit that pins it once a docs trace lands. DOCS-GAP.
+  remain GAP in `spec/musepack-headers-and-coding.md`).
 - **32-band polyphase synthesis filterbank** — **WIRED** (round 366,
   `synthesis`). The reconstruction path now runs end-to-end to PCM for
   both generations: per-band decode → dequant + per-granule-SCF multiply
@@ -374,15 +395,12 @@ Musepack ships in two incompatible stream-format generations:
   scope still: the SV8 **stereo** path (per-channel band interleaving is
   GAP) and the SV8 **multi-frame `AP`** path (`block_power > 0` — the
   per-frame `Max_used_Band` position is GAP). The SV7 **whole-file
-  path is closed** (round 385): the §4 swap (`sv7_word_swap`, round
-  378) plus the §1/§1.1 positioning (`sv7_file_decode` — the body run
-  begins at bit 200, immediately after header field 17) take a raw
-  `.mpc` buffer end-to-end to PCM, and `sv7_file_encode` writes the
-  same layout (round-trip proven). What remains open on SV7 files is
-  *external* byte-for-byte validation: there is no in-repo SV7
-  fixture corpus, and §1.1's in-stream 11-bit last-frame-sample read
-  is not pinned to an exact bit position (the file layer carries that
-  quantity in header field 14, which the parser surfaces).
+  path is closed and externally validated** (rounds 385 + 390): a raw
+  `.mpc` buffer decodes end-to-end to s16-domain PCM over the
+  corpus-pinned framing (20-bit per-frame prefixes, 11-bit trailer),
+  `sv7_file_encode` writes the same layout (round-trip proven), and
+  the four-fixture corpus gates hold every decoded sample within
+  ±1 LSB of the FFmpeg oracle.
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive
