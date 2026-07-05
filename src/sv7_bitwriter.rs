@@ -129,6 +129,20 @@ impl Sv7BitWriter {
         self.bit_len() == 0
     }
 
+    /// Append another writer's entire bit run to this one, preserving
+    /// its exact (possibly non-byte-aligned) length. Used by the
+    /// whole-file composer to emit a frame body *after* its 20-bit
+    /// bit-length prefix (the body must be assembled first so its
+    /// length is known).
+    pub fn append(&mut self, other: &Sv7BitWriter) {
+        for &byte in &other.bytes {
+            self.write_bits(u32::from(byte), 8);
+        }
+        if other.nbits > 0 {
+            self.write_bits(other.acc as u32, other.nbits as u8);
+        }
+    }
+
     /// Finish the run and return its bytes. A trailing partial byte is
     /// zero-padded in its low bits (the padding a real SV7 body carries
     /// before the next frame / trailer). Consumes the writer.
@@ -260,5 +274,25 @@ mod tests {
     fn write_bits_rejects_width_above_32() {
         let mut w = Sv7BitWriter::new();
         w.write_bits(0, 33);
+    }
+
+    #[test]
+    fn append_preserves_non_aligned_runs() {
+        // 3 bits + 13 bits appended onto 5 bits: identical to writing
+        // the whole sequence into one writer.
+        let mut inner = Sv7BitWriter::new();
+        inner.write_bits(0b101, 3);
+        inner.write_bits(0x1ABC & 0x1FFF, 13);
+
+        let mut outer = Sv7BitWriter::new();
+        outer.write_bits(0b10011, 5);
+        outer.append(&inner);
+        assert_eq!(outer.bit_len(), 5 + 16);
+
+        let mut direct = Sv7BitWriter::new();
+        direct.write_bits(0b10011, 5);
+        direct.write_bits(0b101, 3);
+        direct.write_bits(0x1ABC & 0x1FFF, 13);
+        assert_eq!(outer.finish(), direct.finish());
     }
 }

@@ -210,20 +210,17 @@
 //!   synthesis filterbank) consumes. Multi-channel interleaving, the M/S
 //!   undo, and the cross-phase SCF/sample ordering remain GAP.
 //!
-//! - [`sv7_frame_decode`] — SV7 single-channel frame-body assembler, the
-//!   SV7 counterpart of [`sv8_frame_decode`].
-//!   [`sv7_frame_decode::decode_sv7_frame_channel`] takes one channel's
-//!   §5.1 `Res` (band_type) sequence and walks each band in the §5
-//!   phase order: empty (`0`) ⇒ silent (no record); CNS (`-1`) ⇒ 36 PRNG
-//!   samples, no SCF; coded (`1..=17`) ⇒ the §5.3 SCF decode
-//!   ([`sv7_scf_decode::decode_sv7_band_scf`], threading the previous
-//!   band's `SCF[2]`), the §5.4 **1-bit context selector** (read only for
-//!   the grouped / per-sample-Huffman cases, gated by
-//!   [`sv7_frame_decode::band_type_uses_context_selector`]), then the 36
-//!   sample levels ([`sv7_band_decode::decode_sv7_band`]). Output is a
-//!   [`frame_reconstruct::BandLevels`] sequence ready for
-//!   [`frame_reconstruct::reconstruct_frame_channel`]. Cross-channel
-//!   interleaving, the M/S undo, and the absolute SCF anchor remain GAP.
+//! - [`sv7_stereo_frame`] — the corpus-pinned SV7 stereo frame-body
+//!   decoder: four sequential passes over the bands (§5.1 `Res` header,
+//!   SCFI pass, DSCF pass, samples pass — each band-major /
+//!   channel-minor), per-band cross-frame SCF memory
+//!   ([`sv7_stereo_frame::Sv7ScfMemory`]), CNS bands carrying the SCF
+//!   layer, and the corpus-pinned absolute reconstruction
+//!   ([`reconstruct::reconstruct_sv7_band_absolute`]). Every previously
+//!   GAP layout fact (pass order, SCF[0] reference, absolute gain, M/S
+//!   arithmetic) is pinned by the `tests/fixtures/sv7/` corpus: all 72
+//!   fixture frames consume exactly their 20-bit-prefix bit budgets and
+//!   the decoded PCM matches the FFmpeg oracle to ±1 LSB.
 //!
 //! - [`synthesis`] — the §2.6 final step: the 32-band polyphase
 //!   **synthesis subband filter** inherited from MPEG-1 Layer I/II
@@ -270,7 +267,6 @@ pub mod sv7_band_header_encode;
 pub mod sv7_bitwriter;
 pub mod sv7_file_decode;
 pub mod sv7_file_encode;
-pub mod sv7_frame_decode;
 pub mod sv7_frame_encode;
 pub mod sv7_header;
 pub mod sv7_header_encode;
@@ -397,6 +393,28 @@ pub enum Error {
     /// caller can log which one overflowed. (`max_band` violations keep
     /// their dedicated [`Error::MaxBandOutOfRange`] channel.)
     HeaderFieldOutOfRange(&'static str),
+    /// A whole-file SV7 frame decode consumed a different number of
+    /// bits than the frame's 20-bit bit-length prefix declared — the
+    /// frame-body parse diverged from the wire syntax (or the stream is
+    /// corrupt). The frame index and both bit counts are surfaced for
+    /// diagnostics.
+    FrameBitLengthMismatch {
+        /// Zero-based index of the offending frame.
+        frame: u32,
+        /// The frame's declared 20-bit body bit length.
+        declared: u32,
+        /// Bits the decoder actually consumed.
+        consumed: u32,
+    },
+    /// The 11-bit last-frame-samples trailer after the final frame body
+    /// disagrees with §1 header field 14 on a true-gapless stream. Both
+    /// values are surfaced for diagnostics.
+    LastFrameTrailerMismatch {
+        /// Header field 14 (the §1 last-frame valid-sample count).
+        header: u16,
+        /// The in-stream 11-bit trailer value.
+        stream: u16,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -464,6 +482,18 @@ impl core::fmt::Display for Error {
             Error::HeaderFieldOutOfRange(field) => write!(
                 f,
                 "oxideav-musepack: SV7 fixed-header field `{field}` exceeds its spec §1 bit width",
+            ),
+            Error::FrameBitLengthMismatch {
+                frame,
+                declared,
+                consumed,
+            } => write!(
+                f,
+                "oxideav-musepack: SV7 frame {frame} consumed {consumed} bits but its 20-bit length prefix declared {declared}",
+            ),
+            Error::LastFrameTrailerMismatch { header, stream } => write!(
+                f,
+                "oxideav-musepack: SV7 11-bit last-frame trailer {stream} disagrees with header field 14 ({header})",
             ),
         }
     }

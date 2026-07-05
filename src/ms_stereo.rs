@@ -8,25 +8,19 @@
 //! (`R`-row) rather than as left/right directly; the decoder must
 //! invert that transform before the filterbank.
 //!
-//! # The arithmetic is a documented GAP — threaded as a caller knob
+//! # The arithmetic — GAP closed by the fixture corpus
 //!
 //! The structural spec (§2.6) names the step and the per-band `msflag`
-//! that gates it (decoded by [`crate::sv7_band_header`]), but the
-//! **exact channel arithmetic** — whether `L = M + S` / `R = M − S`,
-//! and any `0.5` / `√2` normalisation — is **not specified anywhere
-//! under `docs/audio/musepack/`**. Rather than guess one of the
-//! several plausible conventions (which would be silently wrong if the
-//! docs later pin a different one), this module follows the crate's
-//! established GAP-knob pattern (cf.
-//! [`crate::sv8_band_header::decode_band_resolutions`]'s
-//! `ctx_for_prev_res` closure): the per-sample mid/side → left/right
-//! transform is a **caller-supplied closure**, isolated here so a
-//! single edit wires the real arithmetic once a docs trace lands.
-//!
-//! This module therefore wires the *structure* of the §2.6 M/S-undo
-//! step — the per-subband gating on `msflag`, the row pairing across
-//! the two channels, the L/R-row pass-through — without committing to
-//! the GAP arithmetic.
+//! that gates it (decoded by [`crate::sv7_band_header`]) but not the
+//! exact channel arithmetic. The SV7 fixture corpus
+//! (`tests/fixtures/sv7/`) now pins it empirically: [`ms_to_lr`] —
+//! `L = M + S`, `R = M − S`, no normalisation — reproduces the FFmpeg
+//! `mpc7` oracle to ±1 LSB on every M/S-flagged corpus stream, while
+//! the halved and identity variants diverge grossly. The generic
+//! closure-taking [`undo_ms_stereo`] is retained for callers that want
+//! to experiment (and for the SV8 path, whose M/S undo remains
+//! corpus-unvalidated); the SV7 whole-file layer uses
+//! [`undo_ms_stereo_pinned`].
 //!
 //! Source-of-record (facts only):
 //!
@@ -67,6 +61,37 @@ pub type StereoSubbandMatrix = [SubbandMatrix; 2];
 /// treated as L/R (no undo) — the §2.3 loop only emits an `msflag` for
 /// bands it actually codes.
 pub fn undo_ms_stereo<F>(stereo: &mut StereoSubbandMatrix, ms_flags: &[bool], undo: F) -> Result<()>
+where
+    F: Fn(f64, f64) -> (f64, f64),
+{
+    undo_ms_impl(stereo, ms_flags, undo)
+}
+
+/// The **corpus-pinned** SV7 M/S-undo arithmetic:
+/// `L = M + S`, `R = M − S` (no normalisation factor).
+///
+/// Empirically resolved (previously the §2.6 GAP): decoding the four
+/// independent mppenc streams under `tests/fixtures/sv7/` — all of which
+/// set the stream M/S flag and flag most bands M/S — with this transform
+/// reproduces FFmpeg's `mpc7` s16 oracle to ±1 LSB, while the halved
+/// variant `((M+S)/2, (M−S)/2)` and the identity both diverge by
+/// hundreds of LSBs on M/S-heavy content.
+#[inline]
+pub fn ms_to_lr(m: f64, s: f64) -> (f64, f64) {
+    (m + s, m - s)
+}
+
+/// [`undo_ms_stereo`] with the corpus-pinned [`ms_to_lr`] arithmetic —
+/// the entry point the whole-file SV7 decode path uses.
+///
+/// # Errors
+///
+/// Same as [`undo_ms_stereo`].
+pub fn undo_ms_stereo_pinned(stereo: &mut StereoSubbandMatrix, ms_flags: &[bool]) -> Result<()> {
+    undo_ms_impl(stereo, ms_flags, ms_to_lr)
+}
+
+fn undo_ms_impl<F>(stereo: &mut StereoSubbandMatrix, ms_flags: &[bool], undo: F) -> Result<()>
 where
     F: Fn(f64, f64) -> (f64, f64),
 {

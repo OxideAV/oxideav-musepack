@@ -114,11 +114,43 @@ pub fn encode_sv7_band_scf(
     indices: [i32; SCF_GRANULES_PER_BAND],
     prev_band_scf2: i32,
 ) -> Result<()> {
+    encode_sv7_scfi(writer, scfi)?;
+    encode_sv7_band_dscf(writer, scfi, indices, prev_band_scf2)
+}
+
+/// Write one SCFI selector VLC alone — the SCFI-pass half of
+/// [`encode_sv7_band_scf`], for the corpus-pinned two-pass frame-body
+/// layout (all SCFI selectors first, then all DSCF chains; see
+/// [`crate::sv7_stereo_frame`]).
+///
+/// # Errors
+///
+/// [`Error::InvalidScfCodingMethod`] if `scfi > 3`.
+pub fn encode_sv7_scfi(writer: &mut Sv7BitWriter, scfi: u8) -> Result<()> {
     if scfi > 3 {
         return Err(Error::InvalidScfCodingMethod(scfi as i8));
     }
-    write_symbol(writer, &SV7_SCFI_TABLE, scfi as i8)?;
+    write_symbol(writer, &SV7_SCFI_TABLE, scfi as i8)
+}
 
+/// Write one band's coded DSCF indices alone (no SCFI selector) — the
+/// DSCF-pass half of [`encode_sv7_band_scf`]. `reference` is the
+/// band's `SCF[0]` delta reference (the corpus-pinned per-band memory:
+/// the same subband's previous-frame `SCF[2]`).
+///
+/// # Errors
+///
+/// As [`encode_sv7_band_scf`].
+pub fn encode_sv7_band_dscf(
+    writer: &mut Sv7BitWriter,
+    scfi: u8,
+    indices: [i32; SCF_GRANULES_PER_BAND],
+    reference: i32,
+) -> Result<()> {
+    if scfi > 3 {
+        return Err(Error::InvalidScfCodingMethod(scfi as i8));
+    }
+    let prev_band_scf2 = reference;
     let [s0, s1, s2] = indices;
     // SCF[0]: always coded, off the previous band's SCF[2].
     write_scf_index(writer, prev_band_scf2, s0)?;

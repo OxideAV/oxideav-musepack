@@ -3,7 +3,7 @@
 //! [`crate::sv7_stereo_frame::decode_sv7_stereo_frame`] decodes **one**
 //! frame body into a pre-M/S-undo [`crate::ms_stereo::StereoSubbandMatrix`].
 //! A whole SV7 stream is a run of such frames, and turning that run into
-//! continuous PCM needs three things to thread *across* frame boundaries:
+//! continuous PCM needs four things to thread *across* frame boundaries:
 //!
 //! 1. **The synthesis filterbank overlap.** The 32-band polyphase
 //!    synthesis window (§1 / §2.6) reaches back into the `V` blocks
@@ -16,48 +16,39 @@
 //!    is a free-running two-LFSR PRNG whose state advances with every
 //!    noise band of every frame, both channels. A single shared
 //!    [`crate::cns::CnsPrng`] threads it.
-//! 3. **The bit reader.** SV7 frames are *not* byte-aligned (§2.2): the
-//!    body is one continuous non-aligned bit run. The driver decodes
+//! 3. **The per-band SCF memory.** The corpus-pinned `SCF[0]` reference
+//!    is the same subband's previous-frame `SCF[2]`
+//!    ([`crate::sv7_stereo_frame::Sv7ScfMemory`]) — inherently
+//!    cross-frame state.
+//! 4. **The bit reader.** SV7 frame bodies are *not* byte-aligned
+//!    (§2.2): each body is a non-aligned bit run. The driver decodes
 //!    every frame from the **same** [`crate::huffman::Sv7BitReader`], so
-//!    each frame resumes exactly where the previous left off.
+//!    each frame resumes exactly where the previous left off. (On the
+//!    wire each body is *preceded by a 20-bit bit-length prefix* — the
+//!    whole-file layer [`crate::sv7_file_decode`] consumes those and
+//!    verifies each frame against its budget; this driver decodes
+//!    bodies only.)
 //!
-//! # The M/S-undo arithmetic stays a caller closure (GAP)
+//! The §2.6 M/S undo uses the corpus-pinned arithmetic
+//! ([`crate::ms_stereo::undo_ms_stereo_pinned`]: `L = M + S`,
+//! `R = M − S`), and the reconstruction is the corpus-pinned absolute
+//! law, so the produced PCM is in the **signed-16-bit domain** — round
+//! and clamp to `i16` for playback (see
+//! [`crate::sv7_file_decode::Sv7DecodedFile::pcm_s16`]) — with the
+//! four state carriers above threading every frame.
 //!
-//! §2.6's M/S-undo step is gated per band by the §5.1 `msflag` (decoded
-//! into [`crate::sv7_stereo_frame::Sv7StereoFrame::ms_flags`]) but the
-//! per-sample mid/side → left/right arithmetic is **not specified under
-//! `docs/audio/musepack/`** — the long-standing DOCS-GAP this crate
-//! threads as a [`crate::ms_stereo::undo_ms_stereo`] closure. The driver
-//! takes that closure once at construction and applies it to every
-//! frame, so a single edit wires the real arithmetic when a trace lands.
-//!
-//! # The SV7 body bit-alignment is NOT assumed here
-//!
-//! Per §2.2 / §4 the SV7 audio body is a continuous bit run packed in
-//! 32-bit little-endian word units that are byte-swapped before the bit
-//! reader sees them, and the exact word-grid offset at which the body
-//! begins relative to the 200-bit fixed header is **not pinned by the
-//! staged material** (no SV7 fixture corpus exists in-repo to validate a
-//! whole-stream word-swap boundary). This driver therefore takes a
-//! [`crate::huffman::Sv7BitReader`] the caller has **already positioned**
-//! at the frame body — it owns the per-frame *decode loop* and the
-//! *persistent state*, not the byte-level body extraction. The header
-//! parse ([`crate::sv7_header::Sv7HeaderFields::parse`]) and the
-//! whole-stream word-swap that produces the body reader are the caller's
-//! (and a future round's, once a fixture pins the boundary).
-//!
-//! Source-of-record (facts only):
-//!
-//! - `docs/audio/musepack/musepack-sv7-sv8-spec.md` §1 (filterbank
-//!   overlap, 1152-sample frame), §2.2 (frames not byte-aligned), §2.5
-//!   (CNS), §2.6 (reconstruction step order).
-//! - `docs/audio/musepack/spec/musepack-headers-and-coding.md` §1
-//!   (`max_band`, stream M/S, stereo-only), §4 (word packing), §5.
+//! Source-of-record: `docs/audio/musepack/musepack-sv7-sv8-spec.md` §1
+//! (filterbank overlap, 1152-sample frame), §2.2 (frames not
+//! byte-aligned), §2.5 (CNS), §2.6 (reconstruction step order);
+//! `docs/audio/musepack/spec/musepack-headers-and-coding.md` §1
+//! (`max_band`, stream M/S, stereo-only), §4 (word packing), §5; pass
+//! layout + SCF memory + M/S arithmetic fixture-corpus-pinned
+//! ([`crate::sv7_stereo_frame`]).
 
 use crate::cns::CnsPrng;
 use crate::huffman::Sv7BitReader;
-use crate::ms_stereo::undo_ms_stereo;
-use crate::sv7_stereo_frame::decode_sv7_stereo_frame;
+use crate::ms_stereo::undo_ms_stereo_pinned;
+use crate::sv7_stereo_frame::{decode_sv7_stereo_frame, Sv7ScfMemory};
 use crate::synthesis::{synthesize_stereo_frame_interleaved, MultiChannelSynthesis};
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
@@ -66,91 +57,61 @@ use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 pub const STEREO_FRAME_PCM_LEN: usize = 2 * SAMPLES_PER_FRAME_PER_CHANNEL;
 
 /// A persistent SV7 stereo-stream decoder: it owns the cross-frame state
-/// (the two synthesis filters, the CNS PRNG, the M/S-undo closure) and
-/// decodes frames one at a time from a caller-positioned bit reader into
-/// interleaved PCM.
-///
-/// The decoder is parameterised by the M/S-undo closure `U` (the §2.6
-/// GAP arithmetic, see the module docs). Construct it once for a stream,
-/// then call [`Sv7StreamDecoder::decode_frame`] per frame; the synthesis
-/// overlap and PRNG state thread automatically.
-pub struct Sv7StreamDecoder<U>
-where
-    U: Fn(f64, f64) -> (f64, f64),
-{
+/// (the two synthesis filters, the CNS PRNG, the per-band SCF memory)
+/// and decodes frame bodies one at a time from a caller-positioned bit
+/// reader into interleaved s16-domain PCM.
+pub struct Sv7StreamDecoder {
     /// Highest coded subband (`1..=31`, SV7 fixed-header field 4).
     max_band: u8,
     /// Stream-wide M/S enable (SV7 fixed-header field 3).
     stream_ms: bool,
-    /// §2.6 absolute SCF anchor — GAP, threaded as a constant (`0` for
-    /// the relative-loudness convention).
-    anchor: u8,
     /// Persistent two-channel synthesis state (filterbank overlap).
     synthesis: MultiChannelSynthesis,
     /// Shared free-running CNS PRNG.
     cns: CnsPrng,
-    /// The §2.6 M/S-undo per-sample arithmetic (GAP closure).
-    undo: U,
+    /// Corpus-pinned per-band cross-frame SCF memory.
+    scf: Sv7ScfMemory,
     /// Count of frames decoded so far (for diagnostics / total-sample
     /// bookkeeping by the caller).
     frames_decoded: u64,
 }
 
-impl<U> Sv7StreamDecoder<U>
-where
-    U: Fn(f64, f64) -> (f64, f64),
-{
+impl Sv7StreamDecoder {
     /// Build a stream decoder for an SV7 stereo stream.
     ///
     /// `max_band` / `stream_ms` come from the SV7 fixed header
     /// ([`crate::sv7_header::Sv7HeaderFields::max_band`] / `mid_side`).
-    /// `anchor` is the §2.6 absolute SCF anchor (GAP; pass `0`). `undo`
-    /// is the per-band M/S-undo arithmetic closure (GAP).
     ///
     /// # Errors
     ///
     /// - [`Error::MaxBandOutOfRange`] if `max_band` exceeds the §1
     ///   Layer-II 32-subband inclusive bound (31).
-    pub fn new(max_band: u8, stream_ms: bool, anchor: u8, undo: U) -> Result<Self> {
+    pub fn new(max_band: u8, stream_ms: bool) -> Result<Self> {
         if max_band > crate::sv7_band_header::SV7_MAX_BAND_INCLUSIVE {
             return Err(Error::MaxBandOutOfRange(max_band));
         }
         Ok(Self {
             max_band,
             stream_ms,
-            anchor,
             // SV7 is stereo-only (§1 derived fact).
             synthesis: MultiChannelSynthesis::new(2)?,
             cns: CnsPrng::new(),
-            undo,
+            scf: Sv7ScfMemory::new(),
             frames_decoded: 0,
         })
     }
 
     /// Build a stream decoder straight from a parsed SV7 fixed header,
     /// pulling `max_band` and the stream-wide M/S flag from the header
-    /// fields rather than having the caller re-extract them.
-    ///
-    /// `header` is the result of
-    /// [`crate::sv7_header::Sv7HeaderFields::parse`]; this reads its
-    /// [`max_band`](crate::sv7_header::Sv7HeaderFields::max_band) and
-    /// [`mid_side`](crate::sv7_header::Sv7HeaderFields::mid_side) fields
-    /// (§1, fields 4 and 3). `anchor` is the §2.6 absolute SCF anchor
-    /// (GAP; pass `0`) and `undo` is the §2.6 M/S-undo arithmetic
-    /// closure (GAP).
+    /// fields (§1, fields 4 and 3).
     ///
     /// # Errors
     ///
     /// - [`Error::MaxBandOutOfRange`] if the header's `max_band` exceeds
-    ///   the §1 Layer-II 32-subband inclusive bound (31). (A header from
-    ///   `parse` has already passed this gate, so this only fires for a
-    ///   hand-constructed `header`.)
-    pub fn from_header(
-        header: &crate::sv7_header::Sv7HeaderFields,
-        anchor: u8,
-        undo: U,
-    ) -> Result<Self> {
-        Self::new(header.max_band, header.mid_side, anchor, undo)
+    ///   the §1 bound (a header from `parse` has already passed this
+    ///   gate, so this only fires for a hand-constructed `header`).
+    pub fn from_header(header: &crate::sv7_header::Sv7HeaderFields) -> Result<Self> {
+        Self::new(header.max_band, header.mid_side)
     }
 
     /// The number of frames decoded so far.
@@ -159,26 +120,27 @@ where
         self.frames_decoded
     }
 
-    /// Reset the synthesis overlap and PRNG to their startup state (e.g.
-    /// at a stream seek). Does not change `max_band` / `stream_ms` /
-    /// `anchor`.
+    /// Reset the synthesis overlap, PRNG, and SCF memory to their
+    /// stream-start state (e.g. at a stream seek). Does not change
+    /// `max_band` / `stream_ms`.
     pub fn reset(&mut self) {
         self.synthesis.reset();
         self.cns = CnsPrng::new();
+        self.scf.reset();
         self.frames_decoded = 0;
     }
 
-    /// Decode one stereo frame from `reader` (positioned at the frame
-    /// body) into [`STEREO_FRAME_PCM_LEN`] interleaved `L, R, …` PCM
-    /// samples, advancing the persistent synthesis / PRNG state.
+    /// Decode one stereo frame body from `reader` (positioned at the
+    /// body's first bit, after any length prefix) into
+    /// [`STEREO_FRAME_PCM_LEN`] interleaved `L, R, …` s16-domain PCM
+    /// samples, advancing the persistent synthesis / PRNG / SCF state.
     ///
     /// The full per-frame pipeline (§2.6 step order):
     ///
-    /// 1. §5 stereo frame decode + per-channel reconstruction
-    ///    ([`decode_sv7_stereo_frame`]) → pre-M/S-undo channel matrices +
-    ///    per-band `ms_flags`;
-    /// 2. §2.6 M/S-undo over the flagged subbands (the GAP closure);
-    /// 3. §2.6 synthesis filterbank, both channels through their
+    /// 1. the corpus-pinned four-pass frame decode + absolute
+    ///    reconstruction ([`decode_sv7_stereo_frame`]);
+    /// 2. the pinned §2.6 M/S undo over the flagged subbands;
+    /// 3. the §2.6 synthesis filterbank, both channels through their
     ///    persistent filters, interleaved.
     ///
     /// # Errors
@@ -187,19 +149,17 @@ where
     /// starvation, no-match VLC, out-of-range band-type / SCFI) and of
     /// the synthesis interleave.
     pub fn decode_frame(&mut self, reader: &mut Sv7BitReader<'_>) -> Result<Vec<f64>> {
-        // 1. Decode + per-channel reconstruct (pre-M/S-undo).
+        // 1. Four-pass decode + absolute reconstruction.
         let mut frame = decode_sv7_stereo_frame(
             reader,
             self.max_band,
             self.stream_ms,
-            // §2.6 SCF anchor (GAP); the same value seeds each channel.
-            self.anchor as i32,
-            self.anchor,
+            &mut self.scf,
             &mut self.cns,
         )?;
 
-        // 2. §2.6 M/S undo over the flagged subbands (GAP closure).
-        undo_ms_stereo(&mut frame.channels, &frame.ms_flags, &self.undo)?;
+        // 2. Pinned §2.6 M/S undo over the flagged subbands.
+        undo_ms_stereo_pinned(&mut frame.channels, &frame.ms_flags)?;
 
         // 3. §2.6 synthesis filterbank, interleaved, persistent overlap.
         let pcm = synthesize_stereo_frame_interleaved(
@@ -212,13 +172,15 @@ where
         Ok(pcm)
     }
 
-    /// Decode up to `max_frames` frames from `reader`, concatenating the
-    /// interleaved PCM. Stops early (without error) when `reader` no
-    /// longer has the bits for another frame body — the natural
-    /// end-of-stream for a continuous SV7 bit run.
+    /// Decode up to `max_frames` frame bodies from `reader`,
+    /// concatenating the interleaved PCM. Stops early (without error)
+    /// when `reader` no longer has the bits for another frame body.
     ///
-    /// Returns the concatenated `L, R, …` PCM. Use [`Self::frames_decoded`]
-    /// to recover how many frames were actually decoded.
+    /// **Note:** this entry point expects *back-to-back bodies with no
+    /// 20-bit length prefixes* (the crate's pre-corpus self-framing, and
+    /// the natural shape for synthetic body runs in tests). Real `.mpc`
+    /// files prefix every body — use
+    /// [`crate::sv7_file_decode::decode_sv7_file`] for those.
     ///
     /// # Errors
     ///
@@ -246,52 +208,11 @@ where
         }
         Ok(pcm)
     }
-
-    /// Decode up to `max_frames` frames directly from a **raw SV7 body
-    /// byte buffer**, performing the §4 32-bit-word byte-swap internally.
-    ///
-    /// The other entry points
-    /// ([`Self::decode_frame`] / [`Self::decode_frames`]) take a
-    /// [`Sv7BitReader`] the caller has *already* positioned over the
-    /// word-swapped body. This method removes that obligation for the
-    /// common case where the caller holds the raw, non-swapped SV7 body
-    /// bytes: it applies
-    /// [`crate::sv7_word_swap::word_swap_sv7_body`] (the historic
-    /// "read in 32-LSB units" packing, §4) and then runs the same frame
-    /// loop as [`Self::decode_frames`] over the swapped buffer.
-    ///
-    /// `raw_body` is the continuous SV7 audio bit run **after** the
-    /// fixed header (§1) — the bytes that carry the per-frame band /
-    /// SCF / sample data. The whole-stream *positioning* of that body
-    /// (where the header ends and the body begins at the byte level)
-    /// is still the caller's responsibility; this method owns only the
-    /// word-swap once the body bytes are in hand.
-    ///
-    /// Returns the concatenated interleaved `L, R, …` PCM, stopping
-    /// cleanly at end-of-buffer exactly as [`Self::decode_frames`] does.
-    ///
-    /// # Errors
-    ///
-    /// Propagates a mid-frame decode error (a frame that began but
-    /// could not finish before the buffer's coded bits ran out, when
-    /// that buffer still has bits — i.e. a genuine malformed body,
-    /// distinct from the clean end-of-stream stop).
-    pub fn decode_body_bytes(&mut self, raw_body: &[u8], max_frames: u64) -> Result<Vec<f64>> {
-        let swapped = crate::sv7_word_swap::word_swap_sv7_body(raw_body);
-        let mut reader = Sv7BitReader::new(&swapped);
-        self.decode_frames(&mut reader, max_frames)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A representative `L = M + S` / `R = M − S` undo used only in
-    /// tests (not a claim about the GAP Musepack arithmetic).
-    fn test_undo(m: f64, s: f64) -> (f64, f64) {
-        (m + s, m - s)
-    }
 
     /// MSB-first bit packer (mirrors the frame-decode tests).
     struct Packer {
@@ -340,13 +261,13 @@ mod tests {
 
     #[test]
     fn new_rejects_max_band_out_of_range() {
-        let err = Sv7StreamDecoder::new(32, false, 0, test_undo).err();
+        let err = Sv7StreamDecoder::new(32, false).err();
         assert_eq!(err, Some(Error::MaxBandOutOfRange(32)));
     }
 
     #[test]
     fn new_succeeds_for_valid_max_band() {
-        let dec = Sv7StreamDecoder::new(20, true, 0, test_undo).unwrap();
+        let dec = Sv7StreamDecoder::new(20, true).unwrap();
         assert_eq!(dec.frames_decoded(), 0);
     }
 
@@ -356,7 +277,7 @@ mod tests {
         silent_frame_bits(&mut p);
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
-        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let mut dec = Sv7StreamDecoder::new(0, false).unwrap();
         let pcm = dec.decode_frame(&mut r).unwrap();
         assert_eq!(pcm.len(), STEREO_FRAME_PCM_LEN);
         assert!(pcm.iter().all(|&s| s == 0.0));
@@ -372,7 +293,7 @@ mod tests {
         }
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
-        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let mut dec = Sv7StreamDecoder::new(0, false).unwrap();
         let mut total = 0;
         for _ in 0..3 {
             let pcm = dec.decode_frame(&mut r).unwrap();
@@ -391,7 +312,7 @@ mod tests {
         }
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
-        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let mut dec = Sv7StreamDecoder::new(0, false).unwrap();
         // Ask for many more frames than the stream carries; it stops
         // cleanly when the bits run out.
         let pcm = dec.decode_frames(&mut r, 100).unwrap();
@@ -410,51 +331,17 @@ mod tests {
         silent_frame_bits(&mut p);
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
-        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
+        let mut dec = Sv7StreamDecoder::new(0, false).unwrap();
         dec.decode_frame(&mut r).unwrap();
         assert_eq!(dec.frames_decoded(), 1);
         dec.reset();
         assert_eq!(dec.frames_decoded(), 0);
+        assert_eq!(dec.scf, Sv7ScfMemory::new());
     }
 
     #[test]
     fn pcm_len_constant_is_two_channels_of_a_frame() {
         assert_eq!(STEREO_FRAME_PCM_LEN, 2 * 1152);
-    }
-
-    #[test]
-    fn decode_body_bytes_matches_pre_swapped_reader() {
-        // Build a continuous bit run of three silent frames as the
-        // bytes the reader walks (already word-swapped order).
-        let mut p = Packer::new();
-        for _ in 0..3 {
-            silent_frame_bits(&mut p);
-        }
-        let mut swapped_view = p.finish();
-        // Pad to a whole number of 32-bit words so the §4 swap is its
-        // own exact inverse (a partial trailing word zero-extends, which
-        // is not bit-for-bit reversible).
-        while swapped_view.len() % 4 != 0 {
-            swapped_view.push(0);
-        }
-
-        // Reference: feed the already-swapped bytes straight to the
-        // positioned-reader path.
-        let mut ref_dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
-        let mut r = Sv7BitReader::new(&swapped_view);
-        let ref_pcm = ref_dec.decode_frames(&mut r, 100).unwrap();
-
-        // The raw body that produces `swapped_view` under the §4 swap is
-        // its inverse; the swap is its own inverse for whole words, so
-        // un-swapping = swapping again.
-        let raw_body = crate::sv7_word_swap::word_swap_sv7_body(&swapped_view);
-
-        let mut body_dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
-        let body_pcm = body_dec.decode_body_bytes(&raw_body, 100).unwrap();
-
-        assert_eq!(body_pcm, ref_pcm);
-        assert_eq!(body_dec.frames_decoded(), ref_dec.frames_decoded());
-        assert!(body_pcm.iter().all(|&s| s == 0.0));
     }
 
     #[test]
@@ -465,7 +352,7 @@ mod tests {
             mid_side: true,
             ..Default::default()
         };
-        let dec = Sv7StreamDecoder::from_header(&header, 0, test_undo).unwrap();
+        let dec = Sv7StreamDecoder::from_header(&header).unwrap();
         assert_eq!(dec.max_band, 17);
         assert!(dec.stream_ms);
         assert_eq!(dec.frames_decoded(), 0);
@@ -478,15 +365,7 @@ mod tests {
             max_band: 32,
             ..Default::default()
         };
-        let err = Sv7StreamDecoder::from_header(&header, 0, test_undo).err();
+        let err = Sv7StreamDecoder::from_header(&header).err();
         assert_eq!(err, Some(Error::MaxBandOutOfRange(32)));
-    }
-
-    #[test]
-    fn decode_body_bytes_empty_yields_no_pcm() {
-        let mut dec = Sv7StreamDecoder::new(0, false, 0, test_undo).unwrap();
-        let pcm = dec.decode_body_bytes(&[], 100).unwrap();
-        assert!(pcm.is_empty());
-        assert_eq!(dec.frames_decoded(), 0);
     }
 }

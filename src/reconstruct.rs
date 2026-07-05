@@ -367,6 +367,79 @@ pub fn reconstruct_sv7_band_from_levels(
     }
 }
 
+// ───────────────── corpus-pinned absolute reconstruction ─────────────────
+
+/// §5.3 out-of-range sentinel bound re-exported for the absolute path:
+/// a granule whose SCF index exceeds this reconstructs to silence.
+pub use crate::sv7_scf_decode::SCF_CLAMP_THRESHOLD as SCF_ABSOLUTE_SENTINEL;
+
+/// The **absolute** SV7 per-granule gain, pinned by the fixture corpus:
+/// `gain(idx) = SCF_STEP_RATIO^(idx − 1)` in the signed-16-bit output
+/// domain.
+///
+/// Empirically resolved (previously the §2.6 GAP anchor): decoding the
+/// four independent mppenc streams under `tests/fixtures/sv7/` with the
+/// full pipeline `level × C[band] × gain(scf)` → synthesis reproduces
+/// FFmpeg's `mpc7` s16 oracle to within ±1 LSB with ~75% of samples
+/// bit-exact, and the fitted global scale equals `65536 / SCF_STEP_RATIO`
+/// to five significant figures — i.e. the ladder is anchored at **index
+/// 1 = unity gain** (matching the `scf-step-ratio.meta` "geometric
+/// sequence around index 1" phrasing) and the `C` coefficients are used
+/// *unnormalised* (no `/65536`), placing the reconstruction directly in
+/// the s16 sample domain.
+///
+/// A granule index above [`SCF_ABSOLUTE_SENTINEL`] (the §5.3 "exceeding
+/// 1024 ⇒ sentinel" clamp) yields gain `0.0` (silent).
+#[inline]
+pub fn sv7_absolute_scf_gain(scf_index: i32) -> f64 {
+    if scf_index > SCF_ABSOLUTE_SENTINEL {
+        return 0.0;
+    }
+    SCF_STEP_RATIO.powi(scf_index - 1)
+}
+
+/// Full corpus-pinned absolute reconstruction of one SV7 band: from the
+/// unified `[i32; 36]` level buffer to s16-domain `f64` subband samples,
+/// `out[i] = level[i] × C[band_type + 1] × gain(granule_scf[i / 12])`.
+///
+/// Level conventions per arm match [`reconstruct_sv7_band_from_levels`]:
+/// PCM-escape levels (`band_type` 8..=17) are raw-unsigned and centred
+/// here; Huffman / grouped levels are already centred; CNS (`-1`) uses
+/// the `DEQUANT_COEFFICIENT_C[0]` coefficient (per the structural spec
+/// the noise band is "scaled by the band's scalefactor", so the granule
+/// gains apply to it exactly like a coded band — corpus-unvalidated,
+/// the fixtures carry no CNS bands).
+///
+/// `granule_scf` carries the three signed per-granule SCF indices from
+/// the §5.3 decode ([`crate::sv7_scf_decode::Sv7BandScf::indices`]).
+///
+/// # Errors
+///
+/// [`Error::UnsupportedBandType`] for a `band_type` outside `-1..=17`.
+pub fn reconstruct_sv7_band_absolute(
+    band_type: i8,
+    levels: &[i32; SAMPLES_PER_BAND],
+    granule_scf: [i32; GRANULES_PER_BAND],
+    out: &mut [f64; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let idx = band_type_index(band_type).ok_or(Error::UnsupportedBandType(band_type))?;
+    let c = DEQUANT_COEFFICIENT_C[idx];
+    // PCM-escape raw levels are unsigned; centre by subtracting D.
+    let centre = if (8..=17).contains(&band_type) {
+        QUANTIZER_OFFSET_D[idx] as i32
+    } else {
+        0
+    };
+    for (g, &scf) in granule_scf.iter().enumerate() {
+        let gain = c * sv7_absolute_scf_gain(scf);
+        let start = g * SAMPLES_PER_GRANULE;
+        for k in start..start + SAMPLES_PER_GRANULE {
+            out[k] = f64::from(levels[k] - centre) * gain;
+        }
+    }
+    Ok(())
+}
+
 /// Compile-time sanity: the reconstruct-layer granule geometry must
 /// match the scf-layer's `SCF_GRANULES_PER_BAND`, and the 3×12 split
 /// must tile the full 36-sample band exactly.

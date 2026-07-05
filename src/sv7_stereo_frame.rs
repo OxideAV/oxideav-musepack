@@ -1,69 +1,133 @@
-//! SV7 stereo (two-channel) frame-body assembler + reconstruction.
+//! SV7 stereo (two-channel) frame-body assembler + reconstruction —
+//! the corpus-pinned pass order.
 //!
-//! This is the cross-channel composition the single-channel
-//! [`crate::sv7_frame_decode::decode_sv7_frame_channel`] left as GAP:
-//! it walks one SV7 frame body for **both** channels in the documented
-//! §5 phase order and hands back the per-channel reconstructed subband
-//! matrices ([`crate::ms_stereo::StereoSubbandMatrix`]) plus the per-band
-//! M/S flags — exactly the input the §2.6 M/S-undo step
-//! ([`crate::ms_stereo::undo_ms_stereo`]) and then the synthesis
+//! Decodes one SV7 frame body for both channels and hands back the
+//! reconstructed per-channel subband matrices
+//! ([`crate::ms_stereo::StereoSubbandMatrix`]) plus the per-band M/S
+//! flags — the input the §2.6 M/S-undo step
+//! ([`crate::ms_stereo::undo_ms_stereo_pinned`]) and the synthesis
 //! filterbank consume.
 //!
-//! # Phase ordering — what is grounded vs. what stays GAP
+//! # Phase ordering — pinned by the fixture corpus
 //!
-//! The staged `spec/musepack-headers-and-coding.md` §5 lays a stereo SV7
-//! frame body out as:
+//! The staged `spec/musepack-headers-and-coding.md` §5 lists the frame
+//! layers (§5.1 `Res` header, §5.2 SCFI, §5.3 DSCF, §5.4 samples) and
+//! closes §5.3/§5.4 with *"Left channel is decoded first, then right."*
+//! Before round 390 this crate read that as one whole-channel sweep
+//! (the left channel's complete SCF+samples body, then the right's).
+//! The SV7 fixture corpus (`tests/fixtures/sv7/`, four independent
+//! mppenc 1.16 streams whose per-frame 20-bit bit-length prefixes give
+//! an exact per-frame bit budget) disproves that layout and pins the
+//! real one — **four sequential passes over the bands, channel-minor
+//! within each band**:
 //!
-//! 1. **§5.1 band-type (`Res`) header** — read for *both* channels
-//!    interleaved per band ("left `Res` and right `Res`"), plus the
-//!    per-band M/S flag. This is a single shared header sweep over
-//!    `0..=max_band`, decoded by
-//!    [`crate::sv7_band_header::decode_res_header_grounded`].
-//! 2. **§5.3 SCFI + DSCF** and **§5.4 quantised samples** — both §5.3
-//!    and §5.4 close with the explicit sentence *"Left channel is
-//!    decoded first, then right."* So after the shared §5.1 header, the
-//!    decoder runs the **whole** SCF-then-samples body for the left
-//!    channel, then the **whole** SCF-then-samples body for the right
-//!    channel. That is a per-channel sweep, not a per-band channel
-//!    interleave — the §5.3/§5.4 wording pins it.
+//! 1. **§5.1 `Res` header** — both channels interleaved per band plus
+//!    the per-band M/S bit
+//!    ([`crate::sv7_band_header::decode_res_header_grounded`]);
+//! 2. **SCFI pass** — for each band `0..=max_band`, for each channel
+//!    with `Res ≠ 0`: one SCFI selector VLC
+//!    ([`crate::sv7_scf_decode::decode_sv7_scfi`]);
+//! 3. **DSCF pass** — same iteration order: each band/channel's
+//!    `1..=3` DSCF indices per its SCFI case
+//!    ([`crate::sv7_scf_decode::decode_sv7_band_dscf`]);
+//! 4. **samples pass** — same iteration order: each band's 36 sample
+//!    levels per its `Res` arm (with the 1-bit context selector for the
+//!    grouped / per-sample-Huffman arms), CNS bands filling from the
+//!    shared PRNG.
 //!
-//! This module therefore composes:
+//! Under this layout every one of the corpus's 72 frames consumes
+//! **exactly** its declared 20-bit prefix bit count; every alternative
+//! tried (whole-channel sweeps, combined SCFI+DSCF pass, channel-major
+//! passes) diverges on most frames.
 //!
-//! - one [`crate::sv7_band_header::decode_res_header_grounded`] over the
-//!   shared reader (the §5.1 header, both channels + M/S flags);
-//! - then [`crate::sv7_frame_decode::decode_sv7_frame_channel`] over the
-//!   **same** reader for the left channel's `Res` column, then again for
-//!   the right channel's `Res` column (the §5.3/§5.4 "left first, then
-//!   right" body sweeps);
-//! - then [`crate::frame_reconstruct::reconstruct_frame_channel`] per
-//!   channel into a [`crate::frame_reconstruct::SubbandMatrix`].
+//! # The SCF[0] reference — per-band memory across frames
 //!
-//! No new format facts are introduced. The two facts §2.6 still lists as
-//! GAP are threaded as caller arguments, unchanged from the
-//! single-channel path:
+//! The corpus also pins the `SCF[0]` delta reference (previously GAP,
+//! and mis-stated by the staged §5.3 — see [`crate::sv7_scf_decode`]):
+//! it is the **same subband's `SCF[2]` from the previous frame**, held
+//! per channel ([`Sv7ScfMemory`], zero-initialised at stream start),
+//! not the previous band of the same frame. With per-band memory the
+//! decoded PCM matches the FFmpeg oracle to ±1 LSB on every corpus
+//! stream; the within-frame chain produces correlation ≈ 0.2.
 //!
-//! - the **absolute SCF anchor** (`first_scf_ref` for each channel's
-//!   first coded band, and the reconstruction `anchor`) — GAP per §2.6;
-//! - the **M/S-undo arithmetic** — not performed here at all. This
-//!   module returns the raw (mid/side-or-L/R) channel matrices and the
-//!   per-band `ms_flags`; the caller runs
-//!   [`crate::ms_stereo::undo_ms_stereo`] with its GAP closure.
+//! # CNS bands carry the SCF layer
 //!
-//! Source-of-record (facts only):
+//! §5.2 reads SCFI "for each channel whose `Res ≠ 0`" — which includes
+//! the CNS band (`Res == -1`) — and the structural spec says the noise
+//! band is "scaled by the band's scalefactor"
+//! (`musepack-sv7-sv8-spec.md` §2.5 notes). This module therefore reads
+//! SCFI + DSCF for CNS bands exactly like coded bands. The corpus
+//! cannot cross-check this (none of its streams code a CNS band); if
+//! the convention is wrong on real CNS streams, the whole-file layer's
+//! per-frame bit-budget verification fails loudly rather than decoding
+//! garbage.
 //!
-//! - `docs/audio/musepack/spec/musepack-headers-and-coding.md` §5.1
-//!   (shared band-type header, both channels), §5.2/§5.3 ("Left channel
-//!   is decoded first, then right"), §5.4 (same).
-//! - `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.3 (per-band
-//!   `msflag`), §2.6 (reconstruction step order).
+//! # Reconstruction — the corpus-pinned absolute law
+//!
+//! Each non-empty band reconstructs via
+//! [`crate::reconstruct::reconstruct_sv7_band_absolute`]:
+//! `sample = level × C[Res + 1] × SCF_STEP_RATIO^(scf − 1)`, directly
+//! in the signed-16-bit output domain (the previously-GAP absolute
+//! anchor, resolved empirically — see [`crate::reconstruct`]).
+//!
+//! Source-of-record: `docs/audio/musepack/spec/musepack-headers-and-coding.md`
+//! §5.1–§5.5 (layer structure, VLC tables, arms) +
+//! `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.5/§2.6, with the
+//! layout facts the staged material left open (pass order, SCF[0]
+//! reference, absolute gain) pinned black-box by the
+//! `tests/fixtures/sv7/` corpus.
 
 use crate::cns::CnsPrng;
-use crate::frame_reconstruct::reconstruct_frame_channel;
+use crate::frame_reconstruct::zero_subband_matrix;
 use crate::huffman::Sv7BitReader;
 use crate::ms_stereo::StereoSubbandMatrix;
-use crate::sv7_band_header::decode_res_header_grounded;
-use crate::sv7_frame_decode::decode_sv7_frame_channel;
-use crate::Result;
+use crate::reconstruct::reconstruct_sv7_band_absolute;
+use crate::sv7_band_decode::{band_type_uses_context_selector, decode_sv7_band, SAMPLES_PER_BAND};
+use crate::sv7_band_header::{decode_res_header_grounded, SV7_SUBBAND_COUNT};
+use crate::sv7_scf_decode::{decode_sv7_band_dscf, decode_sv7_scfi};
+use crate::{Error, Result};
+
+/// Per-channel, per-subband SCF memory threading across frames: entry
+/// `[ch][b]` is subband `b`'s most recent `SCF[2]` for channel `ch` —
+/// the corpus-pinned delta reference for that subband's next `SCF[0]`.
+/// Zero-initialised at stream start (frame 0 deltas off 0, with the
+/// §5.3 raw-6-bit escape available for absolute placement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sv7ScfMemory {
+    state: [[i32; SV7_SUBBAND_COUNT]; 2],
+}
+
+impl Sv7ScfMemory {
+    /// Fresh stream-start memory (all references 0).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: [[0; SV7_SUBBAND_COUNT]; 2],
+        }
+    }
+
+    /// The current reference for channel `ch`, subband `b`.
+    #[must_use]
+    pub fn reference(&self, ch: usize, b: usize) -> i32 {
+        self.state[ch][b]
+    }
+
+    /// Record subband `b`'s new `SCF[2]` for channel `ch`.
+    pub fn update(&mut self, ch: usize, b: usize, scf2: i32) {
+        self.state[ch][b] = scf2;
+    }
+
+    /// Reset to the stream-start state (e.g. after a seek).
+    pub fn reset(&mut self) {
+        self.state = [[0; SV7_SUBBAND_COUNT]; 2];
+    }
+}
+
+impl Default for Sv7ScfMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The decoded structure of one SV7 stereo frame body, before the §2.6
 /// M/S-undo step.
@@ -72,8 +136,9 @@ use crate::Result;
 /// and `channels[1]` the right/side channel's (which role each subband
 /// plays is given by `ms_flags`). `ms_flags[b]` is the §5.1 per-band M/S
 /// flag for subband `b`: `true` ⇒ subband `b` is coded mid/side and must
-/// be run through [`crate::ms_stereo::undo_ms_stereo`]; `false` ⇒ it is
-/// already left/right.
+/// be run through [`crate::ms_stereo::undo_ms_stereo_pinned`]; `false` ⇒
+/// it is already left/right. Sample values are in the signed-16-bit
+/// domain (see [`crate::reconstruct::sv7_absolute_scf_gain`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sv7StereoFrame {
     /// The two channels' reconstructed subband matrices (pre-M/S-undo).
@@ -83,79 +148,97 @@ pub struct Sv7StereoFrame {
 }
 
 /// Decode + reconstruct one SV7 **stereo** frame body into a
-/// [`Sv7StereoFrame`] (pre-M/S-undo per-channel subband matrices + the
-/// per-band M/S flags), in the documented §5 phase order.
+/// [`Sv7StereoFrame`], in the corpus-pinned four-pass order (see the
+/// module docs).
 ///
-/// `reader` is positioned at the start of the frame body (the §5.1
-/// band-type header). `max_band` is the stream header's `max_band`
-/// (`1..=31`, the highest coded subband). `stream_ms` is the
-/// stream-wide M/S enable (SV7 fixed-header field 3): when set, §5.1
-/// reads a per-band M/S bit for each band with a non-zero channel.
-///
-/// `first_scf_ref` / `anchor` are the GAP §2.6 absolute SCF anchor,
-/// threaded through unchanged from the single-channel path: the same
-/// `first_scf_ref` seeds each channel's first coded band, and the same
-/// `anchor` is used to reconstruct both channels (pass `0` for the
-/// relative-loudness convention). `cns` is the shared CNS PRNG; it is
-/// advanced by every noise band of **both** channels in decode order
-/// (left channel's bands first, then right), so its state threads
-/// exactly across the whole frame.
-///
-/// The returned [`Sv7StereoFrame`] is raw mid/side-or-L/R: the caller
-/// applies [`crate::ms_stereo::undo_ms_stereo`] (with its GAP closure)
-/// over `frame.channels` and `frame.ms_flags` before the synthesis
-/// filterbank.
+/// `reader` is positioned at the start of the frame body (the first bit
+/// of the §5.1 header — i.e. *after* the frame's 20-bit bit-length
+/// prefix, which the whole-file layer consumes). `max_band` /
+/// `stream_ms` come from the §1 fixed header. `scf` is the cross-frame
+/// per-band SCF memory (one per stream, zero-initialised); `cns` the
+/// shared CNS PRNG, advanced by every noise band in pass order.
 ///
 /// # Errors
 ///
-/// - [`crate::Error::ChannelCountInvalid`] is not produced here (this
-///   entry point is stereo by construction); the band-header walk is
-///   driven with `nch == 2`.
-/// - [`crate::Error::MaxBandOutOfRange`] if `max_band` exceeds the §1
+/// - [`Error::MaxBandOutOfRange`] if `max_band` exceeds the §1
 ///   Layer-II 32-subband inclusive bound.
-/// - [`crate::Error::UnexpectedEof`] / [`crate::Error::HuffmanNoMatch`]
-///   if the reader starves or a peek matches no table row in any phase.
-/// - [`crate::Error::UnsupportedBandType`] for a `Res` outside `-1..=17`.
-/// - [`crate::Error::InvalidScfCodingMethod`] propagated from §5.3.
+/// - [`Error::UnexpectedEof`] / [`Error::HuffmanNoMatch`] if the reader
+///   starves or a peek matches no table row in any pass.
+/// - [`Error::UnsupportedBandType`] for a `Res` outside `-1..=17`.
+/// - [`Error::InvalidScfCodingMethod`] propagated from the SCFI pass.
 pub fn decode_sv7_stereo_frame(
     reader: &mut Sv7BitReader<'_>,
     max_band: u8,
     stream_ms: bool,
-    first_scf_ref: i32,
-    anchor: u8,
+    scf: &mut Sv7ScfMemory,
     cns: &mut CnsPrng,
 ) -> Result<Sv7StereoFrame> {
-    // §5.1: shared band-type header, both channels + per-band M/S flags.
+    // Pass 1 — §5.1: shared band-type header, both channels + M/S bits.
     let header = decode_res_header_grounded(reader, max_band, 2, stream_ms)?;
+    let n = header.len();
+    let res: Vec<[i8; 2]> = header.iter().map(|b| b.res).collect();
+    let ms_flags: Vec<bool> = header.iter().map(|b| b.ms_flag.unwrap_or(false)).collect();
 
-    // Split out per-channel Res columns and the per-band M/S flags. A
-    // band whose M/S flag was suppressed (stream M/S off, or both
-    // channels Res == 0) is treated as L/R (false) — undo_ms_stereo only
-    // transforms flagged subbands.
-    let mut left_res = Vec::with_capacity(header.len());
-    let mut right_res = Vec::with_capacity(header.len());
-    let mut ms_flags = Vec::with_capacity(header.len());
-    for band in &header {
-        left_res.push(band.res[0]);
-        right_res.push(band.res[1]);
-        ms_flags.push(band.ms_flag.unwrap_or(false));
+    // Pass 2 — SCFI selectors, band-major / channel-minor, for every
+    // non-zero band (coded *and* CNS).
+    let mut scfi = vec![[0u8; 2]; n];
+    for (b, r) in res.iter().enumerate() {
+        for ch in 0..2 {
+            if r[ch] != 0 {
+                scfi[b][ch] = decode_sv7_scfi(reader)?;
+            }
+        }
     }
 
-    // §5.3/§5.4: "Left channel is decoded first, then right." The whole
-    // SCF-then-samples body for the left channel, then the right — over
-    // the same reader, sharing the CNS PRNG so its state threads across
-    // both channels in decode order.
-    let left_bands = decode_sv7_frame_channel(reader, &left_res, first_scf_ref, cns)?;
-    let right_bands = decode_sv7_frame_channel(reader, &right_res, first_scf_ref, cns)?;
+    // Pass 3 — DSCF chains, same order, referencing the per-band memory.
+    let mut granule_scf = vec![[[0i32; 3]; 2]; n];
+    for (b, r) in res.iter().enumerate() {
+        for ch in 0..2 {
+            if r[ch] != 0 {
+                let band_scf = decode_sv7_band_dscf(reader, scfi[b][ch], scf.reference(ch, b))?;
+                granule_scf[b][ch] = band_scf.indices;
+                scf.update(ch, b, band_scf.last_index());
+            }
+        }
+    }
 
-    // §2.6: per-channel dequant + per-granule SCF multiply.
-    let left_matrix = reconstruct_frame_channel(&left_bands, anchor)?;
-    let right_matrix = reconstruct_frame_channel(&right_bands, anchor)?;
+    // Pass 4 — sample levels, same order.
+    let mut levels = vec![[[0i32; SAMPLES_PER_BAND]; 2]; n];
+    for (b, r) in res.iter().enumerate() {
+        for ch in 0..2 {
+            let band_type = r[ch];
+            if band_type == 0 {
+                continue;
+            }
+            let ctx = if band_type_uses_context_selector(band_type) {
+                (reader.read_bits(1)? & 1) as usize
+            } else {
+                0
+            };
+            decode_sv7_band(reader, band_type, cns, ctx, &mut levels[b][ch])?;
+        }
+    }
 
-    Ok(Sv7StereoFrame {
-        channels: [left_matrix, right_matrix],
-        ms_flags,
-    })
+    // Reconstruction — corpus-pinned absolute law per non-empty band.
+    let mut channels = [zero_subband_matrix(), zero_subband_matrix()];
+    for (b, r) in res.iter().enumerate() {
+        if b >= SV7_SUBBAND_COUNT {
+            return Err(Error::MaxBandOutOfRange(b as u8));
+        }
+        for ch in 0..2 {
+            if r[ch] == 0 {
+                continue;
+            }
+            reconstruct_sv7_band_absolute(
+                r[ch],
+                &levels[b][ch],
+                granule_scf[b][ch],
+                &mut channels[ch][b],
+            )?;
+        }
+    }
+
+    Ok(Sv7StereoFrame { channels, ms_flags })
 }
 
 #[cfg(test)]
@@ -163,6 +246,7 @@ mod tests {
     use super::*;
     use crate::frame_reconstruct::zero_subband_matrix;
     use crate::huffman::{SV7_Q3_TABLE, SV7_SCFI_TABLE};
+    use crate::requant::{DEQUANT_COEFFICIENT_C, SCF_STEP_RATIO};
 
     /// MSB-first bit packer mirroring the sibling frame-decode tests.
     struct Packer {
@@ -208,10 +292,9 @@ mod tests {
                 self.bytes.push((self.acc << (8 - self.nbits)) as u8);
             }
             // Trailing peek-padding (the reader always peeks 16 bits).
-            self.bytes.push(0);
-            self.bytes.push(0);
-            self.bytes.push(0);
-            self.bytes.push(0);
+            for _ in 0..4 {
+                self.bytes.push(0);
+            }
             self.bytes
         }
     }
@@ -224,11 +307,11 @@ mod tests {
     fn dscf0() -> (u16, u8) {
         (0x9000, 4)
     }
+    /// DSCF codeword for symbol +1.
+    fn dscf1() -> (u16, u8) {
+        (0xa000, 3)
+    }
 
-    /// Pack a §5.1 stereo header for two bands, both channels Res == 0
-    /// (silent), stream M/S off ⇒ no per-band M/S bit, no body. Band 0
-    /// is raw-4-bit per channel; band 1 is a header-VLC delta per
-    /// channel. Easiest silent case: max_band = 0 (single band, raw).
     #[test]
     fn all_silent_stereo_frame_reconstructs_to_silence() {
         // max_band = 0: one band, both channels raw-4-bit Res = 0.
@@ -238,37 +321,40 @@ mod tests {
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
         let mut cns = CnsPrng::new();
-        let frame = decode_sv7_stereo_frame(&mut r, 0, false, 0, 0, &mut cns).unwrap();
+        let mut scf = Sv7ScfMemory::new();
+        let frame = decode_sv7_stereo_frame(&mut r, 0, false, &mut scf, &mut cns).unwrap();
         assert_eq!(frame.channels[0], zero_subband_matrix());
         assert_eq!(frame.channels[1], zero_subband_matrix());
         assert_eq!(frame.ms_flags, vec![false]);
+        // Silent bands never touch the SCF memory.
+        assert_eq!(scf, Sv7ScfMemory::new());
     }
 
+    /// One coded band per channel: the pass order on the wire is
+    /// [header][SCFI L][SCFI R][DSCF L][DSCF R][samples L][samples R].
     #[test]
-    fn ms_flag_read_per_band_when_stream_ms_set() {
-        // max_band = 0, both channels Res = 3 (coded) so the band has
-        // samples ⇒ a per-band M/S bit is read. Then each channel runs
-        // its full body: SCFI=3, DSCF=0, selector, 36 q3.
+    fn pass_order_scfi_then_dscf_then_samples() {
         let (scfi_c, scfi_l) = scfi3();
-        let (dscf_c, dscf_l) = dscf0();
+        let (d0_c, d0_l) = dscf0();
+        let (d1_c, d1_l) = dscf1();
         let (q3_c, q3_l) = (SV7_Q3_TABLE[0].code, SV7_Q3_TABLE[0].length);
 
         let mut p = Packer::new();
-        // §5.1 header: left Res=3 (raw 4-bit), right Res=3 (raw 4-bit).
+        // §5.1 header: left Res=3, right Res=3 (raw 4-bit each), M/S bit.
         p.push_raw(3, 4);
         p.push_raw(3, 4);
-        // per-band M/S bit (stream M/S on, band has samples): set it.
         p.push_raw(1, 1);
-        // §5.3/§5.4 LEFT channel body.
+        // SCFI pass: L then R.
         p.push(scfi_c, scfi_l);
-        p.push(dscf_c, dscf_l);
-        p.push_raw(0, 1); // selector
+        p.push(scfi_c, scfi_l);
+        // DSCF pass: L (delta 0 → SCF 0), R (delta +1 → SCF 1).
+        p.push(d0_c, d0_l);
+        p.push(d1_c, d1_l);
+        // Samples pass: L selector + 36 q3, R selector + 36 q3.
+        p.push_raw(0, 1);
         for _ in 0..36 {
             p.push(q3_c, q3_l);
         }
-        // RIGHT channel body.
-        p.push(scfi_c, scfi_l);
-        p.push(dscf_c, dscf_l);
         p.push_raw(0, 1);
         for _ in 0..36 {
             p.push(q3_c, q3_l);
@@ -276,85 +362,150 @@ mod tests {
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
         let mut cns = CnsPrng::new();
-        let frame = decode_sv7_stereo_frame(&mut r, 0, true, 100, 0, &mut cns).unwrap();
+        let mut scf = Sv7ScfMemory::new();
+        let frame = decode_sv7_stereo_frame(&mut r, 0, true, &mut scf, &mut cns).unwrap();
         assert_eq!(frame.ms_flags, vec![true]);
-        // Both channels reconstruct identically (same bits) — subband 0
-        // non-silent.
-        assert_eq!(frame.channels[0], frame.channels[1]);
-        assert!(frame.channels[0][0].iter().any(|&s| s != 0.0));
-        // Higher subbands stay silent.
-        for b in 1..32 {
-            assert!(frame.channels[0][b].iter().all(|&s| s == 0.0));
+
+        // Same levels, but the right channel's SCF index is 1 (unity
+        // gain) while the left's is 0 (one step louder): the absolute
+        // law makes L = R / SCF_STEP_RATIO.
+        let level = SV7_Q3_TABLE[0].value as f64;
+        let c = DEQUANT_COEFFICIENT_C[4];
+        let want_l = level * c * SCF_STEP_RATIO.powi(-1);
+        let want_r = level * c;
+        for k in 0..SAMPLES_PER_BAND {
+            assert!((frame.channels[0][0][k] - want_l).abs() < 1e-9, "L {k}");
+            assert!((frame.channels[1][0][k] - want_r).abs() < 1e-9, "R {k}");
         }
-        // Touch the SCFI table for import parity.
-        assert_eq!(SV7_SCFI_TABLE.len(), 4);
+        // Memory recorded each channel's SCF[2].
+        assert_eq!(scf.reference(0, 0), 0);
+        assert_eq!(scf.reference(1, 0), 1);
     }
 
+    /// The SCF[0] reference is per-band memory across frames: decoding
+    /// the same coded-band bits twice yields a second frame whose SCF
+    /// deltas ride on the first frame's SCF[2].
     #[test]
-    fn left_then_right_body_order_threads_cns_across_channels() {
-        // Both channels Res = -1 (CNS). No SCF / selector — just 36 PRNG
-        // samples per channel, left then right. The shared PRNG must
-        // advance through the left band's 36 samples before the right's.
+    fn scf_memory_threads_across_frames() {
+        let (scfi_c, scfi_l) = scfi3();
+        let (d1_c, d1_l) = dscf1();
+        let (q3_c, q3_l) = (SV7_Q3_TABLE[0].code, SV7_Q3_TABLE[0].length);
+
+        let frame_bits = |p: &mut Packer| {
+            p.push_raw(3, 4);
+            p.push_raw(3, 4);
+            // stream_ms off ⇒ no M/S bit.
+            p.push(scfi_c, scfi_l); // SCFI L
+            p.push(scfi_c, scfi_l); // SCFI R
+            p.push(d1_c, d1_l); // DSCF L: +1 off memory
+            p.push(d1_c, d1_l); // DSCF R: +1 off memory
+            p.push_raw(0, 1);
+            for _ in 0..36 {
+                p.push(q3_c, q3_l);
+            }
+            p.push_raw(0, 1);
+            for _ in 0..36 {
+                p.push(q3_c, q3_l);
+            }
+        };
         let mut p = Packer::new();
-        // §5.1: left Res=-1, right Res=-1 (raw 4-bit, value 15 = -1 as i8
-        // when read as 4-bit? No — read_bits(4) yields 0..15, cast i8.
-        // 15 -> 15, not -1. The CNS case needs Res == -1, i.e. band_type
-        // -1. Band-0 raw read gives 0..15; to get -1 we use a later band
-        // delta. Simplest: max_band=1, band0 Res=0 (raw), band1 delta to
-        // reach -1 via the header VLC value -1.)
-        p.push_raw(0, 4); // L band0 Res = 0
-        p.push_raw(0, 4); // R band0 Res = 0
-                          // band1: header VLC value -1 per channel. From the band-header
-                          // test docstring: value -1 is code 0x0000, length 2 (bits "00").
-        p.push(0x0000, 2); // L band1 delta -1 -> Res = -1
-        p.push(0x0000, 2); // R band1 delta -1 -> Res = -1
-                           // No per-band M/S (stream M/S off). Bodies: band0 empty (Res 0),
-                           // band1 CNS (Res -1) ⇒ 36 PRNG samples, no SCF.
+        frame_bits(&mut p);
+        frame_bits(&mut p);
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
         let mut cns = CnsPrng::new();
-        let frame = decode_sv7_stereo_frame(&mut r, 1, false, 0, 0, &mut cns).unwrap();
-        assert_eq!(frame.ms_flags, vec![false, false]);
+        let mut scf = Sv7ScfMemory::new();
+        let f1 = decode_sv7_stereo_frame(&mut r, 0, false, &mut scf, &mut cns).unwrap();
+        assert_eq!(scf.reference(0, 0), 1, "frame 1: 0 + 1");
+        let f2 = decode_sv7_stereo_frame(&mut r, 0, false, &mut scf, &mut cns).unwrap();
+        assert_eq!(scf.reference(0, 0), 2, "frame 2: 1 + 1");
+        // Higher SCF index = quieter: frame 2 is one ratio step down.
+        let x1 = f1.channels[0][0][0];
+        let x2 = f2.channels[0][0][0];
+        assert!((x2 / x1 - SCF_STEP_RATIO).abs() < 1e-9, "{x2} / {x1}");
+    }
 
-        // Reference: left CNS band drains 36 samples, then right drains
-        // the next 36 from the same PRNG.
+    /// CNS bands read SCFI + DSCF (the §5.2 "Res ≠ 0" gate) and scale
+    /// the PRNG noise by the per-granule gain.
+    #[test]
+    fn cns_band_reads_scf_layer_and_scales_noise() {
+        let (scfi_c, scfi_l) = scfi3();
+        let (d0_c, d0_l) = dscf0();
+        // max_band = 1: band0 Res=0 raw, band1 delta -1 → CNS.
+        let mut p = Packer::new();
+        p.push_raw(0, 4); // L band0
+        p.push_raw(0, 4); // R band0
+        p.push(0x0000, 2); // L band1 delta -1 → Res -1
+        p.push(0x0000, 2); // R band1 delta -1 → Res -1
+                           // SCFI pass: band1 L, band1 R (band0 silent).
+        p.push(scfi_c, scfi_l);
+        p.push(scfi_c, scfi_l);
+        // DSCF pass: band1 L (delta 0 → SCF 0), band1 R (delta 0).
+        p.push(d0_c, d0_l);
+        p.push(d0_c, d0_l);
+        // Samples pass: CNS reads no bits (PRNG).
+        let bytes = p.finish();
+        let mut r = Sv7BitReader::new(&bytes);
+        let mut cns = CnsPrng::new();
+        let mut scf = Sv7ScfMemory::new();
+        let frame = decode_sv7_stereo_frame(&mut r, 1, false, &mut scf, &mut cns).unwrap();
+
+        // Reference: left drains 36 PRNG samples, then right.
         let mut ref_cns = CnsPrng::new();
         let mut left_ref = [0_i32; 36];
         ref_cns.fill_samples(&mut left_ref);
         let mut right_ref = [0_i32; 36];
         ref_cns.fill_samples(&mut right_ref);
-        // The two channels' subband-1 rows differ (PRNG advanced between
-        // them) — confirms left-then-right ordering of the bodies.
-        assert_ne!(frame.channels[0][1], frame.channels[1][1]);
         assert_eq!(cns.state(), ref_cns.state());
+        // Scaled by C[0] × gain(SCF 0) = C[0] × ratio^(−1).
+        let gain = DEQUANT_COEFFICIENT_C[0] * SCF_STEP_RATIO.powi(-1);
+        for k in 0..SAMPLES_PER_BAND {
+            assert!(
+                (frame.channels[0][1][k] - left_ref[k] as f64 * gain).abs() < 1e-9,
+                "L {k}"
+            );
+            assert!(
+                (frame.channels[1][1][k] - right_ref[k] as f64 * gain).abs() < 1e-9,
+                "R {k}"
+            );
+        }
+        // The two channels' noise rows differ (PRNG advanced between).
+        assert_ne!(frame.channels[0][1], frame.channels[1][1]);
     }
 
     #[test]
     fn rejects_max_band_out_of_range() {
         let mut r = Sv7BitReader::new(&[0xFF; 8]);
         let mut cns = CnsPrng::new();
+        let mut scf = Sv7ScfMemory::new();
         assert_eq!(
-            decode_sv7_stereo_frame(&mut r, 32, false, 0, 0, &mut cns),
+            decode_sv7_stereo_frame(&mut r, 32, false, &mut scf, &mut cns),
             Err(crate::Error::MaxBandOutOfRange(32))
         );
     }
 
     #[test]
-    fn frame_pairs_with_undo_ms_stereo() {
-        // Smoke: a decoded stereo frame feeds undo_ms_stereo with a
-        // test closure over its ms_flags without panicking.
+    fn frame_pairs_with_pinned_ms_undo() {
         let mut p = Packer::new();
         p.push_raw(0, 4);
         p.push_raw(0, 4);
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
         let mut cns = CnsPrng::new();
-        let mut frame = decode_sv7_stereo_frame(&mut r, 0, false, 0, 0, &mut cns).unwrap();
-        crate::ms_stereo::undo_ms_stereo(&mut frame.channels, &frame.ms_flags, |m, s| {
-            (m + s, m - s)
-        })
-        .unwrap();
-        // All-silent frame stays silent after undo.
+        let mut scf = Sv7ScfMemory::new();
+        let mut frame = decode_sv7_stereo_frame(&mut r, 0, false, &mut scf, &mut cns).unwrap();
+        crate::ms_stereo::undo_ms_stereo_pinned(&mut frame.channels, &frame.ms_flags).unwrap();
         assert_eq!(frame.channels[0], zero_subband_matrix());
+        // Touch the SCFI table for import parity.
+        assert_eq!(SV7_SCFI_TABLE.len(), 4);
+    }
+
+    #[test]
+    fn scf_memory_default_and_reset() {
+        let mut m = Sv7ScfMemory::default();
+        m.update(1, 30, 42);
+        assert_eq!(m.reference(1, 30), 42);
+        m.reset();
+        assert_eq!(m, Sv7ScfMemory::new());
     }
 }

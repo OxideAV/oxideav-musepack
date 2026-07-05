@@ -1,40 +1,31 @@
-//! SV7 stereo (two-channel) frame-body **encode** — inverse of
-//! [`crate::sv7_stereo_frame::decode_sv7_stereo_frame`]'s bitstream
-//! layout.
-//!
-//! Composes the §5.1 header encoder
-//! ([`crate::sv7_band_header_encode::encode_res_header_grounded`]) and
-//! the single-channel body encoder
-//! ([`crate::sv7_frame_encode::encode_sv7_frame_channel`]) into a full
-//! stereo frame **body** writer, in the exact §5 phase order the stereo
-//! decoder reads:
+//! SV7 stereo frame-body **encode** — inverse of
+//! [`crate::sv7_stereo_frame::decode_sv7_stereo_frame`]'s corpus-pinned
+//! four-pass bitstream layout:
 //!
 //! 1. **§5.1 band-type header** — both channels interleaved per band
-//!    (left `Res` then right `Res`) plus the per-band M/S bit, a single
-//!    shared header sweep.
-//! 2. **§5.3/§5.4 bodies** — *"Left channel is decoded first, then
-//!    right."* So the **whole** SCF-then-samples body for the left
-//!    channel, then the **whole** body for the right — a per-channel
-//!    sweep, not a per-band interleave.
+//!    (left `Res` then right `Res`) plus the per-band M/S bit;
+//! 2. **SCFI pass** — for each band, for each channel with `Res ≠ 0`
+//!    (coded *and* CNS): the SCFI selector VLC;
+//! 3. **DSCF pass** — same order: each band's coded DSCF indices,
+//!    `SCF[0]` delta'd off the per-band cross-frame memory
+//!    ([`crate::sv7_stereo_frame::Sv7ScfMemory`]);
+//! 4. **samples pass** — same order: each coded band's context selector
+//!    + 36 levels (CNS and silent bands write nothing).
 //!
-//! The CNS PRNG threads left-channel-then-right on decode; since CNS
-//! bands emit no body bits, the encoder simply omits them and the
-//! decoder's shared PRNG reproduces the noise in that order.
-//!
-//! The two §2.6 GAPs the decoder threads as caller arguments (the
-//! absolute SCF anchor and the M/S-undo arithmetic) are unchanged here:
-//! the absolute anchor is `first_scf_ref` (pass `0` for the relative
-//! convention) and the M/S-undo is not an encode concern — the per-band
-//! M/S flags are written verbatim into the §5.1 header.
+//! The M/S flags are written verbatim into the §5.1 header — whether a
+//! band is coded mid/side is the encoder's (caller's) decision; the
+//! pinned `L = M + S` / `R = M − S` undo is a decode-side concern.
 //!
 //! Source-of-record: `docs/audio/musepack/spec/musepack-headers-and-coding.md`
-//! §5.1 (shared header, both channels), §5.2/§5.3/§5.4 ("left first, then
-//! right"). No new format facts — composition of the grounded encode
-//! sub-walks, round-tripped against the decoder that already exists.
+//! §5.1–§5.5; pass layout + SCF[0] reference fixture-corpus-pinned (see
+//! [`crate::sv7_stereo_frame`]). Round-tripped against the decoder in
+//! the tests below.
 
 use crate::sv7_band_header::{Sv7ResBand, SV7_MAX_BAND_INCLUSIVE};
 use crate::sv7_bitwriter::Sv7BitWriter;
-use crate::sv7_frame_encode::{encode_sv7_frame_channel, Sv7EncBand};
+use crate::sv7_frame_encode::{encode_sv7_band_samples, Sv7EncBand};
+use crate::sv7_scf_encode::{choose_scfi, encode_sv7_band_dscf, encode_sv7_scfi};
+use crate::sv7_stereo_frame::Sv7ScfMemory;
 use crate::{Error, Result};
 
 /// Build the §5.1 [`Sv7ResBand`] header sequence for a stereo frame from
@@ -71,41 +62,70 @@ fn build_res_bands(
 }
 
 /// Encode one SV7 **stereo** frame body into `writer`, the exact inverse
-/// of the bitstream [`crate::sv7_stereo_frame::decode_sv7_stereo_frame`]
-/// reads.
+/// of [`crate::sv7_stereo_frame::decode_sv7_stereo_frame`].
 ///
 /// `left` / `right` are the two channels' band specs (ascending subband
 /// order, equal length ≤ 32). `ms_flags` is the per-band M/S flag (only
 /// emitted for bands with a non-zero channel, when `stream_ms` is set).
-/// `first_scf_ref` seeds each channel's first coded band (GAP §2.6
-/// anchor; pass `0`).
-///
-/// Emits the §5.1 shared header (both channels + M/S bits), then the
-/// left channel's full body, then the right channel's full body.
+/// `scf` is the cross-frame per-band SCF memory — one per stream,
+/// zero-initialised, advanced by every non-silent band exactly as the
+/// decoder's is.
 ///
 /// # Errors
 ///
 /// - [`Error::MaxBandOutOfRange`] if the channel/flag lengths disagree or
 ///   exceed `SV7_MAX_BAND_INCLUSIVE + 1`.
 /// - [`Error::SampleOutOfRange`] / [`Error::SymbolNotEncodable`] /
-///   [`Error::UnsupportedBandType`] from a header or body sub-walk.
+///   [`Error::UnsupportedBandType`] from a header, SCF, or sample write.
 pub fn encode_sv7_stereo_frame(
     writer: &mut Sv7BitWriter,
     left: &[Sv7EncBand],
     right: &[Sv7EncBand],
     ms_flags: &[bool],
     stream_ms: bool,
-    first_scf_ref: i32,
+    scf: &mut Sv7ScfMemory,
 ) -> Result<()> {
     if left.len() > SV7_MAX_BAND_INCLUSIVE as usize + 1 {
         return Err(Error::MaxBandOutOfRange(left.len() as u8));
     }
     let res_bands = build_res_bands(left, right, ms_flags)?;
-    // §5.1 shared band-type header (both channels + per-band M/S).
+    // Pass 1 — §5.1 shared band-type header (both channels + M/S).
     crate::sv7_band_header_encode::encode_res_header_grounded(writer, &res_bands, 2, stream_ms)?;
-    // §5.3/§5.4: left channel body, then right channel body.
-    encode_sv7_frame_channel(writer, left, first_scf_ref)?;
-    encode_sv7_frame_channel(writer, right, first_scf_ref)?;
+
+    let chan = |ch: usize, b: usize| -> &Sv7EncBand {
+        if ch == 0 {
+            &left[b]
+        } else {
+            &right[b]
+        }
+    };
+
+    // Pass 2 — SCFI selectors, band-major / channel-minor.
+    for b in 0..left.len() {
+        for ch in 0..2 {
+            if let Some(indices) = chan(ch, b).scf() {
+                encode_sv7_scfi(writer, choose_scfi(indices))?;
+            }
+        }
+    }
+
+    // Pass 3 — DSCF chains off the per-band cross-frame memory.
+    for b in 0..left.len() {
+        for ch in 0..2 {
+            if let Some(indices) = chan(ch, b).scf() {
+                let scfi = choose_scfi(indices);
+                encode_sv7_band_dscf(writer, scfi, indices, scf.reference(ch, b))?;
+                scf.update(ch, b, indices[2]);
+            }
+        }
+    }
+
+    // Pass 4 — samples.
+    for b in 0..left.len() {
+        for ch in 0..2 {
+            encode_sv7_band_samples(writer, chan(ch, b))?;
+        }
+    }
     Ok(())
 }
 
@@ -114,152 +134,152 @@ mod tests {
     use super::*;
     use crate::cns::CnsPrng;
     use crate::huffman::{sv7_q3_ctx, Sv7BitReader};
+    use crate::reconstruct::{reconstruct_sv7_band_absolute, sv7_absolute_scf_gain};
+    use crate::requant::DEQUANT_COEFFICIENT_C;
     use crate::sv7_band_decode::SAMPLES_PER_BAND;
-    use crate::sv7_band_header::decode_res_header_grounded;
-    use crate::sv7_frame_decode::decode_sv7_frame_channel;
     use crate::sv7_stereo_frame::decode_sv7_stereo_frame;
 
-    fn q3_alphabet() -> Vec<i32> {
-        let mut v: Vec<i32> = sv7_q3_ctx(0).iter().map(|e| e.value as i32).collect();
-        v.dedup();
-        v
-    }
-
     fn q3_levels() -> [i32; SAMPLES_PER_BAND] {
-        let a = q3_alphabet();
+        let mut a: Vec<i32> = sv7_q3_ctx(0).iter().map(|e| e.value as i32).collect();
+        a.dedup();
         core::array::from_fn(|i| a[i % a.len()])
     }
 
-    /// Encode a stereo frame, then decode header + both channel bodies at
-    /// the BandLevels layer (the same reader the stereo decoder walks) and
-    /// assert res / SCF / levels round-trip for each channel.
+    fn coded(band_type: i8, ctx: usize, scf: [i32; 3]) -> Sv7EncBand {
+        Sv7EncBand::Coded {
+            band_type,
+            ctx,
+            scf,
+            levels: q3_levels(),
+        }
+    }
+
+    /// Encode a stereo frame, decode it back through the stereo frame
+    /// decoder, and check the M/S flags and each coded band's absolute
+    /// reconstruction (which pins band_type + SCF + levels together).
     fn assert_stereo_round_trips(
         left: &[Sv7EncBand],
         right: &[Sv7EncBand],
         ms_flags: &[bool],
         stream_ms: bool,
-        first_scf_ref: i32,
     ) {
         let mut w = Sv7BitWriter::new();
-        encode_sv7_stereo_frame(&mut w, left, right, ms_flags, stream_ms, first_scf_ref)
+        let mut enc_scf = Sv7ScfMemory::new();
+        encode_sv7_stereo_frame(&mut w, left, right, ms_flags, stream_ms, &mut enc_scf)
             .expect("encode");
         let mut bytes = w.finish();
         bytes.extend_from_slice(&[0, 0, 0, 0]);
 
         let max_band = (left.len() - 1) as u8;
         let mut r = Sv7BitReader::new(&bytes);
-        let header = decode_res_header_grounded(&mut r, max_band, 2, stream_ms).expect("hdr");
-        assert_eq!(header.len(), left.len());
-        for (i, band) in header.iter().enumerate() {
-            assert_eq!(band.res[0], left[i].res(), "band {i} left res");
-            assert_eq!(band.res[1], right[i].res(), "band {i} right res");
-            let has_samples = band.res[0] != 0 || band.res[1] != 0;
-            if stream_ms && has_samples {
-                assert_eq!(band.ms_flag, Some(ms_flags[i]), "band {i} ms");
-            } else {
-                assert_eq!(band.ms_flag, None, "band {i} ms absent");
-            }
-        }
-        let left_res: Vec<i8> = header.iter().map(|b| b.res[0]).collect();
-        let right_res: Vec<i8> = header.iter().map(|b| b.res[1]).collect();
-
-        // Left body then right body, sharing the PRNG (left-then-right).
         let mut cns = CnsPrng::new();
-        let ldec = decode_sv7_frame_channel(&mut r, &left_res, first_scf_ref, &mut cns).unwrap();
-        let rdec = decode_sv7_frame_channel(&mut r, &right_res, first_scf_ref, &mut cns).unwrap();
+        let mut dec_scf = Sv7ScfMemory::new();
+        let frame = decode_sv7_stereo_frame(&mut r, max_band, stream_ms, &mut dec_scf, &mut cns)
+            .expect("decode");
 
-        assert_channel(left, &ldec);
-        assert_channel(right, &rdec);
-    }
+        // The encoder's and decoder's SCF memories end identical.
+        assert_eq!(enc_scf, dec_scf, "SCF memory divergence");
 
-    fn assert_channel(spec: &[Sv7EncBand], decoded: &[crate::frame_reconstruct::BandLevels]) {
-        let mut di = 0;
-        for (subband, band) in spec.iter().enumerate() {
-            match band {
-                Sv7EncBand::Empty => {}
-                Sv7EncBand::Cns => {
-                    assert_eq!(decoded[di].subband, subband);
-                    assert_eq!(decoded[di].band_type, -1);
-                    di += 1;
-                }
-                Sv7EncBand::Coded {
-                    band_type,
-                    scf,
-                    levels,
-                    ..
-                } => {
-                    let rec = &decoded[di];
-                    di += 1;
-                    assert_eq!(rec.subband, subband);
-                    assert_eq!(rec.band_type, *band_type);
-                    assert_eq!(
-                        rec.granule_scf,
-                        [scf[0] as u32, scf[1] as u32, scf[2] as u32]
-                    );
-                    assert_eq!(rec.levels, *levels);
+        // Expected M/S flags: present only where a band has samples.
+        for (b, &ms) in ms_flags.iter().enumerate() {
+            let has = left[b].res() != 0 || right[b].res() != 0;
+            let want = stream_ms && has && ms;
+            assert_eq!(frame.ms_flags[b], want, "band {b} ms");
+        }
+
+        // Per-band reconstruction equality against a direct rebuild.
+        let mut ref_cns = CnsPrng::new();
+        for b in 0..left.len() {
+            for (ch, spec) in [&left[b], &right[b]].into_iter().enumerate() {
+                match spec {
+                    Sv7EncBand::Empty => {
+                        assert!(
+                            frame.channels[ch][b].iter().all(|&s| s == 0.0),
+                            "band {b} ch {ch} silent"
+                        );
+                    }
+                    Sv7EncBand::Cns { scf } => {
+                        let mut noise = [0i32; SAMPLES_PER_BAND];
+                        ref_cns.fill_samples(&mut noise);
+                        let mut want = [0.0; SAMPLES_PER_BAND];
+                        reconstruct_sv7_band_absolute(-1, &noise, *scf, &mut want).unwrap();
+                        assert_eq!(frame.channels[ch][b], want, "band {b} ch {ch} cns");
+                    }
+                    Sv7EncBand::Coded {
+                        band_type,
+                        scf,
+                        levels,
+                        ..
+                    } => {
+                        let mut want = [0.0; SAMPLES_PER_BAND];
+                        reconstruct_sv7_band_absolute(*band_type, levels, *scf, &mut want).unwrap();
+                        assert_eq!(frame.channels[ch][b], want, "band {b} ch {ch} coded");
+                    }
                 }
             }
         }
-        assert_eq!(di, decoded.len());
     }
 
     #[test]
     fn all_silent_stereo_frame_round_trips() {
-        assert_stereo_round_trips(
-            &[Sv7EncBand::Empty],
-            &[Sv7EncBand::Empty],
-            &[false],
-            false,
-            0,
-        );
+        assert_stereo_round_trips(&[Sv7EncBand::Empty], &[Sv7EncBand::Empty], &[false], false);
     }
 
     #[test]
     fn coded_both_channels_with_ms_flag_round_trips() {
-        let coded = |bt: i8| Sv7EncBand::Coded {
-            band_type: bt,
-            ctx: 0,
-            scf: [7, 7, 7],
-            levels: q3_levels(),
-        };
-        assert_stereo_round_trips(&[coded(3)], &[coded(3)], &[true], true, 5);
+        assert_stereo_round_trips(
+            &[coded(3, 0, [7, 7, 7])],
+            &[coded(3, 1, [9, 10, 9])],
+            &[true],
+            true,
+        );
     }
 
     #[test]
-    fn cns_threads_left_then_right_and_decodes_via_stereo_frame() {
-        // Both channels: band0 empty, band1 CNS. Encode, then run the
-        // full stereo decoder — its channels[1] rows must differ between
-        // the two channels because the shared PRNG advanced left→right.
-        let left = vec![Sv7EncBand::Empty, Sv7EncBand::Cns];
-        let right = vec![Sv7EncBand::Empty, Sv7EncBand::Cns];
-        let ms = vec![false, false];
-        assert_stereo_round_trips(&left, &right, &ms, false, 0);
+    fn cns_bands_carry_scf_and_thread_the_prng() {
+        // Both channels: band0 empty, band1 CNS with distinct SCF
+        // triples — the SCF layer is written/read for CNS and the PRNG
+        // advances left-then-right within the band.
+        let left = vec![Sv7EncBand::Empty, Sv7EncBand::Cns { scf: [5, 5, 5] }];
+        let right = vec![Sv7EncBand::Empty, Sv7EncBand::Cns { scf: [11, 12, 12] }];
+        assert_stereo_round_trips(&left, &right, &[false, false], false);
+    }
 
+    #[test]
+    fn cns_scf_gain_reaches_the_noise() {
+        // A CNS band's SCF triple scales the PRNG noise. (CNS lives at
+        // band 1 — the §5.1 band-0 raw 4-bit absolute cannot carry the
+        // value −1, only the delta chain reaches it.)
         let mut w = Sv7BitWriter::new();
-        encode_sv7_stereo_frame(&mut w, &left, &right, &ms, false, 0).unwrap();
+        let mut enc_scf = Sv7ScfMemory::new();
+        let left = vec![Sv7EncBand::Empty, Sv7EncBand::Cns { scf: [1, 1, 1] }];
+        let right = vec![Sv7EncBand::Empty, Sv7EncBand::Cns { scf: [20, 20, 20] }];
+        encode_sv7_stereo_frame(&mut w, &left, &right, &[false, false], false, &mut enc_scf)
+            .unwrap();
         let mut bytes = w.finish();
         bytes.extend_from_slice(&[0, 0, 0, 0]);
         let mut r = Sv7BitReader::new(&bytes);
         let mut cns = CnsPrng::new();
-        let frame = decode_sv7_stereo_frame(&mut r, 1, false, 0, 0, &mut cns).unwrap();
-        assert_eq!(frame.ms_flags, vec![false, false]);
-        // Subband-1 (CNS) rows differ between channels: PRNG advanced.
-        assert_ne!(frame.channels[0][1], frame.channels[1][1]);
+        let mut dec_scf = Sv7ScfMemory::new();
+        let frame = decode_sv7_stereo_frame(&mut r, 1, false, &mut dec_scf, &mut cns).unwrap();
+        // Rebuild the raw noise to compare gains sample-for-sample.
+        let mut ref_cns = CnsPrng::new();
+        let mut l_noise = [0i32; SAMPLES_PER_BAND];
+        ref_cns.fill_samples(&mut l_noise);
+        let c0 = DEQUANT_COEFFICIENT_C[0];
+        for (k, &n) in l_noise.iter().enumerate() {
+            let want = n as f64 * c0 * sv7_absolute_scf_gain(1);
+            assert!((frame.channels[0][1][k] - want).abs() < 1e-9, "{k}");
+        }
     }
 
     #[test]
     fn mixed_asymmetric_channels_round_trip() {
-        // Left: empty, coded(3), CNS. Right: coded(1), empty, coded(3).
         let g3: [i32; SAMPLES_PER_BAND] = core::array::from_fn(|i| (i as i32 % 3) - 1);
         let left = vec![
             Sv7EncBand::Empty,
-            Sv7EncBand::Coded {
-                band_type: 3,
-                ctx: 1,
-                scf: [10, 10, 10],
-                levels: q3_levels(),
-            },
-            Sv7EncBand::Cns,
+            coded(3, 1, [10, 10, 10]),
+            Sv7EncBand::Cns { scf: [30, 31, 32] },
         ];
         let right = vec![
             Sv7EncBand::Coded {
@@ -269,37 +289,45 @@ mod tests {
                 levels: g3,
             },
             Sv7EncBand::Empty,
-            Sv7EncBand::Coded {
-                band_type: 3,
-                ctx: 0,
-                scf: [15, 15, 15],
-                levels: q3_levels(),
-            },
+            coded(3, 0, [15, 15, 15]),
         ];
-        // Band 1: left coded (samples) — ms flag present; band 0: right
-        // coded — ms flag present; band 2: both nonzero — present.
-        let ms = vec![true, false, true];
-        assert_stereo_round_trips(&left, &right, &ms, true, 8);
+        assert_stereo_round_trips(&left, &right, &[true, false, true], true);
     }
 
     #[test]
     fn stream_ms_off_writes_no_flag_bits() {
-        // Even with non-zero bands, stream_ms=false emits no M/S bits, so
-        // the two channels' bodies pack tighter. Round-trip proves the
-        // alignment holds without the flag bits.
-        let coded = Sv7EncBand::Coded {
-            band_type: 3,
-            ctx: 0,
-            scf: [9, 9, 9],
-            levels: q3_levels(),
-        };
-        let chan = vec![coded];
-        assert_stereo_round_trips(&chan, &chan, &[true], false, 0);
+        let chan = vec![coded(3, 0, [9, 9, 9])];
+        assert_stereo_round_trips(&chan, &chan, &[true], false);
+    }
+
+    #[test]
+    fn scf_memory_threads_across_encoded_frames() {
+        // Two frames of the same coded band: frame 2's SCF[0] delta must
+        // ride on frame 1's SCF[2] via the shared memory (a fresh
+        // decoder memory reproduces both).
+        let mut w = Sv7BitWriter::new();
+        let mut enc_scf = Sv7ScfMemory::new();
+        let f1 = vec![coded(3, 0, [10, 10, 10])];
+        let f2 = vec![coded(3, 0, [12, 12, 12])];
+        encode_sv7_stereo_frame(&mut w, &f1, &f1, &[false], false, &mut enc_scf).unwrap();
+        encode_sv7_stereo_frame(&mut w, &f2, &f2, &[false], false, &mut enc_scf).unwrap();
+        let mut bytes = w.finish();
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+
+        let mut r = Sv7BitReader::new(&bytes);
+        let mut cns = CnsPrng::new();
+        let mut dec_scf = Sv7ScfMemory::new();
+        decode_sv7_stereo_frame(&mut r, 0, false, &mut dec_scf, &mut cns).unwrap();
+        assert_eq!(dec_scf.reference(0, 0), 10);
+        decode_sv7_stereo_frame(&mut r, 0, false, &mut dec_scf, &mut cns).unwrap();
+        assert_eq!(dec_scf.reference(0, 0), 12);
+        assert_eq!(enc_scf, dec_scf);
     }
 
     #[test]
     fn rejects_length_mismatch() {
         let mut w = Sv7BitWriter::new();
+        let mut scf = Sv7ScfMemory::new();
         assert!(matches!(
             encode_sv7_stereo_frame(
                 &mut w,
@@ -307,7 +335,7 @@ mod tests {
                 &[Sv7EncBand::Empty],
                 &[false, false],
                 false,
-                0,
+                &mut scf,
             ),
             Err(Error::MaxBandOutOfRange(_)),
         ));
@@ -318,8 +346,9 @@ mod tests {
         let big = vec![Sv7EncBand::Empty; 33];
         let ms = vec![false; 33];
         let mut w = Sv7BitWriter::new();
+        let mut scf = Sv7ScfMemory::new();
         assert!(matches!(
-            encode_sv7_stereo_frame(&mut w, &big, &big, &ms, false, 0),
+            encode_sv7_stereo_frame(&mut w, &big, &big, &ms, false, &mut scf),
             Err(Error::MaxBandOutOfRange(_)),
         ));
     }

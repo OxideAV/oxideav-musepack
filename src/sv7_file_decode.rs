@@ -1,43 +1,42 @@
 //! SV7 whole-stream (`.mpc` file) **decode** — raw bytes in, header +
-//! interleaved PCM out.
+//! interleaved PCM out, over the corpus-pinned wire layout.
 //!
-//! This is the SV7 counterpart of [`crate::sv8_decode`] and the missing
-//! integration layer above [`crate::sv7_stream::Sv7StreamDecoder`]: it
-//! owns the *whole-stream positioning* that the stream driver leaves to
-//! its caller.
-//!
-//! Layout walked (all grounded in
-//! `docs/audio/musepack/spec/musepack-headers-and-coding.md`):
+//! Layout walked (positions pinned by the `tests/fixtures/sv7/` corpus;
+//! see [`crate::sv7_file_encode`] for the writer's description):
 //!
 //! 1. **§1 fixed header** — parsed off the raw bytes
-//!    ([`crate::sv7_header::Sv7HeaderFields::parse`]): magic, the 17
-//!    fields, sanity gate.
+//!    ([`crate::sv7_header::Sv7HeaderFields::parse`]), bits 0–199.
 //! 2. **§4 word swap** — one 32-bit-LE-word byte-swap over the whole
 //!    stream (header and body share the word grid).
-//! 3. **§1.1 continuous audio bit run** — the frame bodies begin at the
-//!    first bit after header field 17 (bit 200 of the swapped stream;
-//!    §1 fixes the field span at 168 bits after the 4-byte prefix) and
-//!    run back-to-back with no per-frame length prefix. Exactly
-//!    `frame_count` (§1 field 1) frames are decoded.
-//! 4. **Gapless trim** — when the §1 true-gapless flag (field 13) is
+//! 3. **Per frame** — a 20-bit body bit-length prefix, then exactly
+//!    that many body bits. The decoder decodes each body with the
+//!    persistent [`crate::sv7_stream::Sv7StreamDecoder`] state and
+//!    **verifies** the consumed bit count against the prefix — a
+//!    mismatch means the parse diverged from the wire syntax and fails
+//!    loudly ([`crate::Error::FrameBitLengthMismatch`]) instead of
+//!    emitting garbage.
+//! 4. **11-bit trailer** — after the final body, the in-stream
+//!    last-frame valid-sample count. On a true-gapless stream it must
+//!    equal §1 header field 14
+//!    ([`crate::Error::LastFrameTrailerMismatch`] otherwise; every
+//!    corpus stream matches, including the literal `1152` full-frame
+//!    case).
+//! 5. **Ignored tail** — anything after the trailer (mppenc appends an
+//!    undeclared flush frame on some streams) is skipped.
+//! 6. **Gapless trim** — when the §1 true-gapless flag (field 13) is
 //!    set and the last-frame valid-sample count (field 14) is non-zero,
-//!    the final frame contributes only that many samples per channel
-//!    (`0` means a full 1152).
+//!    the final frame contributes only that many samples per channel.
 //!
-//! # Scope / standing gaps
-//!
-//! Decoding is exact for streams composed per
-//! [`crate::sv7_file_encode`] (round-trip proven in the tests). For
-//! externally-encoded files the body positioning follows the most direct
-//! reading of §1/§1.1 (the continuous run starts immediately after field
-//! 17), but no in-repo SV7 fixture corpus exists to cross-validate that
-//! byte-for-byte, and §1.1's in-stream 11-bit last-frame-sample read is
-//! not pinned to an exact bit position (this decoder uses header field
-//! 14, the quantity the parser surfaces). The absolute SCF anchor and
-//! the M/S-undo arithmetic remain the documented §2.6 DOCS-GAPs,
-//! threaded as the same `anchor` / `undo` knobs the stream driver takes.
+//! Output PCM is in the **signed-16-bit domain** (the corpus-pinned
+//! absolute reconstruction — see
+//! [`crate::reconstruct::sv7_absolute_scf_gain`]); use
+//! [`Sv7DecodedFile::pcm_s16`] for playback-ready samples. Against the
+//! FFmpeg `mpc7` oracle the decoded corpus streams match to within
+//! ±1 LSB on every sample (~75% bit-exact; the residue is the oracle's
+//! f32 DSP vs this crate's f64 synthesis).
 
 use crate::huffman::Sv7BitReader;
+use crate::sv7_file_encode::{SV7_FRAME_LENGTH_PREFIX_BITS, SV7_LAST_FRAME_TRAILER_BITS};
 use crate::sv7_header::{Sv7HeaderFields, SV7_SAMPLES_PER_FRAME};
 use crate::sv7_header_encode::SV7_HEADER_BITS;
 use crate::sv7_stream::Sv7StreamDecoder;
@@ -51,35 +50,46 @@ pub struct Sv7DecodedFile {
     pub header: Sv7HeaderFields,
     /// Frames decoded (equals `header.frame_count` on success).
     pub frames_decoded: u64,
+    /// The in-stream 11-bit last-frame trailer (`None` for a zero-frame
+    /// stream, which carries no trailer).
+    pub stream_last_frame_samples: Option<u16>,
     /// Interleaved stereo PCM, `L, R, …` — `2 ×` the per-channel total
-    /// after the gapless trim. Relative loudness (the absolute SCF
-    /// anchor is GAP).
+    /// after the gapless trim, in the signed-16-bit domain (`f64`
+    /// values; round + clamp via [`Self::pcm_s16`]).
     pub pcm: Vec<f64>,
 }
 
+impl Sv7DecodedFile {
+    /// The decoded PCM as interleaved `i16` samples: each value rounded
+    /// half-away-from-zero and clamped to the `i16` range.
+    #[must_use]
+    pub fn pcm_s16(&self) -> Vec<i16> {
+        self.pcm
+            .iter()
+            .map(|&v| v.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16)
+            .collect()
+    }
+}
+
 /// Decode a complete SV7 `.mpc` stream from `bytes`.
-///
-/// `anchor` is the §2.6 absolute-SCF-anchor GAP knob and `undo` the
-/// §2.6 M/S-undo arithmetic GAP closure — the same two knobs
-/// [`Sv7StreamDecoder`] threads (pass `0` and the identity-of-choice
-/// until the docs pin them).
 ///
 /// # Errors
 ///
 /// - [`Error::InvalidMagic`] / [`Error::UnsupportedVersion`] /
 ///   [`Error::MaxBandOutOfRange`] / [`Error::UnexpectedEof`] from the
 ///   §1 header parse.
-/// - [`Error::UnexpectedEof`] if the audio run ends before
-///   `frame_count` frames were decoded (truncated file).
+/// - [`Error::UnexpectedEof`] if the stream ends before the declared
+///   frame count's prefixes/bodies/trailer (truncated file).
 /// - [`Error::HeaderFieldOutOfRange`]`("last_frame_samples")` if the
 ///   header declares true-gapless with a last-frame sample count above
-///   the 1152-sample frame geometry (a count the frame cannot carry).
+///   the 1152-sample frame geometry.
+/// - [`Error::FrameBitLengthMismatch`] if a frame body consumed a
+///   different bit count than its 20-bit prefix declared.
+/// - [`Error::LastFrameTrailerMismatch`] if the 11-bit trailer
+///   disagrees with header field 14 on a true-gapless stream.
 /// - Any frame-body decode error (no-match VLC, out-of-range band-type
 ///   / SCFI, reader starvation mid-frame).
-pub fn decode_sv7_file<U>(bytes: &[u8], anchor: u8, undo: U) -> Result<Sv7DecodedFile>
-where
-    U: Fn(f64, f64) -> (f64, f64),
-{
+pub fn decode_sv7_file(bytes: &[u8]) -> Result<Sv7DecodedFile> {
     // 1. §1 fixed header off the raw bytes.
     let header = Sv7HeaderFields::parse(bytes)?;
 
@@ -92,35 +102,62 @@ where
 
     // 2. §4: one word-swap over the whole stream. Then append one word
     // of zero slack: the entropy decoder peeks 16 bits ahead of every
-    // VLC ([`Sv7BitReader::peek16`]), so a code that ends within the
-    // final 15 bits of the run would otherwise starve the lookahead.
-    // This is reader slack only (the frame loop is bounded by the §1
-    // frame count, so the pad bits are never decoded as data).
+    // VLC, so a code that ends within the final 15 bits of the run
+    // would otherwise starve the lookahead. This is reader slack only
+    // (the frame loop is bounded by the verified per-frame budgets, so
+    // the pad bits are never decoded as data).
     let mut swapped = crate::sv7_word_swap::word_swap_sv7_body(bytes);
     swapped.extend_from_slice(&[0u8; 4]);
     let mut reader = Sv7BitReader::new(&swapped);
+    let total_bits = reader.bits_remaining();
 
-    // 3. §1.1: the audio run starts at the first bit after field 17.
+    // 3. The framed audio run starts at the first bit after field 17.
     skip_bits(&mut reader, SV7_HEADER_BITS)?;
 
-    let mut decoder = Sv7StreamDecoder::from_header(&header, anchor, undo)?;
+    let mut decoder = Sv7StreamDecoder::from_header(&header)?;
     let frame_count = u64::from(header.frame_count);
-    let mut pcm = decoder.decode_frames(&mut reader, frame_count)?;
-    let frames_decoded = decoder.frames_decoded();
-    if frames_decoded < frame_count {
-        // The continuous run ran out before the declared frame count —
-        // a truncated file (the clean stop `decode_frames` allows is
-        // only clean for an open-ended caller; the header told us
-        // exactly how many frames to expect).
-        return Err(Error::UnexpectedEof);
+    let mut pcm = Vec::new();
+    for frame in 0..frame_count {
+        // 20-bit body bit-length prefix.
+        let hi = u32::from(reader.read_bits(16)?);
+        let lo = u32::from(reader.read_bits(SV7_FRAME_LENGTH_PREFIX_BITS - 16)?);
+        let declared = (hi << (SV7_FRAME_LENGTH_PREFIX_BITS - 16)) | lo;
+        let start = total_bits - reader.bits_remaining();
+        let frame_pcm = decoder.decode_frame(&mut reader)?;
+        let consumed = (total_bits - reader.bits_remaining() - start) as u32;
+        if consumed != declared {
+            return Err(Error::FrameBitLengthMismatch {
+                frame: frame as u32,
+                declared,
+                consumed,
+            });
+        }
+        pcm.extend_from_slice(&frame_pcm);
     }
+    let frames_decoded = decoder.frames_decoded();
 
-    // 4. §1 fields 13/14: gapless trim of the final frame.
+    // 4. The 11-bit last-frame trailer (absent on zero-frame streams).
+    let stream_last_frame_samples = if frame_count > 0 {
+        let trailer = reader.read_bits(SV7_LAST_FRAME_TRAILER_BITS)?;
+        if header.true_gapless && trailer != header.last_frame_samples {
+            return Err(Error::LastFrameTrailerMismatch {
+                header: header.last_frame_samples,
+                stream: trailer,
+            });
+        }
+        Some(trailer)
+    } else {
+        None
+    };
+    // 5. Anything after the trailer (flush frame, padding) is ignored.
+
+    // 6. §1 fields 13/14: gapless trim of the final frame.
     pcm.truncate((2 * header.effective_total_samples()) as usize);
 
     Ok(Sv7DecodedFile {
         header,
         frames_decoded,
+        stream_last_frame_samples,
         pcm,
     })
 }
@@ -140,15 +177,9 @@ mod tests {
     use super::*;
     use crate::huffman::sv7_q3_ctx;
     use crate::sv7_band_decode::SAMPLES_PER_BAND;
-    use crate::sv7_file_encode::{encode_sv7_file, Sv7EncStereoFrame};
+    use crate::sv7_file_encode::{encode_sv7_file, Sv7EncStereoFrame, Sv7FileWriter};
     use crate::sv7_frame_encode::Sv7EncBand;
     use crate::sv7_stream::STEREO_FRAME_PCM_LEN;
-
-    /// A representative test-only M/S undo (not a claim about the GAP
-    /// Musepack arithmetic).
-    fn test_undo(m: f64, s: f64) -> (f64, f64) {
-        (m + s, m - s)
-    }
 
     fn header(frame_count: u32, max_band: u8, mid_side: bool) -> Sv7HeaderFields {
         Sv7HeaderFields {
@@ -180,13 +211,29 @@ mod tests {
     fn busy_frames() -> Vec<Sv7EncStereoFrame> {
         vec![
             Sv7EncStereoFrame {
-                left: vec![coded(3, 7), Sv7EncBand::Cns, Sv7EncBand::Empty],
-                right: vec![coded(3, 9), Sv7EncBand::Empty, Sv7EncBand::Cns],
+                left: vec![
+                    coded(3, 7),
+                    Sv7EncBand::Cns { scf: [4, 4, 4] },
+                    Sv7EncBand::Empty,
+                ],
+                right: vec![
+                    coded(3, 9),
+                    Sv7EncBand::Empty,
+                    Sv7EncBand::Cns { scf: [6, 6, 6] },
+                ],
                 ms_flags: vec![true, false, false],
             },
             Sv7EncStereoFrame {
-                left: vec![Sv7EncBand::Empty, coded(3, 12), Sv7EncBand::Cns],
-                right: vec![coded(3, 5), Sv7EncBand::Cns, Sv7EncBand::Empty],
+                left: vec![
+                    Sv7EncBand::Empty,
+                    coded(3, 12),
+                    Sv7EncBand::Cns { scf: [5, 5, 5] },
+                ],
+                right: vec![
+                    coded(3, 5),
+                    Sv7EncBand::Cns { scf: [7, 7, 7] },
+                    Sv7EncBand::Empty,
+                ],
                 ms_flags: vec![false, true, true],
             },
         ]
@@ -196,35 +243,25 @@ mod tests {
     fn silent_file_round_trips() {
         let hdr = header(2, 4, false);
         let frames = vec![Sv7EncStereoFrame::silent(5); 2];
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &frames).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.header, hdr);
         assert_eq!(out.frames_decoded, 2);
+        assert_eq!(out.stream_last_frame_samples, Some(0));
         assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
         assert!(out.pcm.iter().all(|&s| s == 0.0));
+        assert!(out.pcm_s16().iter().all(|&s| s == 0));
     }
 
     #[test]
-    fn coded_file_round_trips_and_matches_stream_driver() {
+    fn coded_file_round_trips_and_verifies_every_prefix() {
         let hdr = header(2, 2, true);
-        let frames = busy_frames();
-        let anchor = 4u8;
-        let raw = encode_sv7_file(&hdr, &frames, anchor).unwrap();
-        let out = decode_sv7_file(&raw, anchor, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &busy_frames()).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.header, hdr);
         assert_eq!(out.frames_decoded, 2);
         assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
         assert!(out.pcm.iter().any(|&s| s != 0.0));
-
-        // Reference: the same file through the manual pipeline (swap +
-        // lookahead slack + skip 200 bits + stream driver).
-        let mut swapped = crate::sv7_word_swap::word_swap_sv7_body(&raw);
-        swapped.extend_from_slice(&[0u8; 4]);
-        let mut reader = Sv7BitReader::new(&swapped);
-        skip_bits(&mut reader, SV7_HEADER_BITS).unwrap();
-        let mut dec = Sv7StreamDecoder::from_header(&hdr, anchor, test_undo).unwrap();
-        let ref_pcm = dec.decode_frames(&mut reader, 2).unwrap();
-        assert_eq!(out.pcm, ref_pcm);
     }
 
     #[test]
@@ -233,9 +270,10 @@ mod tests {
         hdr.true_gapless = true;
         hdr.last_frame_samples = 500;
         let frames = vec![Sv7EncStereoFrame::silent(2); 3];
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &frames).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.frames_decoded, 3);
+        assert_eq!(out.stream_last_frame_samples, Some(500));
         assert_eq!(out.pcm.len(), 2 * (2 * 1152 + 500));
     }
 
@@ -245,8 +283,8 @@ mod tests {
         hdr.true_gapless = true;
         hdr.last_frame_samples = 0;
         let frames = vec![Sv7EncStereoFrame::silent(2); 2];
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &frames).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
     }
 
@@ -258,8 +296,8 @@ mod tests {
         hdr.true_gapless = false;
         hdr.last_frame_samples = 500;
         let frames = vec![Sv7EncStereoFrame::silent(2); 2];
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &frames).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
     }
 
@@ -269,13 +307,10 @@ mod tests {
         hdr.true_gapless = true;
         hdr.last_frame_samples = 1153;
         let frames = vec![Sv7EncStereoFrame::silent(2)];
-        // Encode with the trim gate bypassed: build the same header but
-        // with a legal count, then decode with the bad one patched in
-        // is not possible on immutable bytes — instead encode directly
-        // (the encoder validates only the 11-bit width, 1153 fits).
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
+        // The encoder validates only the 11-bit width, 1153 fits.
+        let raw = encode_sv7_file(&hdr, &frames).unwrap();
         assert_eq!(
-            decode_sv7_file(&raw, 0, test_undo),
+            decode_sv7_file(&raw),
             Err(Error::HeaderFieldOutOfRange("last_frame_samples")),
         );
     }
@@ -283,33 +318,57 @@ mod tests {
     #[test]
     fn truncated_file_is_unexpected_eof() {
         let hdr = header(2, 2, true);
-        let raw = encode_sv7_file(&hdr, &busy_frames(), 0).unwrap();
+        let raw = encode_sv7_file(&hdr, &busy_frames()).unwrap();
         // Cut the file mid-body (keep the header + a little).
         let cut = &raw[..32.min(raw.len())];
-        assert_eq!(
-            decode_sv7_file(cut, 0, test_undo),
-            Err(Error::UnexpectedEof),
-        );
+        assert_eq!(decode_sv7_file(cut), Err(Error::UnexpectedEof));
+    }
+
+    #[test]
+    fn corrupted_prefix_fails_loud_as_length_mismatch() {
+        let hdr = header(2, 2, true);
+        let raw = encode_sv7_file(&hdr, &busy_frames()).unwrap();
+        // Flip a low bit of frame 0's 20-bit prefix. The prefix occupies
+        // logical bits 200..220 — logical byte 27 holds bits 216..224,
+        // which lives at on-disk index 24 (word 6 reversed: 27 -> 24).
+        let mut bad = raw.clone();
+        bad[24] ^= 0x10;
+        match decode_sv7_file(&bad) {
+            Err(Error::FrameBitLengthMismatch { frame, .. }) => assert_eq!(frame, 0),
+            // Depending on the flip the body may starve first — also a
+            // loud failure, never silent garbage.
+            Err(Error::UnexpectedEof | Error::HuffmanNoMatch) => {}
+            other => panic!("expected loud failure, got {other:?}"),
+        }
     }
 
     #[test]
     fn bad_magic_is_rejected() {
         let hdr = header(1, 1, false);
-        let mut raw = encode_sv7_file(&hdr, &[Sv7EncStereoFrame::silent(2)], 0).unwrap();
+        let mut raw = encode_sv7_file(&hdr, &[Sv7EncStereoFrame::silent(2)]).unwrap();
         raw[0] ^= 0xFF;
-        assert_eq!(
-            decode_sv7_file(&raw, 0, test_undo),
-            Err(Error::InvalidMagic)
-        );
+        assert_eq!(decode_sv7_file(&raw), Err(Error::InvalidMagic));
     }
 
     #[test]
     fn zero_frame_file_decodes_to_empty_pcm() {
         let hdr = header(0, 5, false);
-        let raw = encode_sv7_file(&hdr, &[], 0).unwrap();
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let raw = encode_sv7_file(&hdr, &[]).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.frames_decoded, 0);
+        assert_eq!(out.stream_last_frame_samples, None);
         assert!(out.pcm.is_empty());
+    }
+
+    #[test]
+    fn trailing_bytes_after_trailer_are_ignored() {
+        // mppenc appends an undeclared flush frame after the trailer on
+        // some streams; any tail must be ignored.
+        let hdr = header(1, 1, false);
+        let mut raw = encode_sv7_file(&hdr, &[Sv7EncStereoFrame::silent(2)]).unwrap();
+        raw.extend_from_slice(&[0xAB; 64]);
+        let out = decode_sv7_file(&raw).unwrap();
+        assert_eq!(out.frames_decoded, 1);
     }
 
     /// Build one coded band for `band_type` with arm-valid levels:
@@ -366,7 +425,9 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &bt)| match bt {
-                -1 => Sv7EncBand::Cns,
+                -1 => Sv7EncBand::Cns {
+                    scf: scf_pattern(i),
+                },
                 0 => Sv7EncBand::Empty,
                 _ => band_for(bt, ctx, seed + i as i32, scf_pattern(i)),
             })
@@ -376,8 +437,8 @@ mod tests {
     /// Every §5.4 band-type arm (CNS −1, empty 0, grouped 1/2,
     /// per-sample Huffman 3..=7 on both contexts, the full PCM-escape
     /// ladder 8..=17), all four SCFI sharing cases, and per-band M/S
-    /// flags — through the whole-file writer and decoder, PCM-equal to
-    /// the manually-positioned stream-driver reference.
+    /// flags — through the whole-file writer and decoder with every
+    /// frame's 20-bit budget verified.
     #[test]
     fn every_band_type_arm_survives_the_file_layer() {
         // 19 bands: two walks that each visit every band type exactly
@@ -396,7 +457,7 @@ mod tests {
         let ms_flags: Vec<bool> = (0..ladder.len()).map(|i| i % 2 == 0).collect();
 
         // Second frame rotates the walks so band/type pairings (and the
-        // cross-band SCF threading) differ across frames; the rotation
+        // per-band SCF memory) differ across frames; the rotation
         // introduces one large negative jump that exercises the §5.1
         // raw-absolute escape (17 → 3 and 17 → 7, both within 0..=15).
         let mut rotated = ladder.clone();
@@ -417,33 +478,22 @@ mod tests {
             },
         ];
         let hdr = header(2, max_band, true);
-        let anchor = 2u8;
 
-        let raw = encode_sv7_file(&hdr, &frames, anchor).expect("encode");
+        let raw = encode_sv7_file(&hdr, &frames).expect("encode");
         // Determinism: the composer is a pure function of its inputs.
-        assert_eq!(raw, encode_sv7_file(&hdr, &frames, anchor).unwrap());
+        assert_eq!(raw, encode_sv7_file(&hdr, &frames).unwrap());
 
-        let out = decode_sv7_file(&raw, anchor, test_undo).expect("decode");
+        let out = decode_sv7_file(&raw).expect("decode");
         assert_eq!(out.header, hdr);
         assert_eq!(out.frames_decoded, 2);
         assert_eq!(out.pcm.len(), 2 * STEREO_FRAME_PCM_LEN);
         assert!(out.pcm.iter().any(|&s| s != 0.0));
-
-        // Reference: manual §4-swap + slack + 200-bit skip + driver.
-        let mut swapped = crate::sv7_word_swap::word_swap_sv7_body(&raw);
-        swapped.extend_from_slice(&[0u8; 4]);
-        let mut reader = Sv7BitReader::new(&swapped);
-        skip_bits(&mut reader, SV7_HEADER_BITS).unwrap();
-        let mut dec = Sv7StreamDecoder::from_header(&hdr, anchor, test_undo).unwrap();
-        let ref_pcm = dec.decode_frames(&mut reader, 2).unwrap();
-        assert_eq!(out.pcm, ref_pcm);
     }
 
     /// The incremental builder path produces the same decoded stream as
     /// the one-shot for the all-arm corpus (positioning + gapless).
     #[test]
     fn builder_all_arm_file_decodes_with_gapless_trim() {
-        use crate::sv7_file_encode::Sv7FileWriter;
         let ladder: Vec<i8> = vec![
             3, -1, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
         ];
@@ -453,34 +503,46 @@ mod tests {
             right: ladder_channel(&ladder, 1, 2),
             ms_flags: vec![false; ladder.len()],
         };
-        let mut w = Sv7FileWriter::new(header(0, max_band, false), 0).unwrap();
+        let mut w = Sv7FileWriter::new(header(0, max_band, false)).unwrap();
         w.push_frame(&frame).unwrap();
         w.push_frame(&frame).unwrap();
         let raw = w.finish_gapless(700).unwrap();
 
-        let out = decode_sv7_file(&raw, 0, test_undo).unwrap();
+        let out = decode_sv7_file(&raw).unwrap();
         assert_eq!(out.frames_decoded, 2);
         assert!(out.header.true_gapless);
+        assert_eq!(out.stream_last_frame_samples, Some(700));
         assert_eq!(out.header.effective_total_samples(), 1152 + 700);
         assert_eq!(out.pcm.len(), 2 * (1152 + 700));
         assert!(out.pcm.iter().any(|&s| s != 0.0));
     }
 
     #[test]
-    fn ms_undo_closure_reaches_the_output() {
-        // The same M/S-flagged file decoded under two different undo
-        // closures must differ — proof the closure is applied to the
-        // file-level path.
-        let hdr = header(1, 1, true);
-        let frames = vec![Sv7EncStereoFrame {
-            left: vec![coded(3, 20), Sv7EncBand::Empty],
-            right: vec![coded(3, 6), Sv7EncBand::Empty],
-            ms_flags: vec![true, false],
-        }];
-        let raw = encode_sv7_file(&hdr, &frames, 0).unwrap();
-        let a = decode_sv7_file(&raw, 0, test_undo).unwrap();
-        let b = decode_sv7_file(&raw, 0, |m, s| (m, s)).unwrap();
-        assert_eq!(a.header, b.header);
-        assert_ne!(a.pcm, b.pcm);
+    fn ms_flagged_file_differs_from_unflagged() {
+        // The same band data with and without the M/S flag must decode
+        // differently — proof the pinned undo is applied at file level.
+        let mk = |ms: bool| {
+            let hdr = header(1, 1, true);
+            let frames = vec![Sv7EncStereoFrame {
+                left: vec![coded(3, 20), Sv7EncBand::Empty],
+                right: vec![coded(3, 6), Sv7EncBand::Empty],
+                ms_flags: vec![ms, false],
+            }];
+            decode_sv7_file(&encode_sv7_file(&hdr, &frames).unwrap()).unwrap()
+        };
+        let with_ms = mk(true);
+        let without = mk(false);
+        assert_ne!(with_ms.pcm, without.pcm);
+    }
+
+    #[test]
+    fn pcm_s16_rounds_and_clamps() {
+        let file = Sv7DecodedFile {
+            header: header(0, 1, false),
+            frames_decoded: 0,
+            stream_last_frame_samples: None,
+            pcm: vec![0.4, -0.5, 100_000.0, -100_000.0, 32767.4, -32768.4],
+        };
+        assert_eq!(file.pcm_s16(), vec![0, -1, 32767, -32768, 32767, -32768]);
     }
 }

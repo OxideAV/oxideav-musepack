@@ -6,12 +6,19 @@
 //! That model leaves three things open that the staged
 //! `spec/musepack-headers-and-coding.md` **§5.3** now pins exactly:
 //!
-//! 1. **The reference for `SCF[0]`.** §5.3: "The reference for `SCF[0]`
-//!    is the previous band's `SCF[2]`; within a band each later index
-//!    deltas off the previous one." So the per-band base anchor is *not*
-//!    a free caller knob — it is the previously-decoded band's third
-//!    scalefactor (the first band of a channel deltas off a documented
-//!    starting reference; see [`decode_sv7_band_scf`]).
+//! 1. **The reference for `SCF[0]`.** §5.3 states "The reference for
+//!    `SCF[0]` is the previous band's `SCF[2]`; within a band each later
+//!    index deltas off the previous one." The **fixture corpus corrects
+//!    the first half**: on real mppenc streams the `SCF[0]` reference is
+//!    the *same subband's* `SCF[2]` from the **previous frame** (per-band
+//!    per-channel memory, 0 before the first frame), not the previous
+//!    band of the same frame — the within-frame cross-band chain decodes
+//!    every corpus stream to the wrong PCM, while per-band memory
+//!    reproduces the FFmpeg oracle to ±1 LSB (see
+//!    [`crate::sv7_stereo_frame::Sv7ScfMemory`]). The within-band
+//!    chaining (`SCF[1]` off `SCF[0]`, `SCF[2]` off `SCF[1]`) is as
+//!    stated. This module takes the reference as a parameter either way;
+//!    the whole-file layers thread the corpus-pinned memory.
 //!
 //! 2. **The exact SCFI → coded/shared pattern.** §5.3 spells out the
 //!    four SCFI cases cell-for-cell, and this differs from the Layer-II
@@ -160,11 +167,58 @@ pub fn decode_sv7_band_scf(
     reader: &mut Sv7BitReader<'_>,
     prev_band_scf2: i32,
 ) -> Result<Sv7BandScf> {
+    let scfi = decode_sv7_scfi(reader)?;
+    decode_sv7_band_dscf(reader, scfi, prev_band_scf2)
+}
+
+/// Read one §5.2 SCFI selector VLC (`sv7-huffman-scfi`) and validate it
+/// into the structural `0..=3` range.
+///
+/// Exposed separately from [`decode_sv7_band_scf`] because the SV7 frame
+/// body lays the SCFI selectors and the DSCF deltas out as **two
+/// separate passes** over the bands (fixture-corpus-pinned; see
+/// [`crate::sv7_stereo_frame`]): all SCFI selectors for every non-zero
+/// band of both channels are read first, then every band's DSCF chain.
+///
+/// # Errors
+///
+/// - [`Error::InvalidScfCodingMethod`] if the VLC decodes outside `0..=3`
+///   (unreachable for the staged table; defensive bound).
+/// - [`Error::UnexpectedEof`] / [`Error::HuffmanNoMatch`] from the read.
+pub fn decode_sv7_scfi(reader: &mut Sv7BitReader<'_>) -> Result<u8> {
     let scfi_raw = huffman_decode(reader, &SV7_SCFI_TABLE)?;
     if !(0..=3).contains(&scfi_raw) {
         return Err(Error::InvalidScfCodingMethod(scfi_raw));
     }
-    let scfi = scfi_raw as u8;
+    Ok(scfi_raw as u8)
+}
+
+/// Decode one band's DSCF chain (the §5.3 per-index deltas) given an
+/// already-read SCFI selector — the second half of
+/// [`decode_sv7_band_scf`], exposed for the two-pass frame-body layout
+/// (see [`decode_sv7_scfi`]).
+///
+/// `reference` is this band's `SCF[0]` delta reference. The whole-file
+/// convention is **per-band, per-channel memory**: the same subband's
+/// `SCF[2]` from the previous frame (0 before the first frame) — the
+/// fixture corpus pins this against the alternatives (a cross-band
+/// within-frame chain decodes to the wrong PCM on every corpus stream;
+/// per-band memory reproduces the oracle).
+///
+/// # Errors
+///
+/// - [`Error::InvalidScfCodingMethod`] for `scfi > 3`.
+/// - [`Error::UnexpectedEof`] / [`Error::HuffmanNoMatch`] from a DSCF
+///   read.
+pub fn decode_sv7_band_dscf(
+    reader: &mut Sv7BitReader<'_>,
+    scfi: u8,
+    reference: i32,
+) -> Result<Sv7BandScf> {
+    if scfi > 3 {
+        return Err(Error::InvalidScfCodingMethod(scfi as i8));
+    }
+    let prev_band_scf2 = reference;
 
     // SCF[0]: always coded, delta off the previous band's SCF[2].
     let scf0 = read_scf_index(reader, prev_band_scf2)?;

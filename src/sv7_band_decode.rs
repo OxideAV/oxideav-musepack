@@ -157,6 +157,17 @@ pub const fn band_type_case(band_type: i8) -> BandDecodeCase {
     }
 }
 
+/// True iff a `band_type`'s §5.4 sample decode is preceded by the 1-bit
+/// context selector: the grouped (`1` / `2`) and per-sample Huffman
+/// (`3..=7`) cases. The CNS (`-1`), empty (`0`), and linear-PCM-escape
+/// (`8..=17`) cases read no selector.
+pub const fn band_type_uses_context_selector(band_type: i8) -> bool {
+    matches!(
+        band_type_case(band_type),
+        BandDecodeCase::Grouped3 | BandDecodeCase::Grouped2 | BandDecodeCase::HuffmanPerSample
+    )
+}
+
 /// Fill 36 zero samples (case 0, "empty band").
 #[inline]
 pub fn fill_zero_band(out: &mut [i32; SAMPLES_PER_BAND]) {
