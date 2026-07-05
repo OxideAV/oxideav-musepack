@@ -40,7 +40,10 @@ Result: all four corpus streams decode end-to-end with every one of
 their 72 frames bit-budget-exact and PCM within **±1 LSB of the FFmpeg
 oracle** (~75–88 % bit-exact; the residue is the oracle's f32 DSP vs
 this crate's f64 synthesis) — pinned as CI conformance gates
-(`tests/sv7_corpus.rs`). The decoder is wired into the
+(`tests/sv7_corpus.rs`). The **encode side is wire-symmetric with
+mppenc itself**: re-encoding the parsed structure of the corpus frames
+reproduces the reference encoder's bytes exactly
+(`tests/sv7_corpus_reencode.rs`). The decoder is wired into the
 **`oxideav-core` registry** (`registry::register` /
 `oxideav_core::register!`) with a directly-callable
 `registry::make_decoder` factory. The SV8 grounded subset (mono,

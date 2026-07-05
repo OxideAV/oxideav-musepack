@@ -58,7 +58,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Corpus CI gates:** all four fixtures decode with every frame
     budget-exact, trailer matched, gapless-trimmed lengths exact, and
     PCM within **±1 LSB of the FFmpeg oracle** (≥ 70 % bit-exact
-    gate; actual 75–88 %).
+    gate; actual 75–88 %); mppenc's undeclared post-trailer flush
+    frame is itself decoded budget-exact (and ignored by the file
+    layer).
+  - **Encoder wire symmetry** (`tests/sv7_corpus_reencode.rs`):
+    re-encoding the parsed structure of every corpus frame with the
+    crate's writer reproduces mppenc 1.16's bytes **exactly** (three
+    fixtures in full; the flush-frame fixture through the trailer
+    word) — the SCFI selection, DSCF delta/escape, header
+    delta/escape, prefix/trailer, and word-swap rules all coincide
+    with the independent reference encoder on real streams.
   - **`oxideav-core` registry integration** (`registry`): a
     whole-stream `Decoder` impl (packet accumulation, S16 interleaved
     1152-sample frames, `DecoderLimits`-capped input, `reset`), the
