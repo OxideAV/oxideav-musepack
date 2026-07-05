@@ -256,6 +256,7 @@ pub mod mpc_decode;
 pub mod ms_stereo;
 pub mod packet_stream;
 pub mod reconstruct;
+pub mod registry;
 pub mod requant;
 pub mod rg_header;
 pub mod scf;
@@ -503,6 +504,11 @@ impl std::error::Error for Error {}
 
 /// Crate-local `Result` alias.
 pub type Result<T> = core::result::Result<T, Error>;
+
+// The `oxideav_core::register!` invocation lives in [`registry`];
+// re-export the generated entry point at the crate root, where
+// `oxideav-meta`'s generated `register_all` expects it.
+pub use registry::__oxideav_entry;
 
 #[cfg(test)]
 mod tests {
