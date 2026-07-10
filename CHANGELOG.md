@@ -51,6 +51,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     uses a different noise generator, so the noise is gated
     statistically and the ±1 LSB corpus gate excludes this fixture
     (documented in the test module).
+
+### Changed
+
+- **Round 405** — **doc-truth sync with the staged docs round**
+  (`0f1b6a2`): the r390 empirical wire facts are now spec text — §1.1
+  documents the 20-bit per-frame prefix, the four band-major passes,
+  and the 11-bit trailer; erratum **E1**
+  (`docs/audio/musepack/musepack-errata.md`) records the temporal
+  `SCF[0]` predictor (same band's previous-frame `SCF[2]`). Module
+  docs (`sv7_scf_decode`, `sv7_scf_encode`, `sv7_stereo_frame`,
+  `sv7_file_encode`, `reconstruct`, crate root) now cite §1.1/E1 as
+  source-of-record instead of describing the spec as mis-stated, the
+  r390 "CNS-SCF participation corpus-unvalidated" caveats point at the
+  new fixture gates, and the outdated `prev_band_scf2` parameter /
+  test naming is renamed to the reference/temporal wording (no caller
+  impact — positional parameters only).
  — **external SV7 validation + corpus-pinned wire
   corrections + registry integration.** The SV7 fixture corpus staged
   at `docs/audio/musepack/fixtures/` (docs commit `af1b888`: four

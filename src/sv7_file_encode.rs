@@ -2,11 +2,12 @@
 //! corpus-pinned per-frame framing, and the 11-bit stream trailer
 //! composed into one raw byte buffer.
 //!
-//! # The corpus-pinned wire layout
+//! # The wire layout (§1.1, corpus-verified)
 //!
-//! The SV7 fixture corpus (`tests/fixtures/sv7/`; four independent
-//! mppenc 1.16 streams) pins the whole-file layout that the staged
-//! §1.1 prose left open:
+//! The staged §1.1 (framing corrections, docs commit `0f1b6a2`)
+//! documents the whole-file layout, originally pinned by the SV7
+//! fixture corpus (`tests/fixtures/sv7/`; independent mppenc 1.16
+//! streams):
 //!
 //! 1. **bits 0–199** — the §1 fixed header
 //!    ([`crate::sv7_header_encode`]);
@@ -33,9 +34,9 @@
 //! its per-frame bit-budget verification.
 //!
 //! Source-of-record: `docs/audio/musepack/spec/musepack-headers-and-coding.md`
-//! §1 (header fields), §1.1 (the 20-bit per-frame length prefix + the
-//! in-stream 11-bit last-frame field, positions corpus-pinned), §4
-//! (word swap), §5 (frame bodies).
+//! §1 (header fields), §1.1 (the 20-bit per-frame length prefix, the
+//! band-major pass order, and the in-stream 11-bit last-frame
+//! trailer), §4 (word swap), §5 (frame bodies).
 
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_frame_encode::Sv7EncBand;

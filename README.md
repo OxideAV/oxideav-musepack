@@ -51,6 +51,30 @@ keyframe `AP`) still decodes at relative loudness — no SV8 corpus
 exists yet. ~670 lib tests + the corpus integration gates; remaining
 gaps tracked in `CHANGELOG.md` `[Unreleased]`.
 
+**Round 405: CNS / PNS validated on the wire.** The freshly staged
+`cns-pns` fixture (mppenc 1.16 `--pns 1.0`; 215 noise-band instances
+across 18 of 20 frames) exercises Clear Noise Substitution for the
+first time. All 20 frames decode **bit-budget-exact**, proving the
+r390 convention that `Res == -1` bands take part in the SCFI + DSCF
+scalefactor passes (spec §5.2/§5.3 + erratum E1) while reading zero
+sample-pass bits; frame 0 (CNS-free) matches the FFmpeg oracle within
+±1 LSB, and the stream-level **PNS flag in the version byte**
+(`MP+ 0x17`) is parsed/encoded end-to-end
+(`Sv7HeaderFields::pns`). The noise-bearing frames are gated
+**statistically** (global corr 0.776, `tests/sv7_cns_corpus.rs`): the
+oracle's noise *waveform* is not reproducible from the staged
+generator facts — matched-filter searches over the staged two-LFSR
+stream (30 000 offsets × strides × groupings × reset hypotheses) find
+nothing above the noise floor while self-validation spikes at the true
+offset, and the oracle's noise residual is ~2× the staged
+`C[0]`-scaled amplitude — so a per-sample noise comparison needs a
+staged oracle whose CNS generator matches the spec's (reported as a
+docs gap). The staged docs round (`0f1b6a2`) also folded the r390
+empirical wire facts into the spec itself: §1.1 now documents the
+20-bit prefix / four band-major passes / 11-bit trailer, and erratum
+E1 records the temporal `SCF[0]` predictor — module docs now cite
+those sections as source-of-record.
+
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
 every decode path bit-for-bit against the readers/decoders already in

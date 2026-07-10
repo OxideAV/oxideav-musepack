@@ -8,18 +8,17 @@
 //! ([`crate::ms_stereo::undo_ms_stereo_pinned`]) and the synthesis
 //! filterbank consume.
 //!
-//! # Phase ordering — pinned by the fixture corpus
+//! # Phase ordering — four band-major passes
 //!
-//! The staged `spec/musepack-headers-and-coding.md` §5 lists the frame
-//! layers (§5.1 `Res` header, §5.2 SCFI, §5.3 DSCF, §5.4 samples) and
-//! closes §5.3/§5.4 with *"Left channel is decoded first, then right."*
-//! Before round 390 this crate read that as one whole-channel sweep
-//! (the left channel's complete SCF+samples body, then the right's).
-//! The SV7 fixture corpus (`tests/fixtures/sv7/`, four independent
-//! mppenc 1.16 streams whose per-frame 20-bit bit-length prefixes give
-//! an exact per-frame bit budget) disproves that layout and pins the
-//! real one — **four sequential passes over the bands, channel-minor
-//! within each band**:
+//! The staged `spec/musepack-headers-and-coding.md` §1.1(b) (framing
+//! corrections, docs commit `0f1b6a2`) documents the frame body as
+//! **four sequential band-major passes, channel-minor within each
+//! band** — the layout this crate pinned in round 390 with the SV7
+//! fixture corpus (`tests/fixtures/sv7/`, independent mppenc 1.16
+//! streams whose per-frame 20-bit bit-length prefixes give an exact
+//! per-frame bit budget; every alternative — whole-channel sweeps,
+//! combined SCFI+DSCF pass, channel-major passes — diverges on most
+//! frames):
 //!
 //! 1. **§5.1 `Res` header** — both channels interleaved per band plus
 //!    the per-band M/S bit
@@ -35,32 +34,34 @@
 //!    grouped / per-sample-Huffman arms), CNS bands filling from the
 //!    shared PRNG.
 //!
-//! Under this layout every one of the corpus's 72 frames consumes
-//! **exactly** its declared 20-bit prefix bit count; every alternative
-//! tried (whole-channel sweeps, combined SCFI+DSCF pass, channel-major
-//! passes) diverges on most frames.
+//! Under this layout every corpus frame — including all 20 frames of
+//! the CNS-bearing `cns-pns` fixture — consumes **exactly** its
+//! declared 20-bit prefix bit count.
 //!
 //! # The SCF[0] reference — per-band memory across frames
 //!
-//! The corpus also pins the `SCF[0]` delta reference (previously GAP,
-//! and mis-stated by the staged §5.3 — see [`crate::sv7_scf_decode`]):
-//! it is the **same subband's `SCF[2]` from the previous frame**, held
-//! per channel ([`Sv7ScfMemory`], zero-initialised at stream start),
-//! not the previous band of the same frame. With per-band memory the
-//! decoded PCM matches the FFmpeg oracle to ±1 LSB on every corpus
-//! stream; the within-frame chain produces correlation ≈ 0.2.
+//! The `SCF[0]` delta reference is the **same subband's `SCF[2]` from
+//! the previous frame**, held per channel ([`Sv7ScfMemory`],
+//! zero-initialised at stream start), not the previous band of the
+//! same frame — §5.3 as corrected by erratum **E1**
+//! (`docs/audio/musepack/musepack-errata.md`), which this crate's r390
+//! corpus work surfaced: with per-band temporal memory the decoded PCM
+//! matches the FFmpeg oracle to ±1 LSB on every corpus stream, while
+//! the within-frame chain produces correlation ≈ 0.2.
 //!
-//! # CNS bands carry the SCF layer
+//! # CNS bands carry the SCF layer — wire-proven
 //!
 //! §5.2 reads SCFI "for each channel whose `Res ≠ 0`" — which includes
 //! the CNS band (`Res == -1`) — and the structural spec says the noise
 //! band is "scaled by the band's scalefactor"
 //! (`musepack-sv7-sv8-spec.md` §2.5 notes). This module therefore reads
-//! SCFI + DSCF for CNS bands exactly like coded bands. The corpus
-//! cannot cross-check this (none of its streams code a CNS band); if
-//! the convention is wrong on real CNS streams, the whole-file layer's
-//! per-frame bit-budget verification fails loudly rather than decoding
-//! garbage.
+//! SCFI + DSCF for CNS bands exactly like coded bands. The `cns-pns`
+//! fixture (`tests/sv7_cns_corpus.rs`; 215 CNS band-instances across
+//! 18 frames) proves the convention on a real mppenc PNS stream: every
+//! frame decodes exactly on its 20-bit bit budget, which is only
+//! possible if CNS bands take part in both scalefactor passes and read
+//! zero sample-pass bits. (The oracle's noise *waveform* is not
+//! comparable — see the fixture suite docs.)
 //!
 //! # Reconstruction — the corpus-pinned absolute law
 //!
@@ -71,11 +72,11 @@
 //! anchor, resolved empirically — see [`crate::reconstruct`]).
 //!
 //! Source-of-record: `docs/audio/musepack/spec/musepack-headers-and-coding.md`
-//! §5.1–§5.5 (layer structure, VLC tables, arms) +
-//! `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.5/§2.6, with the
-//! layout facts the staged material left open (pass order, SCF[0]
-//! reference, absolute gain) pinned black-box by the
-//! `tests/fixtures/sv7/` corpus.
+//! §1.1 (pass order) + §5.1–§5.5 (layer structure, VLC tables, arms)
+//! with erratum E1 (`SCF[0]` reference), +
+//! `docs/audio/musepack/musepack-sv7-sv8-spec.md` §2.5/§2.6; the
+//! absolute gain anchor remains corpus-pinned
+//! (`tests/fixtures/sv7/`).
 
 use crate::cns::CnsPrng;
 use crate::frame_reconstruct::zero_subband_matrix;

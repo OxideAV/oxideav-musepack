@@ -91,8 +91,9 @@
 //!   distinct from the simpler [`scf`] Layer-II-schedule path.
 //!   [`sv7_scf_decode::decode_sv7_band_scf`] reads the SCFI selector then
 //!   `1..=3` DSCF indices where `SCF[0]` is always coded (Δ vs the
-//!   *previous band's* `SCF[2]`, threaded via
-//!   [`sv7_scf_decode::Sv7BandScf::last_index`]) and `SCF[1]`/`SCF[2]`
+//!   *same band's previous-frame* `SCF[2]` per §5.3/erratum E1, threaded
+//!   via [`sv7_scf_decode::Sv7BandScf::last_index`] /
+//!   [`sv7_stereo_frame::Sv7ScfMemory`]) and `SCF[1]`/`SCF[2]`
 //!   are each coded-off-the-preceding-index or copied per the §5.3 table.
 //!   The §5.3 `idx == 8` raw-6-bit absolute escape
 //!   ([`sv7_scf_decode::DSCF_ESCAPE_SYMBOL`]) applies to every coded

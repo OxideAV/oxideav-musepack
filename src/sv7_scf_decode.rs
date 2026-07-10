@@ -6,19 +6,20 @@
 //! That model leaves three things open that the staged
 //! `spec/musepack-headers-and-coding.md` **§5.3** now pins exactly:
 //!
-//! 1. **The reference for `SCF[0]`.** §5.3 states "The reference for
-//!    `SCF[0]` is the previous band's `SCF[2]`; within a band each later
-//!    index deltas off the previous one." The **fixture corpus corrects
-//!    the first half**: on real mppenc streams the `SCF[0]` reference is
-//!    the *same subband's* `SCF[2]` from the **previous frame** (per-band
-//!    per-channel memory, 0 before the first frame), not the previous
-//!    band of the same frame — the within-frame cross-band chain decodes
-//!    every corpus stream to the wrong PCM, while per-band memory
-//!    reproduces the FFmpeg oracle to ±1 LSB (see
-//!    [`crate::sv7_stereo_frame::Sv7ScfMemory`]). The within-band
-//!    chaining (`SCF[1]` off `SCF[0]`, `SCF[2]` off `SCF[1]`) is as
-//!    stated. This module takes the reference as a parameter either way;
-//!    the whole-file layers thread the corpus-pinned memory.
+//! 1. **The reference for `SCF[0]`.** §5.3 (as corrected by erratum
+//!    **E1**, `docs/audio/musepack/musepack-errata.md`): the `SCF[0]`
+//!    reference is the **same subband's `SCF[2]` from the previous
+//!    frame** — a temporal per-band, per-channel predictor (0 before
+//!    the first frame; see
+//!    [`crate::sv7_stereo_frame::Sv7ScfMemory`]) — not the previous
+//!    band of the same frame, as an earlier draft of §5.3 mis-stated.
+//!    This crate's r390 fixture-corpus work surfaced the erratum: the
+//!    within-frame cross-band chain decodes every corpus stream to the
+//!    wrong PCM, while per-band temporal memory reproduces the FFmpeg
+//!    oracle to ±1 LSB. The within-band chaining (`SCF[1]` off
+//!    `SCF[0]`, `SCF[2]` off `SCF[1]`) is unchanged. This module takes
+//!    the reference as a parameter; the whole-file layers thread the
+//!    per-band memory.
 //!
 //! 2. **The exact SCFI → coded/shared pattern.** §5.3 spells out the
 //!    four SCFI cases cell-for-cell, and this differs from the Layer-II
@@ -26,10 +27,10 @@
 //!
 //!    | SCFI | `SCF[0]` | `SCF[1]` | `SCF[2]` |
 //!    |-----:|----------|----------|----------|
-//!    | 0 | coded (Δ vs prev band `SCF[2]`) | coded (Δ vs `SCF[0]`) | coded (Δ vs `SCF[1]`) |
-//!    | 1 | coded (Δ vs prev band `SCF[2]`) | coded (Δ vs `SCF[0]`) | = `SCF[1]` |
-//!    | 2 | coded (Δ vs prev band `SCF[2]`) | = `SCF[0]` | coded (Δ vs `SCF[1]`) |
-//!    | 3 | coded (Δ vs prev band `SCF[2]`) | = `SCF[0]` | = `SCF[1]` |
+//!    | 0 | coded (Δ vs this band's prev-frame `SCF[2]`) | coded (Δ vs `SCF[0]`) | coded (Δ vs `SCF[1]`) |
+//!    | 1 | coded (Δ vs this band's prev-frame `SCF[2]`) | coded (Δ vs `SCF[0]`) | = `SCF[1]` |
+//!    | 2 | coded (Δ vs this band's prev-frame `SCF[2]`) | = `SCF[0]` | coded (Δ vs `SCF[1]`) |
+//!    | 3 | coded (Δ vs this band's prev-frame `SCF[2]`) | = `SCF[0]` | = `SCF[1]` |
 //!
 //!    In every case `SCF[0]` is independently coded; the SCFI value only
 //!    decides whether `SCF[1]` / `SCF[2]` are independently coded or
@@ -47,9 +48,9 @@
 //!    The staged `sv7-huffman-dscf` table carries the literal value `8`
 //!    (`0xc000,4,8`), so the escape is reachable from a real bitstream.
 //!
-//! `SCF[0]`'s delta-vs-prev-band-`SCF[2]` is also subject to the escape:
-//! the first coded index of a band uses the same DSCF read, so an `8`
-//! there likewise switches to a raw 6-bit absolute.
+//! `SCF[0]`'s delta off the temporal reference is also subject to the
+//! escape: the first coded index of a band uses the same DSCF read, so
+//! an `8` there likewise switches to a raw 6-bit absolute.
 //!
 //! ## Clamp
 //!
@@ -63,7 +64,8 @@
 //! ## Source-of-record
 //!
 //! `docs/audio/musepack/spec/musepack-headers-and-coding.md` §5.2
-//! (SCFI VLC) + §5.3 (DSCF cases, escape, prev-band reference, clamp);
+//! (SCFI VLC) + §5.3 (DSCF cases, escape, temporal `SCF[0]` reference,
+//! clamp) with erratum E1 (`docs/audio/musepack/musepack-errata.md`);
 //! the `sv7-huffman-scfi` / `sv7-huffman-dscf` table facts under
 //! `docs/audio/musepack/tables/`. The only project material crossed is
 //! that staged `docs/` content and the sibling modules under
@@ -105,8 +107,10 @@ pub struct Sv7BandScf {
 }
 
 impl Sv7BandScf {
-    /// The last granule's SCF index — the §5.3 reference the *next*
-    /// band's `SCF[0]` deltas off of.
+    /// The last granule's SCF index (`SCF[2]`) — the §5.3/E1 temporal
+    /// reference the **same band's** `SCF[0]` deltas off of in the
+    /// *next frame* (threaded through
+    /// [`crate::sv7_stereo_frame::Sv7ScfMemory`]).
     pub const fn last_index(&self) -> i32 {
         self.indices[SCF_GRANULES_PER_BAND - 1]
     }
@@ -139,9 +143,8 @@ fn read_scf_index(reader: &mut Sv7BitReader<'_>, reference: i32) -> Result<i32> 
 /// according to the §5.3 SCFI case table:
 ///
 /// - `SCF[0]` is **always** coded — one DSCF index relative to
-///   `prev_band_scf2` (the previous band's `SCF[2]`, per §5.3); the
-///   first band of a channel passes the channel's documented starting
-///   reference.
+///   `reference` (per §5.3/E1 the same band's `SCF[2]` from the
+///   previous frame; 0 at stream start).
 /// - `SCF[1]`: coded (Δ vs `SCF[0]`) for SCFI `0`/`1`; copied from
 ///   `SCF[0]` for SCFI `2`/`3`.
 /// - `SCF[2]`: coded (Δ vs `SCF[1]`) for SCFI `0`/`2`; copied from
@@ -151,9 +154,10 @@ fn read_scf_index(reader: &mut Sv7BitReader<'_>, reference: i32) -> Result<i32> 
 /// raw-6-bit absolute escape applies to every coded index including
 /// `SCF[0]`.
 ///
-/// `prev_band_scf2` is the reference for this band's `SCF[0]`; thread
-/// [`Sv7BandScf::last_index`] of the previously-decoded non-zero band
-/// forward across the channel's band loop.
+/// `reference` is the temporal predictor for this band's `SCF[0]`;
+/// thread [`Sv7BandScf::last_index`] of this band's previous-frame
+/// decode forward (the whole-file layers do this via
+/// [`crate::sv7_stereo_frame::Sv7ScfMemory`]).
 ///
 /// # Errors
 ///
@@ -163,12 +167,9 @@ fn read_scf_index(reader: &mut Sv7BitReader<'_>, reference: i32) -> Result<i32> 
 ///   bound).
 /// - [`Error::UnexpectedEof`] / [`Error::HuffmanNoMatch`] propagated
 ///   from the SCFI or DSCF reads.
-pub fn decode_sv7_band_scf(
-    reader: &mut Sv7BitReader<'_>,
-    prev_band_scf2: i32,
-) -> Result<Sv7BandScf> {
+pub fn decode_sv7_band_scf(reader: &mut Sv7BitReader<'_>, reference: i32) -> Result<Sv7BandScf> {
     let scfi = decode_sv7_scfi(reader)?;
-    decode_sv7_band_dscf(reader, scfi, prev_band_scf2)
+    decode_sv7_band_dscf(reader, scfi, reference)
 }
 
 /// Read one §5.2 SCFI selector VLC (`sv7-huffman-scfi`) and validate it
@@ -198,12 +199,13 @@ pub fn decode_sv7_scfi(reader: &mut Sv7BitReader<'_>) -> Result<u8> {
 /// [`decode_sv7_band_scf`], exposed for the two-pass frame-body layout
 /// (see [`decode_sv7_scfi`]).
 ///
-/// `reference` is this band's `SCF[0]` delta reference. The whole-file
-/// convention is **per-band, per-channel memory**: the same subband's
-/// `SCF[2]` from the previous frame (0 before the first frame) — the
-/// fixture corpus pins this against the alternatives (a cross-band
-/// within-frame chain decodes to the wrong PCM on every corpus stream;
-/// per-band memory reproduces the oracle).
+/// `reference` is this band's `SCF[0]` delta reference — per §5.3/E1
+/// **per-band, per-channel temporal memory**: the same subband's
+/// `SCF[2]` from the previous frame (0 before the first frame). The
+/// r390 fixture corpus pinned this against the alternatives (a
+/// cross-band within-frame chain decodes to the wrong PCM on every
+/// corpus stream; per-band memory reproduces the oracle), and the
+/// erratum E1 docs entry now records it as the spec reading.
 ///
 /// # Errors
 ///
@@ -218,10 +220,10 @@ pub fn decode_sv7_band_dscf(
     if scfi > 3 {
         return Err(Error::InvalidScfCodingMethod(scfi as i8));
     }
-    let prev_band_scf2 = reference;
 
-    // SCF[0]: always coded, delta off the previous band's SCF[2].
-    let scf0 = read_scf_index(reader, prev_band_scf2)?;
+    // SCF[0]: always coded, delta off the same band's previous-frame
+    // SCF[2] (§5.3/E1).
+    let scf0 = read_scf_index(reader, reference)?;
 
     // SCF[1]: coded (Δ vs SCF[0]) for SCFI 0/1; copied from SCF[0]
     // otherwise (SCFI 2/3).
@@ -473,9 +475,10 @@ mod tests {
     }
 
     #[test]
-    fn prev_band_scf2_threads_into_next_band_scf0() {
-        // Two bands, both SCFI 3 (single coded SCF). Band 1's SCF[0]
-        // must delta off band 0's SCF[2].
+    fn scf0_reference_threads_across_consecutive_decodes() {
+        // The same band in two consecutive frames, both SCFI 3 (single
+        // coded SCF). The second decode's SCF[0] must delta off the
+        // first decode's SCF[2] (S5.3/E1 temporal memory).
         let (sc, sl) = scfi_code(3);
         let (b0c, b0l) = dscf_code(5);
         let (b1c, b1l) = dscf_code(2);

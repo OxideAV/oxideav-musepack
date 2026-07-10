@@ -407,8 +407,12 @@ pub fn sv7_absolute_scf_gain(scf_index: i32) -> f64 {
 /// here; Huffman / grouped levels are already centred; CNS (`-1`) uses
 /// the `DEQUANT_COEFFICIENT_C[0]` coefficient (per the structural spec
 /// the noise band is "scaled by the band's scalefactor", so the granule
-/// gains apply to it exactly like a coded band — corpus-unvalidated,
-/// the fixtures carry no CNS bands).
+/// gains apply to it exactly like a coded band). The CNS band's *wire
+/// participation* in the SCF layer is fixture-proven
+/// (`tests/sv7_cns_corpus.rs`); its absolute noise gain cannot be
+/// cross-checked against the corpus oracle, whose noise generator
+/// demonstrably differs from the staged one (see the fixture suite
+/// docs).
 ///
 /// `granule_scf` carries the three signed per-granule SCF indices from
 /// the §5.3 decode ([`crate::sv7_scf_decode::Sv7BandScf::indices`]).
