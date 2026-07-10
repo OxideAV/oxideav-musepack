@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn sv7_parse_magic_rejects_short_input() {
         // Only the 3-byte magic, no version byte.
-        let buf = [b'M', b'P', b'+'];
+        let buf = *b"MP+";
         assert_eq!(SV7Header::parse_magic(&buf), Err(Error::UnexpectedEof));
     }
 
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn sv8_parse_magic_accepts_and_returns_offset() {
-        let buf = [b'M', b'P', b'C', b'K', b'S', b'H'];
+        let buf = *b"MPCKSH";
         assert_eq!(parse_sv8_magic(&buf), Ok(4));
     }
 
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn sv8_parse_magic_rejects_short_input() {
-        let buf = [b'M', b'P', b'C'];
+        let buf = *b"MPC";
         assert_eq!(parse_sv8_magic(&buf), Err(Error::UnexpectedEof));
     }
 

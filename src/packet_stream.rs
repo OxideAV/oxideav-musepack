@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn malformed_header_propagates_and_stops() {
         // 1-byte input: too short to be a key.
-        let buf = [b'S'];
+        let buf = *b"S";
         let mut s = PacketStream::new(&buf, PacketSizeConvention::Exclusive);
         let err = s.next_packet().unwrap_err();
         assert_eq!(err, Error::UnexpectedEof);

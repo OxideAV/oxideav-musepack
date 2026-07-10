@@ -230,7 +230,7 @@ mod tests {
             Err(Error::InvalidMagic),
         );
         // Truncated below the four magic bytes -> EOF.
-        let buf2 = [b'M', b'P', b'C'];
+        let buf2 = *b"MPC";
         assert_eq!(
             scan_sv8_stream(&buf2, PacketSizeConvention::Exclusive),
             Err(Error::UnexpectedEof),
