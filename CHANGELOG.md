@@ -22,7 +22,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Explicit-version paths reject a version byte whose `0x10` bit
   contradicts `fields.pns` (`HeaderFieldOutOfRange("pns")`).
 
-- **Round 390** — **external SV7 validation + corpus-pinned wire
+- **Round 405** — **CNS fixture conformance gates**
+  (`tests/sv7_cns_corpus.rs`, fixture imported under
+  `tests/fixtures/sv7/cns-pns/`). The first corpus stream that uses
+  Clear Noise Substitution (mppenc 1.16 `--pns 1.0`, 20 frames, 215
+  CNS band-instances across 18 frames). Gates:
+  - **CNS wire syntax pinned exactly**: all 20 frames decode
+    budget-exact against their 20-bit prefixes — only possible if
+    `Res == -1` bands are visited by the SCFI + DSCF passes (spec
+    §5.2/§5.3 + erratum E1) and read zero sample-pass bits. This
+    closes the r390 "CNS-SCF participation corpus-unvalidated" caveat.
+  - **CNS census**: 18/20 CNS frames (only cold-start frame 0 and
+    trailing frame 19 are CNS-free), 215 instances, upper subbands
+    8..27; on this stream every CNS band pairs with an empty channel
+    and carries the per-band M/S flag.
+  - **PCM where the noise cannot reach**: frame 0 within ±1 LSB of the
+    FFmpeg oracle (≥ 70 % bit-exact), like the non-PNS corpus.
+  - **Statistical gate over the noise-bearing frames** (measured:
+    global corr 0.776, rms error 1377 vs signal 2158): the oracle's
+    CNS **noise waveform is not reproducible from the staged generator
+    facts** — a matched-filter search (single-band contribution
+    synthesised from the staged two-LFSR PRNG at every offset in
+    0..30000, strides 1..=40, 1/2/4-word groupings, stream/frame/band
+    reset hypotheses) finds nothing above the ~0.07 noise floor, while
+    the same search against the crate's own decode spikes at 0.28 at
+    the true offset; the oracle's noise residual is also ~2× the
+    staged `C[0]`-scaled amplitude. The black-box oracle evidently
+    uses a different noise generator, so the noise is gated
+    statistically and the ±1 LSB corpus gate excludes this fixture
+    (documented in the test module).
+ — **external SV7 validation + corpus-pinned wire
   corrections + registry integration.** The SV7 fixture corpus staged
   at `docs/audio/musepack/fixtures/` (docs commit `af1b888`: four
   independent mppenc 1.16 streams + FFmpeg `mpc7` s16 oracles) is
