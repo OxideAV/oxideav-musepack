@@ -48,11 +48,16 @@ pub const SV7_HEADER_FIELD_BITS: u64 = 168;
 /// (200 bits) rounded up to the §4 32-bit word grid.
 pub const SV7_HEADER_DISK_LEN: usize = 28;
 
-/// The default SV7 version byte: low nibble = [`SV7_VERSION_NIBBLE`],
-/// high nibble 0. [`crate::sv7_header::Sv7HeaderFields::parse`] accepts
-/// any byte whose low nibble is 7 (the high nibble is a minor-version
-/// tag it ignores), so encoders that need a specific high nibble can use
-/// [`write_sv7_header_fields`] / [`encode_sv7_header_with_version`].
+/// The default SV7 version byte for a non-PNS stream: low nibble =
+/// [`SV7_VERSION_NIBBLE`], high nibble 0.
+/// [`crate::sv7_header::Sv7HeaderFields::parse`] accepts any byte whose
+/// low nibble is 7 (bit `0x10` of the high nibble is the PNS/CNS stream
+/// flag it surfaces as [`Sv7HeaderFields::pns`]; the rest it ignores).
+/// The fields-driven default paths use
+/// [`Sv7HeaderFields::version_byte`], which equals this constant when
+/// `pns` is unset and `0x17` when set; encoders that need another high
+/// nibble can use [`write_sv7_header_fields`] /
+/// [`encode_sv7_header_with_version`].
 pub const SV7_DEFAULT_VERSION_BYTE: u8 = SV7_VERSION_NIBBLE;
 
 /// Validate every [`Sv7HeaderFields`] field against its §1 bit width and
@@ -104,6 +109,10 @@ pub fn validate_sv7_header_fields(fields: &Sv7HeaderFields) -> Result<()> {
 ///
 /// - [`Error::UnsupportedVersion`] if `version_byte`'s low nibble is not
 ///   7 (such a header would be rejected by the parser).
+/// - [`Error::HeaderFieldOutOfRange`]`("pns")` if `version_byte`'s
+///   `0x10` PNS-flag bit contradicts `fields.pns` — the parser derives
+///   [`Sv7HeaderFields::pns`] from that bit, so a mismatched byte would
+///   silently break `parse(encode(fields)) == fields`.
 /// - [`Error::MaxBandOutOfRange`] / [`Error::HeaderFieldOutOfRange`] from
 ///   [`validate_sv7_header_fields`]. Nothing is written on error.
 pub fn write_sv7_header_fields(
@@ -113,6 +122,9 @@ pub fn write_sv7_header_fields(
 ) -> Result<()> {
     if version_byte & 0x0F != SV7_VERSION_NIBBLE {
         return Err(Error::UnsupportedVersion(version_byte));
+    }
+    if (version_byte & crate::framing::SV7_VERSION_PNS_FLAG != 0) != fields.pns {
+        return Err(Error::HeaderFieldOutOfRange("pns"));
     }
     validate_sv7_header_fields(fields)?;
 
@@ -150,7 +162,9 @@ pub fn write_sv7_header_fields(
 }
 
 /// Serialise a standalone on-disk SV7 fixed header
-/// ([`SV7_HEADER_DISK_LEN`] bytes) with the default version byte.
+/// ([`SV7_HEADER_DISK_LEN`] bytes) with the fields-implied version byte
+/// ([`Sv7HeaderFields::version_byte`]: `0x07`, or `0x17` when
+/// `fields.pns` is set).
 ///
 /// The result begins with the raw `MP+` magic + version byte and
 /// round-trips through [`Sv7HeaderFields::parse`]. The final three bytes
@@ -161,11 +175,12 @@ pub fn write_sv7_header_fields(
 ///
 /// See [`write_sv7_header_fields`].
 pub fn encode_sv7_header(fields: &Sv7HeaderFields) -> Result<Vec<u8>> {
-    encode_sv7_header_with_version(fields, SV7_DEFAULT_VERSION_BYTE)
+    encode_sv7_header_with_version(fields, fields.version_byte())
 }
 
 /// [`encode_sv7_header`] with an explicit version byte (low nibble must
-/// be 7; the high nibble is the minor-version tag the parser ignores).
+/// be 7; the `0x10` PNS bit must agree with `fields.pns`; the remaining
+/// high-nibble bits are a minor-version tag the parser ignores).
 ///
 /// # Errors
 ///
@@ -193,6 +208,7 @@ mod tests {
     /// value, to pin each field's position and width in one round-trip.
     fn busy_fields() -> Sv7HeaderFields {
         Sv7HeaderFields {
+            pns: true,
             frame_count: 0xDEAD_BEEF,
             intensity_stereo: true,
             mid_side: true,
@@ -260,15 +276,42 @@ mod tests {
 
     #[test]
     fn custom_version_byte_high_nibble_survives_parse() {
-        // Low nibble 7 with a non-zero high nibble is accepted by the
-        // parser (it checks only the low nibble).
-        let raw = encode_sv7_header_with_version(&quiet_fields(), 0x17).unwrap();
-        assert_eq!(raw[3], 0x17);
+        // Low nibble 7 with a non-PNS high-nibble bit set is accepted
+        // by the parser (it checks the low nibble and surfaces only the
+        // 0x10 PNS bit).
+        let raw = encode_sv7_header_with_version(&quiet_fields(), 0x27).unwrap();
+        assert_eq!(raw[3], 0x27);
         assert_eq!(
             Sv7HeaderFields::parse(&raw).unwrap(),
             quiet_fields(),
-            "fields unaffected by the version high nibble",
+            "fields unaffected by the non-PNS version high-nibble bits",
         );
+    }
+
+    #[test]
+    fn pns_flag_round_trips_as_version_byte_0x17() {
+        // The fixture-pinned PNS stream marker: fields.pns drives the
+        // version byte's 0x10 bit and parses back.
+        let mut fields = quiet_fields();
+        fields.pns = true;
+        assert_eq!(fields.version_byte(), 0x17);
+        let raw = encode_sv7_header(&fields).unwrap();
+        assert_eq!(raw[3], 0x17);
+        assert_eq!(Sv7HeaderFields::parse(&raw).unwrap(), fields);
+        // And the default (non-PNS) byte stays 0x07.
+        assert_eq!(quiet_fields().version_byte(), SV7_DEFAULT_VERSION_BYTE);
+    }
+
+    #[test]
+    fn rejects_version_byte_pns_bit_contradicting_fields() {
+        // 0x17 with pns unset, and 0x07 with pns set, both break
+        // parse∘encode symmetry and must be rejected.
+        let err = encode_sv7_header_with_version(&quiet_fields(), 0x17).err();
+        assert_eq!(err, Some(Error::HeaderFieldOutOfRange("pns")));
+        let mut fields = quiet_fields();
+        fields.pns = true;
+        let err = encode_sv7_header_with_version(&fields, 0x07).err();
+        assert_eq!(err, Some(Error::HeaderFieldOutOfRange("pns")));
     }
 
     #[test]
@@ -313,7 +356,8 @@ mod tests {
     #[test]
     fn writer_lands_exactly_at_the_body_bit_position() {
         let mut w = Sv7BitWriter::new();
-        write_sv7_header_fields(&mut w, &busy_fields(), SV7_DEFAULT_VERSION_BYTE).unwrap();
+        let fields = busy_fields();
+        write_sv7_header_fields(&mut w, &fields, fields.version_byte()).unwrap();
         assert_eq!(w.bit_len(), SV7_HEADER_BITS);
         assert_eq!(SV7_HEADER_BITS, 200);
         assert_eq!(SV7_HEADER_FIELD_BITS, 168);

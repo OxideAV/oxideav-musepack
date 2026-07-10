@@ -64,9 +64,20 @@ pub const SV7_MAGIC: [u8; 3] = *b"MP+";
 ///
 /// Per the structural spec §2.1 the byte after the `MP+` magic
 /// encodes the stream version, with the low nibble equal to this
-/// constant for an SV7 stream. The high nibble of that byte holds
-/// further header information whose layout is GAP.
+/// constant for an SV7 stream.
 pub const SV7_VERSION_NIBBLE: u8 = 7;
+
+/// SV7 version-byte **PNS/CNS stream flag** (bit `0x10`).
+///
+/// Per the staged CNS fixture notes
+/// (`docs/audio/musepack/fixtures/cns-pns/notes.md`, "CNS confirmation
+/// … Version-byte flag"): when the encoder engages PNS / Clear Noise
+/// Substitution it sets this bit in the version byte — the stream
+/// reads `MP+ 0x17` instead of `MP+ 0x07`. The flag is informational
+/// for a decoder (CNS bands are self-describing via their `Res == -1`
+/// band type); a stream decodes identically either way. The remaining
+/// high-nibble bits (`0x20`/`0x40`/`0x80`) stay GAP.
+pub const SV7_VERSION_PNS_FLAG: u8 = 0x10;
 
 /// What [`SV7Header::parse_magic`] managed to recognise at the
 /// start of a candidate SV7 stream.
@@ -75,7 +86,9 @@ pub struct SV7Header<'a> {
     /// The full version byte that follows the `MP+` magic. The low
     /// nibble is the SV7 version (always [`SV7_VERSION_NIBBLE`]
     /// when this struct is returned by [`SV7Header::parse_magic`]);
-    /// the high nibble's role is GAP per spec §2.1.
+    /// bit `0x10` of the high nibble is the PNS/CNS stream flag
+    /// ([`SV7_VERSION_PNS_FLAG`], see [`SV7Header::pns`]); the other
+    /// high-nibble bits are GAP.
     pub version_byte: u8,
     /// All bytes after the `MP+` magic and the version byte. The
     /// internal field map for these bytes — sample count,
@@ -116,6 +129,14 @@ impl<'a> SV7Header<'a> {
     /// [`SV7_VERSION_NIBBLE`] for a successfully parsed SV7 stream.
     pub fn stream_version(&self) -> u8 {
         self.version_byte & 0x0F
+    }
+
+    /// Whether the version byte carries the PNS/CNS stream flag
+    /// ([`SV7_VERSION_PNS_FLAG`], bit `0x10`): the encoder marked this
+    /// stream as using noise substitution (`MP+ 0x17`). Informational —
+    /// CNS bands announce themselves per-band via `Res == -1`.
+    pub fn pns(&self) -> bool {
+        self.version_byte & SV7_VERSION_PNS_FLAG != 0
     }
 }
 
@@ -342,6 +363,19 @@ mod tests {
         assert_eq!(h.version_byte, 0x17);
         assert_eq!(h.stream_version(), 7);
         assert_eq!(h.remaining_header_bytes, &[0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn sv7_pns_flag_is_version_byte_bit_0x10() {
+        // Fixture-pinned (cns-pns notes.md): 0x17 = PNS stream, 0x07 =
+        // plain SV7; other high-nibble bits do not trip the flag.
+        for (version, pns) in [(0x07u8, false), (0x17, true), (0x27, false), (0x37, true)] {
+            let buf = [b'M', b'P', b'+', version];
+            let h = SV7Header::parse_magic(&buf).expect("magic accepted");
+            assert_eq!(h.pns(), pns, "version byte {version:#04x}");
+            assert_eq!(h.stream_version(), 7);
+        }
+        assert_eq!(SV7_VERSION_PNS_FLAG, 0x10);
     }
 
     #[test]

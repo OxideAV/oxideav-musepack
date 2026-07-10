@@ -67,6 +67,14 @@ pub const SV7_MAX_BAND_INCLUSIVE: u8 = 31;
 /// dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sv7HeaderFields {
+    /// PNS/CNS stream flag — bit `0x10` of the version byte that
+    /// precedes the field span ([`crate::framing::SV7_VERSION_PNS_FLAG`];
+    /// staged fixture notes `docs/audio/musepack/fixtures/cns-pns/notes.md`).
+    /// Set on `MP+ 0x17` streams, whose encoder engaged noise
+    /// substitution. Informational: CNS bands are self-describing via
+    /// their per-band `Res == -1` type, so decode is identical either
+    /// way.
+    pub pns: bool,
     /// Number of audio frames (§1, field 1). Each frame carries
     /// [`SV7_SAMPLES_PER_FRAME`] samples per channel.
     pub frame_count: u32,
@@ -156,6 +164,9 @@ impl Sv7HeaderFields {
         if version_byte & 0x0F != SV7_VERSION_NIBBLE {
             return Err(Error::UnsupportedVersion(version_byte));
         }
+        // Version-byte bit 0x10: the PNS/CNS stream flag (fixture
+        // notes; see the `pns` field docs).
+        let pns = version_byte & crate::framing::SV7_VERSION_PNS_FLAG != 0;
         if input.len() < HEADER_LEN {
             return Err(Error::UnexpectedEof);
         }
@@ -211,6 +222,7 @@ impl Sv7HeaderFields {
         }
 
         Ok(Self {
+            pns,
             frame_count,
             intensity_stereo,
             mid_side,
@@ -244,6 +256,16 @@ impl Sv7HeaderFields {
     /// §1 derived fact).
     pub fn channels(&self) -> u8 {
         SV7_CHANNELS
+    }
+
+    /// The version byte these fields imply on the wire: the SV7 version
+    /// nibble (`0x07`) with the PNS/CNS flag bit (`0x10`) set iff
+    /// [`Self::pns`] — i.e. `0x17` for a PNS-marked stream, `0x07`
+    /// otherwise. Used by the default-version encode paths so
+    /// `parse(encode(fields)) == fields` holds for the flag.
+    pub fn version_byte(&self) -> u8 {
+        use crate::framing::{SV7_VERSION_NIBBLE, SV7_VERSION_PNS_FLAG};
+        SV7_VERSION_NIBBLE | if self.pns { SV7_VERSION_PNS_FLAG } else { 0 }
     }
 
     /// Total decoded sample count per channel, before any gapless /
@@ -475,6 +497,31 @@ mod tests {
         assert!(h.fast_seek);
         assert_eq!(h.reserved, 0x5_AAAA & 0x7_FFFF);
         assert_eq!(h.encoder_version, 0x71);
+    }
+
+    #[test]
+    fn pns_flag_parses_from_version_byte_bit_0x10() {
+        // Fixture-pinned (docs cns-pns notes.md): `MP+ 0x17` marks a
+        // PNS/CNS stream; `MP+ 0x07` (the Spec builder's default) does
+        // not; other high-nibble bits do not trip the flag.
+        let spec = Spec::default();
+        let mut buf = spec.build();
+        let h = Sv7HeaderFields::parse(&buf).unwrap();
+        assert!(!h.pns);
+        assert_eq!(h.version_byte(), 0x07);
+
+        buf[3] = 0x17;
+        let h = Sv7HeaderFields::parse(&buf).unwrap();
+        assert!(h.pns);
+        assert_eq!(h.version_byte(), 0x17);
+        // Only the pns field differs from the 0x07 parse.
+        let mut expect_plain = h;
+        expect_plain.pns = false;
+        buf[3] = 0x07;
+        assert_eq!(Sv7HeaderFields::parse(&buf).unwrap(), expect_plain);
+
+        buf[3] = 0x27; // GAP high-nibble bit: ignored, pns stays clear.
+        assert!(!Sv7HeaderFields::parse(&buf).unwrap().pns);
     }
 
     #[test]

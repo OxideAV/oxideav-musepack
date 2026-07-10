@@ -8,6 +8,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 405** — **SV7 PNS/CNS stream flag (version byte `0x17`).**
+  The staged CNS fixture (`docs/audio/musepack/fixtures/cns-pns/`,
+  docs commit `0f1b6a2`) pins version-byte bit `0x10` as the encoder's
+  "stream uses PNS/CNS" marker: `MP+ 0x17` instead of `MP+ 0x07`.
+  Wired end-to-end: `framing::SV7_VERSION_PNS_FLAG` +
+  `SV7Header::pns()`, a new `Sv7HeaderFields::pns` field (parsed from
+  the version byte; informational — CNS bands stay self-describing via
+  `Res == -1`), `Sv7HeaderFields::version_byte()` composing the
+  fields-implied byte, and the default-version encode paths
+  (`encode_sv7_header`, `encode_sv7_file`, `Sv7FileWriter::new`) now
+  emit it, so `parse(encode(fields)) == fields` covers the flag.
+  Explicit-version paths reject a version byte whose `0x10` bit
+  contradicts `fields.pns` (`HeaderFieldOutOfRange("pns")`).
+
 - **Round 390** — **external SV7 validation + corpus-pinned wire
   corrections + registry integration.** The SV7 fixture corpus staged
   at `docs/audio/musepack/fixtures/` (docs commit `af1b888`: four

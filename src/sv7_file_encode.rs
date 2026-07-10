@@ -40,7 +40,7 @@
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_frame_encode::Sv7EncBand;
 use crate::sv7_header::Sv7HeaderFields;
-use crate::sv7_header_encode::{write_sv7_header_fields, SV7_DEFAULT_VERSION_BYTE};
+use crate::sv7_header_encode::write_sv7_header_fields;
 use crate::sv7_stereo_frame::Sv7ScfMemory;
 use crate::sv7_stereo_frame_encode::encode_sv7_stereo_frame;
 use crate::{Error, Result};
@@ -79,14 +79,15 @@ impl Sv7EncStereoFrame {
     }
 }
 
-/// Encode a complete SV7 `.mpc` stream with the default version byte.
-/// See [`encode_sv7_file_with_version`].
+/// Encode a complete SV7 `.mpc` stream with the fields-implied version
+/// byte ([`Sv7HeaderFields::version_byte`]: `0x07`, or `0x17` when
+/// `header.pns` is set). See [`encode_sv7_file_with_version`].
 ///
 /// # Errors
 ///
 /// See [`encode_sv7_file_with_version`].
 pub fn encode_sv7_file(header: &Sv7HeaderFields, frames: &[Sv7EncStereoFrame]) -> Result<Vec<u8>> {
-    encode_sv7_file_with_version(header, frames, SV7_DEFAULT_VERSION_BYTE)
+    encode_sv7_file_with_version(header, frames, header.version_byte())
 }
 
 /// Encode a complete SV7 `.mpc` stream: the §1 fixed header, each frame
@@ -211,14 +212,15 @@ pub struct Sv7FileWriter {
 }
 
 impl Sv7FileWriter {
-    /// Start a builder with the default version byte. See
-    /// [`Sv7FileWriter::with_version`].
+    /// Start a builder with the template-implied version byte
+    /// ([`Sv7HeaderFields::version_byte`]: `0x07`, or `0x17` when
+    /// `template.pns` is set). See [`Sv7FileWriter::with_version`].
     ///
     /// # Errors
     ///
     /// See [`Sv7FileWriter::with_version`].
     pub fn new(template: Sv7HeaderFields) -> Result<Self> {
-        Self::with_version(template, SV7_DEFAULT_VERSION_BYTE)
+        Self::with_version(template, template.version_byte())
     }
 
     /// Start a builder from a §1 header `template` (validated
@@ -228,12 +230,17 @@ impl Sv7FileWriter {
     ///
     /// - [`Error::UnsupportedVersion`] if `version_byte`'s low nibble is
     ///   not 7.
+    /// - [`Error::HeaderFieldOutOfRange`]`("pns")` if `version_byte`'s
+    ///   `0x10` PNS-flag bit contradicts `template.pns`.
     /// - [`Error::MaxBandOutOfRange`] / [`Error::HeaderFieldOutOfRange`]
     ///   for a template field outside its §1 width (the template's
     ///   `frame_count` is ignored — it is overridden at finish).
     pub fn with_version(template: Sv7HeaderFields, version_byte: u8) -> Result<Self> {
         if version_byte & 0x0F != crate::framing::SV7_VERSION_NIBBLE {
             return Err(Error::UnsupportedVersion(version_byte));
+        }
+        if (version_byte & crate::framing::SV7_VERSION_PNS_FLAG != 0) != template.pns {
+            return Err(Error::HeaderFieldOutOfRange("pns"));
         }
         crate::sv7_header_encode::validate_sv7_header_fields(&template)?;
         Ok(Self {
