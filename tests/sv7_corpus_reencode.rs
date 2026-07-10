@@ -15,7 +15,9 @@
 //! reproduces through the trailer (the original then carries mppenc's
 //! undeclared flush frame, which this writer intentionally does not
 //! emit — see `sv7_file_encode`), so it is compared up to the last
-//! whole 32-bit word before the divergent trailer/flush word.
+//! whole 32-bit word before the divergent trailer/flush word; the
+//! CNS-bearing `cns-pns` stream reproduces byte-exact through its full
+//! content (the original carries one dead all-zero tail word).
 
 use oxideav_musepack::huffman::{
     decode as vlc, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx,
@@ -183,6 +185,28 @@ fn full_files_reencode_byte_exact() {
         assert_eq!(re.len(), orig.len(), "{name}: length");
         assert_eq!(re, orig, "{name}: bytes");
     }
+}
+
+#[test]
+fn cns_pns_file_reencodes_byte_exact_content() {
+    // The PNS stream: 215 CNS band-instances (Res == -1, no sample
+    // bits, SCFI + DSCF carried) and the 0x17 PNS version byte. A
+    // byte-exact re-encode proves the writer's CNS arm — the empty
+    // sample pass plus full scalefactor participation — and the PNS
+    // flag plumbing coincide with the reference encoder on a real
+    // noise-substitution stream. mppenc appends one extra all-zero
+    // word after the trailer on this stream (dead tail, ignored by
+    // decoders); the writer intentionally does not, so the gate is:
+    // identical through the re-encode's full length, all-zero surplus.
+    let (re, orig) = reencode("cns-pns");
+    assert_eq!(re[..3], *b"MP+");
+    assert_eq!(re[3], 0x17, "re-encode preserves the PNS version byte");
+    assert_eq!(orig.len() - re.len(), 4, "one surplus tail word");
+    assert_eq!(re[..], orig[..re.len()], "cns-pns: content bytes");
+    assert!(
+        orig[re.len()..].iter().all(|&b| b == 0),
+        "surplus tail must be zero padding"
+    );
 }
 
 #[test]

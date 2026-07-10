@@ -60,7 +60,10 @@ scalefactor passes (spec §5.2/§5.3 + erratum E1) while reading zero
 sample-pass bits; frame 0 (CNS-free) matches the FFmpeg oracle within
 ±1 LSB, and the stream-level **PNS flag in the version byte**
 (`MP+ 0x17`) is parsed/encoded end-to-end
-(`Sv7HeaderFields::pns`). The noise-bearing frames are gated
+(`Sv7HeaderFields::pns`); re-encoding the parsed structure
+reproduces mppenc's bytes exactly through the full content — the
+encoder's CNS arm is wire-symmetric too. The noise-bearing frames are
+gated
 **statistically** (global corr 0.776, `tests/sv7_cns_corpus.rs`): the
 oracle's noise *waveform* is not reproducible from the staged
 generator facts — matched-filter searches over the staged two-LFSR

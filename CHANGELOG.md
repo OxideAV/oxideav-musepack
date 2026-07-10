@@ -51,6 +51,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     uses a different noise generator, so the noise is gated
     statistically and the ±1 LSB corpus gate excludes this fixture
     (documented in the test module).
+  - **Encoder wire symmetry on CNS** (`tests/sv7_corpus_reencode.rs`):
+    re-encoding the parsed structure of the PNS stream reproduces
+    mppenc's bytes exactly through the full content — the CNS encode
+    arm (empty sample pass + full SCFI/DSCF participation) and the
+    `0x17` version-byte plumbing coincide with the reference encoder
+    on a real noise-substitution stream (the original carries one dead
+    all-zero tail word the writer intentionally omits).
 
 ### Changed
 
