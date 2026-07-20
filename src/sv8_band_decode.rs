@@ -797,7 +797,8 @@ mod tests {
         // of the q9up shortest codeword and confirm the dispatcher's
         // i32 buffer equals that symbol per slot — proving the escape
         // arm passes its native i32 output through unwidened.
-        let sym = symbol_of_first_row(&SV8_Q9UP_TABLE) as i32;
+        let sym = i32::from(symbol_of_first_row(&SV8_Q9UP_TABLE) as u8);
+        let d = i32::from(crate::requant::QUANTIZER_OFFSET_D[10]); // band_type 9
         let (code, len) = first_row(&SV8_Q9UP_TABLE);
         let mut p = BitPacker::new();
         for _ in 0..SAMPLES_PER_BAND {
@@ -811,16 +812,18 @@ mod tests {
         decode_sv8_band(&mut reader, 9, &mut prng, 0, 0, no_ctx, &mut out)
             .expect("escape dispatch");
         for (i, &s) in out.iter().enumerate() {
-            assert_eq!(s, sym, "escape sample {i} (band_type 9, 0 raw bits)");
+            assert_eq!(s, sym - d, "escape sample {i} (band_type 9, 0 raw bits)");
         }
     }
 
     #[test]
     fn dispatch_escape_band_type_ten_composes_vlc_and_one_raw_bit() {
         // band_type 10 → escape_raw_bits == 1: each sample is
-        // (symbol << 1) | raw. Feed (q9up shortest codeword, raw=1)
-        // 36 times and confirm the dispatcher composes them.
-        let sym = symbol_of_first_row(&SV8_Q9UP_TABLE) as i32;
+        // ((unsigned(symbol) << 1) | raw) - D. Feed (q9up shortest
+        // codeword, raw=1) 36 times and confirm the dispatcher
+        // composes them.
+        let sym = i32::from(symbol_of_first_row(&SV8_Q9UP_TABLE) as u8);
+        let d = i32::from(crate::requant::QUANTIZER_OFFSET_D[11]); // band_type 10
         let (code, len) = first_row(&SV8_Q9UP_TABLE);
         let mut p = BitPacker::new();
         for _ in 0..SAMPLES_PER_BAND {
@@ -835,7 +838,7 @@ mod tests {
         decode_sv8_band(&mut reader, 10, &mut prng, 0, 0, no_ctx, &mut out)
             .expect("escape dispatch bt10");
         for (i, &s) in out.iter().enumerate() {
-            assert_eq!(s, (sym << 1) | 1, "escape sample {i} (band_type 10)");
+            assert_eq!(s, ((sym << 1) | 1) - d, "escape sample {i} (band_type 10)");
         }
     }
 

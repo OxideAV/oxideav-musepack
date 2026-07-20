@@ -279,9 +279,10 @@ mod tests {
     /// codewords (empty bands).
     fn keyframe_ap(max_band: u8, nbands: u8) -> Vec<u8> {
         // Search a short bit prefix whose decode_keyframe_max_used_band
-        // over 0..max_band+1 yields `nbands`. The log code reads at most
-        // ceil(log2(max_band+1))+1 bits, so an 8-bit brute force suffices
-        // for the small max_band values used in tests.
+        // (a log code over the count range 0..=max_band+1) yields
+        // `nbands`. The log code reads at most ceil(log2(max_band+2))
+        // bits, so an 8-bit brute force suffices for the small max_band
+        // values used in tests.
         let (res0_code, res0_len) = codeword_for_symbol(&SV8_RES_1_TABLE, 0).expect("res-1 sym 0");
         for nbits in 1u8..=8 {
             for value in 0u16..(1 << nbits) {
@@ -294,8 +295,10 @@ mod tests {
                 bytes.push(0);
                 bytes.push(0);
                 let mut r = Sv7BitReader::new(&bytes);
+                let before = r.bits_remaining();
                 if let Ok(decoded) = decode_keyframe_max_used_band(&mut r, max_band) {
-                    if decoded == nbands {
+                    let consumed = before - r.bits_remaining();
+                    if decoded == nbands && consumed == u64::from(nbits) {
                         // Re-pack without the extra peek padding bytes; the
                         // packet walker provides following-packet bytes as
                         // padding in a real stream, and a trailing SE keeps
@@ -305,7 +308,12 @@ mod tests {
                         for _ in 0..nbands {
                             p2.push(res0_code, res0_len);
                         }
-                        return p2.into_bytes();
+                        // Two zero pad bytes keep the reader's 16-bit
+                        // peek fed on the last VLC of the payload.
+                        let mut body = p2.into_bytes();
+                        body.push(0);
+                        body.push(0);
+                        return body;
                     }
                 }
             }

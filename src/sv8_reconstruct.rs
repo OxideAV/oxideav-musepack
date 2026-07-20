@@ -24,9 +24,10 @@
 //!    [`crate::reconstruct::centre_pcm_band`] must centre by subtracting
 //!    `D` before dequant. The SV8 sample decode emits **already-signed,
 //!    already-centred** levels for *every* arm — the §6.4 large-coefficient
-//!    escape (`Res ≥ 9`) carries the sign in its symbol's top 8 bits
-//!    ([`crate::sv8_sample_decode`]), so there is no per-arm centring
-//!    branch: every coded band dequantises its levels directly.
+//!    escape (`Res ≥ 9`) recenters by the per-`Res` offset `D` inside
+//!    [`crate::sv8_sample_decode::decode_sv8_escape_band`] itself — so
+//!    there is no per-arm centring branch: every coded band dequantises
+//!    its levels directly.
 //! 2. **SCF index range.** The §6.3 DSCF fold
 //!    `SCF = ((prev − 25 + delta) & 127) − 6` recenters by `−6`, so a SV8
 //!    SCF index is a **signed** value in `−6..=121`, outside the SV7 `u8`

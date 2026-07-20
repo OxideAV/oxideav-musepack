@@ -61,21 +61,23 @@
 //!   3. `requant-quantizer-offset-Dc` pins the level range `-D..=D`
 //!      with `D = 2^(band_type - 2) - 1`.
 //!
-//!   The only composition consistent with all three is: the VLC
-//!   symbol carries the **sign-bearing top 8 bits** and the
-//!   `n = RES_BITS[band_type] - 8 = band_type - 9` raw bits carry
-//!   the low bits, i.e. `sample = symbol · 2ⁿ + raw` — as `symbol`
-//!   ranges over the signed-byte alphabet and `raw` over `0..2ⁿ`,
-//!   the composed values tile exactly the `(band_type - 1)`-bit
-//!   two's-complement range `[-(D + 1), D]`, covering `-D..=D` (the
-//!   single extremum `-(D + 1)` is the usual two's-complement
-//!   asymmetry; like the SV7 §2.5 escape's one out-of-range level
-//!   it is passed through, encoder never emits it). Were the raw
-//!   bits the *high* part instead, the sign would live in the raw
-//!   field and the symbol alphabet would have to be unsigned digit
-//!   values — contradicting the staged signed map. `band_type` 9
-//!   degenerates to `n = 0` (the VLC alone spans `-128..=127` ⊇
-//!   `-127..=127 = -D..=D`).
+//!   The composition (§6.4.3, fixture-pinned r419): the VLC symbol
+//!   is the **unsigned** `0..=255` high part (the staged map stores
+//!   each byte reinterpreted as a signed `i8`; decode recovers the
+//!   raw byte), the `n = RES_BITS[band_type] - 8 = band_type - 9`
+//!   raw bits are the low part, and the per-`Res` quantiser offset
+//!   recenters the whole thing:
+//!   `sample = (symbol · 2ⁿ | raw) − D` — exactly the "subtract the
+//!   per-`Res` offset `Dc[Res]`" step §6.4.3 states. As `symbol`
+//!   ranges over `0..=255` and `raw` over `0..2ⁿ`, the composed
+//!   values tile `0..=2D + 1` and the recentred samples tile
+//!   `-D..=D + 1` (the single `D + 1` extremum is the code space's
+//!   one spare value; an encoder never emits it). `band_type` 9
+//!   degenerates to `n = 0` (the VLC alone spans the range). This
+//!   convention is pinned by the r419 SV8 corpus: the losslessly
+//!   transcoded SV7 fixtures reproduce the SV7 escape levels exactly
+//!   under it, and desynchronise within one band under the
+//!   signed-symbol / no-offset reading an earlier round carried.
 //!
 //! # Conventions the staged material does NOT pin
 //!
@@ -158,9 +160,10 @@ pub const GROUPED2_CODEWORDS_PER_BAND: usize = 18;
 
 /// Number of sample bits the §3.4 default-arm escape VLC itself
 /// carries: the staged `sv8-symbols-q9up` map is an exact
-/// permutation of `-128..=127` — the full signed-byte alphabet —
-/// so each codeword fixes the sign-bearing top **8** bits of the
-/// sample (see the module-level escape grounding note).
+/// permutation of the 256 byte values (stored reinterpreted as
+/// `i8`), so each codeword fixes the unsigned top **8** bits of the
+/// pre-recentre composed value (see the module-level escape
+/// grounding note).
 pub const ESCAPE_VLC_SYMBOL_BITS: u8 = 8;
 
 /// Fixed raw-bit count per sample for the §3.4 default-arm
@@ -305,10 +308,12 @@ pub(crate) fn enum_decode_subset(reader: &mut Sv7BitReader<'_>, k: u32, n: u32) 
 ///    smaller of the two selections is always coded), so the mask is
 ///    bit-inverted within the 18-bit field to recover the present
 ///    positions.
-/// 3. Walk the 18 positions MSB-first (position 17 down to 0); each
-///    present position reads **one raw sign bit** and is set to
-///    `(bit << 1) − 1`, i.e. `+1` for a 1 bit and `−1` for a 0 bit;
-///    absent positions stay 0.
+/// 3. Apply the mask MSB-first onto ascending positions — mask bit
+///    `17 − pos` is sample position `pos`, the same MSB-to-first-element
+///    orientation the §6.2 M/S bitmap uses (fixture-pinned, r419). Each
+///    present position, in ascending order, reads **one raw sign bit**
+///    and is set to `(bit << 1) − 1`, i.e. `+1` for a 1 bit and `−1`
+///    for a 0 bit; absent positions stay 0.
 ///
 /// `cnt > 18` yields [`Error::GroupedSymbolOutOfRange`] (a malformed
 /// q1 symbol — the staged map spans `0..=18` exactly, so this is
@@ -338,12 +343,15 @@ fn decode_sparse_group(
             coded
         }
     };
-    // Walk positions MSB-first; each present position reads one sign
-    // bit and becomes ±1.
-    for p in (0..SPARSE_GROUP_SIZE).rev() {
-        if present_mask & (1 << p) != 0 {
+    // Apply the mask MSB-first onto ascending positions: mask bit
+    // `17 − pos` is sample position `pos` (fixture-pinned, r419 — the
+    // same MSB↔first-element orientation the §6.2 M/S bitmap uses).
+    // Each present position, in ascending order, reads one sign bit
+    // and becomes ±1.
+    for (pos, slot) in out.iter_mut().enumerate() {
+        if present_mask & (1 << (SPARSE_GROUP_SIZE - 1 - pos)) != 0 {
             let bit = reader.read_bits(1)? as i8;
-            out[p] = (bit << 1) - 1;
+            *slot = (bit << 1) - 1;
         }
     }
     Ok(())
@@ -611,28 +619,28 @@ pub fn decode_sv8_context_band_grounded(
 /// raw bits, composed as
 ///
 /// ```text
-/// sample = (symbol << n) | raw      # n = band_type - 9
+/// sample = ((symbol << n) | raw) - D      # n = band_type - 9
 /// ```
 ///
-/// i.e. the signed-byte VLC symbol carries the sign-bearing top 8
-/// bits and the raw field the low `n` bits of a
-/// `(band_type - 1)`-bit two's-complement level — the composition
-/// the staged q9up alphabet + `requant-res-bits` +
-/// `requant-quantizer-offset-Dc` facts pin (module-level escape
-/// grounding note). The raw field is read MSB-first via
-/// [`Sv7BitReader::read_bits`], mirroring the SV7 §2.5 escape
-/// ladder per the §3.6 lossless SV7↔SV8 relationship (module-level
-/// "Conventions" note).
+/// i.e. the VLC symbol is the **unsigned** `0..=255` high part (the
+/// staged map stores the byte reinterpreted as `i8`; decode
+/// recovers the raw byte), the raw field the low `n` bits, and the
+/// per-`Res` quantiser offset `D` recenters — the §6.4.3 "subtract
+/// the per-`Res` offset `Dc[Res]`" step, fixture-pinned by the r419
+/// SV8 corpus (module-level escape grounding note). The raw field
+/// is read MSB-first via [`Sv7BitReader::read_bits`], mirroring the
+/// SV7 §2.5 escape ladder per the §3.6 lossless SV7↔SV8
+/// relationship (module-level "Conventions" note).
 ///
-/// Output samples are already-centred levels in
-/// `[-(D + 1), D]` with `D = 2^(band_type - 2) - 1` (the lone
-/// `-(D + 1)` extremum is the two's-complement asymmetry, passed
-/// through like the SV7 escape's one out-of-range level), so `out`
-/// is `i32` — the levels exceed `i8` for every escape `band_type`.
-/// Unlike [`crate::sv7_band_decode::decode_linear_pcm_band`] (which
-/// emits raw *uncentred* levels for the caller to centre by `D`),
-/// the staged q9up map is signed, so no caller-side centring
-/// applies here.
+/// Output samples are already-centred levels in `[-D, D + 1]` with
+/// `D = 2^(band_type - 2) - 1` (the lone `D + 1` extremum is the
+/// code space's spare value, passed through like the SV7 escape's
+/// one out-of-range level), so `out` is `i32` — the levels exceed
+/// `i8` for every escape `band_type`. Unlike
+/// [`crate::sv7_band_decode::decode_linear_pcm_band`] (which emits
+/// raw *uncentred* levels for the caller to centre by `D`), the
+/// recentre is applied here — SV8 escape levels leave this function
+/// signed and centred like every other SV8 arm.
 ///
 /// A `band_type` outside `9..=17` yields
 /// [`Error::UnsupportedBandType`] (the staged requant tables define
@@ -646,11 +654,16 @@ pub fn decode_sv8_escape_band(
     let raw_bits = escape_raw_bits(band_type).ok_or(Error::UnsupportedBandType(band_type))?;
     let table =
         table_for_role(Sv8TableRole::Q9up, 0).ok_or(Error::UnsupportedBandType(band_type))?;
+    let d = i32::from(crate::requant::QUANTIZER_OFFSET_D[(band_type + 1) as usize]);
     for slot in out.iter_mut() {
-        let symbol = table.decode(reader)? as i32;
+        // §6.4.3: the symbol is the *unsigned* 0..=255 high part (the
+        // staged map stores the byte reinterpreted signed; recover the
+        // raw byte), composed with the raw low bits, then recentred by
+        // the per-`Res` offset `Dc`.
+        let symbol = i32::from(table.decode(reader)? as u8);
         // read_bits(0) is a defined no-op returning 0 (band_type 9).
-        let raw = reader.read_bits(raw_bits)? as i32;
-        *slot = (symbol << raw_bits) | raw;
+        let raw = i32::from(reader.read_bits(raw_bits)?);
+        *slot = ((symbol << raw_bits) | raw) - d;
     }
     Ok(())
 }
@@ -1380,10 +1393,11 @@ mod tests {
     // ─── decode_sv8_escape_band (default arm, 9..=17) ──────
 
     #[test]
-    fn q9up_symbol_map_is_full_signed_byte_permutation() {
+    fn q9up_symbol_map_is_full_byte_permutation() {
         // The escape composition's keystone fact: the alphabet is
-        // exactly the 256 signed-byte values, i.e. the VLC carries
-        // the sign-bearing top 8 bits of the sample.
+        // exactly the 256 byte values (stored reinterpreted as i8),
+        // i.e. the VLC carries the unsigned top 8 bits of the
+        // pre-recentre composed value.
         assert_eq!(SV8_Q9UP_TABLE.symbols.len(), 256);
         let mut values: Vec<i8> = SV8_Q9UP_TABLE.symbols.to_vec();
         values.sort_unstable();
@@ -1410,30 +1424,32 @@ mod tests {
 
     #[test]
     fn escape_composition_tiles_the_dc_pinned_level_range() {
-        // For every escape band_type, the composed value range
-        // [-(D+1), D] must cover the Dc-pinned -D..=D, with the
-        // maximum landing exactly on D = 2^(band_type-2) - 1.
+        // For every escape band_type, the recentred value range
+        // [-D, D+1] must cover the Dc-pinned -D..=D: the unsigned
+        // composition spans 0..=2D+1 and the −D recentre lands the
+        // minimum exactly on -D = -(2^(band_type-2) - 1).
         for bt in 9..=17_i8 {
             let n = escape_raw_bits(bt).unwrap() as u32;
             let d = QUANTIZER_OFFSET_D[(bt + 1) as usize] as i32;
-            let max = (127_i32 << n) | ((1 << n) - 1);
-            let min = (-128_i32) << n;
-            assert_eq!(max, d, "band_type {bt}: composed max must equal D");
+            let max = ((255_i32 << n) | ((1 << n) - 1)) - d;
+            let min = 0 - d;
             assert_eq!(
-                min,
-                -(d + 1),
-                "band_type {bt}: composed min is the two's-complement extremum"
+                max,
+                d + 1,
+                "band_type {bt}: recentred max is the spare value"
             );
+            assert_eq!(min, -d, "band_type {bt}: recentred min must equal -D");
         }
     }
 
     #[test]
     fn escape_band_type_nine_is_pure_vlc_per_sample() {
-        // n = 0: the codeword alone is the sample; no raw bits are
-        // consumed.
+        // n = 0: the codeword alone (as an unsigned byte, minus D)
+        // is the sample; no raw bits are consumed.
         let table = &SV8_Q9UP_TABLE;
         let entry = table.lengths[0];
-        let expected = symbol_for_row(table, 0) as i32;
+        let d = QUANTIZER_OFFSET_D[10] as i32; // band_type 9 → index 10
+        let expected = i32::from(symbol_for_row(table, 0) as u8) - d;
 
         let mut p = BitPacker::new();
         for _ in 0..SAMPLES_PER_BAND {
@@ -1453,7 +1469,7 @@ mod tests {
         // band_type 13 → n = 4 raw bits. Alternate a negative- and
         // a positive-symbol codeword, each followed by a distinct
         // 4-bit raw pattern; every sample must equal
-        // symbol * 16 + raw.
+        // (unsigned(symbol) * 16 | raw) - D.
         let table = &SV8_Q9UP_TABLE;
         let (neg_pat, neg_len, neg_sym) =
             find_codeword(table, |s| s < 0).expect("q9up has a negative-symbol codeword");
@@ -1477,9 +1493,10 @@ mod tests {
         let before = reader.bits_remaining();
         let mut out = [0_i32; SAMPLES_PER_BAND];
         decode_sv8_escape_band(&mut reader, 13, &mut out).expect("decode");
+        let d = QUANTIZER_OFFSET_D[14] as i32; // band_type 13 → index 14
         for (i, &s) in out.iter().enumerate() {
-            let sym = if i % 2 == 0 { neg_sym } else { pos_sym } as i32;
-            let expected = (sym << 4) | raw_for(i) as i32;
+            let sym = i32::from(if i % 2 == 0 { neg_sym } else { pos_sym } as u8);
+            let expected = ((sym << 4) | raw_for(i) as i32) - d;
             assert_eq!(s, expected, "sample {i}");
         }
         let codeword_bits = 18 * (neg_len as u64 + pos_len as u64);
@@ -1495,10 +1512,11 @@ mod tests {
         // band_type 17 → n = 8: a full raw byte per sample. Use one
         // fixed codeword and a per-sample raw byte equal to the
         // sample index; MSB-first composition means
-        // sample = (symbol << 8) | i exactly.
+        // sample = ((unsigned(symbol) << 8) | i) - D exactly.
         let table = &SV8_Q9UP_TABLE;
         let entry = table.lengths[0];
-        let symbol = symbol_for_row(table, 0) as i32;
+        let symbol = i32::from(symbol_for_row(table, 0) as u8);
+        let d = QUANTIZER_OFFSET_D[18] as i32; // band_type 17 → index 18
 
         let mut p = BitPacker::new();
         for i in 0..SAMPLES_PER_BAND {
@@ -1510,7 +1528,7 @@ mod tests {
         let mut out = [0_i32; SAMPLES_PER_BAND];
         decode_sv8_escape_band(&mut reader, 17, &mut out).expect("decode");
         for (i, &s) in out.iter().enumerate() {
-            assert_eq!(s, (symbol << 8) | i as i32, "sample {i}");
+            assert_eq!(s, ((symbol << 8) | i as i32) - d, "sample {i}");
         }
     }
 
@@ -1599,13 +1617,15 @@ mod tests {
     /// Encode one sparse group of 18 samples (`{-1,0,+1}`) into `p`,
     /// returning the `cnt` the caller must emit via the q1 table:
     /// the enumerative position codeword (omitted for cnt 0 / 18) plus
-    /// one MSB-first sign bit per present position.
+    /// one sign bit per present position in ascending position order
+    /// (mask bit `17 − pos` ⇔ position `pos`, the fixture-pinned r419
+    /// orientation the decoder applies).
     fn pack_sparse_group(p: &mut BitPacker, samples: &[i8; 18]) -> u8 {
         let n = 18u32;
         let mut present: u32 = 0;
         for (i, &s) in samples.iter().enumerate() {
             if s != 0 {
-                present |= 1 << i;
+                present |= 1 << (17 - i);
             }
         }
         let cnt = present.count_ones();
@@ -1617,10 +1637,9 @@ mod tests {
             };
             pack_enum_subset(p, coded, k, n);
         }
-        // sign bits MSB-first over present positions
-        for pos in (0..18).rev() {
-            if present & (1 << pos) != 0 {
-                let s = samples[pos];
+        // sign bits in ascending position order over present positions
+        for &s in samples.iter() {
+            if s != 0 {
                 p.push_raw(if s > 0 { 1 } else { 0 }, 1);
             }
         }

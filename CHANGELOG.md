@@ -6,6 +6,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Round 419** — **SV8 sample-arm conventions corrected against the
+  first real SV8 corpus.** The round's SV8 fixtures (losslessly
+  transcoded from the staged SV7 corpus, plus fresh reference-encoder
+  streams — see `tests/fixtures/sv8/`) pin three conventions the
+  synthetic-only rounds had wrong; each divergence desynchronised the
+  bitstream within a band on a real stream:
+  - **§6.4.3 large-coefficient escape** (`Res ≥ 9`): the q9up VLC
+    symbol is the *unsigned* `0..=255` high part (the staged map's
+    bytes reinterpreted), composed `((symbol << n) | raw) − D` with
+    the per-`Res` quantiser offset recentre — exactly the "subtract
+    `Dc[Res]`" step the staged §6.4.3 states. Previously the symbol
+    was taken signed with no recentre.
+  - **§6.4.1 sparse band**: the enumerative presence bitmap applies
+    MSB-first onto *ascending* positions (mask bit `17 − pos` ⇔
+    position `pos`); sign bits follow in ascending-position order.
+    Previously mirrored.
+  - **§6.2 key-frame `Max_used_Band`**: the bounded log code spans
+    the *count* range `0..=max_band+1` (`max_band + 2` values);
+    previously one value short, decoding every keyframe count one
+    low. `decode_sv8_ms_flags` orientation is now documented as
+    fixture-pinned: returned index 0 is the **lowest** non-zero band
+    (mask MSB), not the topmost.
+
 ### Added
 
 - **Round 405** — **SV7 PNS/CNS stream flag (version byte `0x17`).**

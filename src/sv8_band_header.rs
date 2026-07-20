@@ -222,20 +222,24 @@ pub fn decode_log_code(reader: &mut Sv7BitReader<'_>, max: u32) -> Result<u32> {
 }
 
 /// Decode the §6.2 **key-frame** `Max_used_Band`: a §6.5 bounded log
-/// code over `0..max_band+1`, where `max_band` is the SH-packet's
-/// highest-coded-subband field (`SH` field 6, already `+1`-debiased).
+/// code over the **count** range `0..=max_band+1`, where `max_band` is
+/// the SH-packet's highest-coded-subband field (`SH` field 6, already
+/// `+1`-debiased).
 ///
-/// §6.2: "On a key frame `Max_used_Band` is read with a bounded 'log'
-/// code (`mpc_bits_log_dec`, a truncated-binary code over the range
-/// `0..max_band+1`)." The decoded value is the count of coded bands.
+/// §6.2 phrases the code space as "the range `0..max_band+1`"; the
+/// decoded value is the **count of coded bands**, whose inclusive
+/// maximum is `max_band + 1` (all of bands `0..=max_band` coded), so
+/// the code space holds `max_band + 2` values. Fixture-pinned (r419):
+/// with the smaller `max_band + 1` space every keyframe of the SV8
+/// corpus decodes a count one short of the SV7 ground truth; with
+/// `max_band + 2` all 92 corpus frames align bit-exactly.
 ///
-/// The result is range-checked against `max_band` (it cannot exceed the
-/// SH-declared maximum); a log code over `0..max_band+1` already bounds
-/// it, but a malformed `lost`-tail read is rejected via
-/// [`Error::MaxBandOutOfRange`].
+/// The result is range-checked against `max_band + 1` (the count cannot
+/// exceed the SH-declared band range); a malformed `lost`-tail read is
+/// rejected via [`Error::MaxBandOutOfRange`].
 pub fn decode_keyframe_max_used_band(reader: &mut Sv7BitReader<'_>, max_band: u8) -> Result<u8> {
-    let value = decode_log_code(reader, max_band as u32 + 1)?;
-    if value > max_band as u32 {
+    let value = decode_log_code(reader, max_band as u32 + 2)?;
+    if value > max_band as u32 + 1 {
         return Err(Error::MaxBandOutOfRange(value.min(u8::MAX as u32) as u8));
     }
     Ok(value as u8)
@@ -287,9 +291,13 @@ pub fn decode_nonkey_max_used_band(reader: &mut Sv7BitReader<'_>, last_max_band:
 ///
 /// `tot` is the count of bands with at least one non-zero channel
 /// (computed by the caller from the §6.2 band-resolution walk). The
-/// returned `Vec<bool>` has length `tot`; index `0` is the **topmost**
-/// non-zero band and index `tot − 1` the lowest (the "top down"
-/// application order). `true` ⇒ that band is mid/side.
+/// returned `Vec<bool>` has length `tot`; index `0` is the **lowest**
+/// non-zero band and index `tot − 1` the topmost — fixture-pinned
+/// (r419): applying the mask MSB-to-lowest-band reproduces the SV7
+/// ground-truth per-band M/S flags across the transcoded corpus, while
+/// the opposite orientation diverges on the first frame. (The §6.2
+/// "applied … from the top down" phrasing describes the decode walk,
+/// not the returned order.) `true` ⇒ that band is mid/side.
 ///
 /// Decode:
 ///
@@ -301,8 +309,10 @@ pub fn decode_nonkey_max_used_band(reader: &mut Sv7BitReader<'_>, last_max_band:
 ///    `min(cnt, tot − cnt)` positions of `tot`; when `cnt > tot / 2`
 ///    the coder named the *complement* (the smaller subset is always
 ///    coded), so the mask is bit-inverted within the `tot`-bit field.
-/// 3. The mask is read MSB-first: bit `tot − 1` is the topmost band
-///    (`out[0]`), down to bit `0` (`out[tot − 1]`).
+/// 3. The mask is applied MSB-first onto ascending bands: bit
+///    `tot − 1` is the lowest non-zero band (`out[0]`), down to bit
+///    `0` for the topmost (`out[tot − 1]`) — the same
+///    MSB-to-first-element orientation as the §6.4.1 sparse bitmap.
 ///
 /// `tot == 0` returns an empty vector (reads nothing).
 ///
@@ -342,7 +352,8 @@ pub fn decode_sv8_ms_flags(reader: &mut Sv7BitReader<'_>, tot: u8) -> Result<Vec
         }
     };
 
-    // MSB-first: bit (tot-1) is the topmost band, out[0].
+    // MSB-first onto ascending bands: bit (tot-1) is the lowest
+    // non-zero band, out[0] (fixture-pinned orientation, r419).
     let mut out = Vec::with_capacity(tot as usize);
     for p in (0..n).rev() {
         out.push(mask & (1 << p) != 0);
@@ -1062,10 +1073,12 @@ mod tests {
     // ─── §6.2 Max_used_Band (key + non-key) ────────────────
 
     #[test]
-    fn keyframe_max_used_band_is_log_code_over_zero_to_maxband_plus_one() {
+    fn keyframe_max_used_band_is_log_code_over_the_count_range() {
+        // The code space covers the count 0..=max_band+1 (max_band+2
+        // values) — fixture-pinned r419 (see the fn docs).
         for max_band in [1u8, 5, 16, 31] {
-            for v in 0..=max_band as u32 {
-                let (pat, len) = log_encode(v, max_band as u32 + 1);
+            for v in 0..=max_band as u32 + 1 {
+                let (pat, len) = log_encode(v, max_band as u32 + 2);
                 let mut p = BitPacker::new();
                 if len > 0 {
                     p.push(pat, len);
@@ -1189,12 +1202,13 @@ mod tests {
         }
     }
 
-    /// Encode a §6.2 M/S flag schedule (topmost band first) into a
-    /// stream that [`decode_sv8_ms_flags`] must reproduce.
+    /// Encode a §6.2 M/S flag schedule (lowest non-zero band first —
+    /// the fixture-pinned r419 orientation) into a stream that
+    /// [`decode_sv8_ms_flags`] must reproduce.
     fn pack_ms_flags(flags: &[bool]) -> Vec<u8> {
         let n = flags.len() as u32;
         let mut p = BitPacker::new();
-        // mask MSB-first: out[0] (topmost) is bit n-1.
+        // mask MSB-first: out[0] (lowest band) is bit n-1.
         let mut mask: u32 = 0;
         for (i, &f) in flags.iter().enumerate() {
             if f {
@@ -1248,10 +1262,10 @@ mod tests {
     #[test]
     fn ms_flags_all_set_and_none_set_read_only_the_count() {
         // cnt==0 and cnt==tot read no enumerative bits — confirm via the
-        // exact-bit roundtrip (already covered above) plus a top-down
-        // ordering spot check: a single top band flagged.
+        // exact-bit roundtrip (already covered above) plus an ordering
+        // spot check: only the lowest band flagged.
         let mut flags = vec![false; 6];
-        flags[0] = true; // topmost band M/S
+        flags[0] = true; // lowest non-zero band M/S
         let bytes = pack_ms_flags(&flags);
         let mut reader = Sv7BitReader::new(&bytes);
         let got = decode_sv8_ms_flags(&mut reader, 6).unwrap();
@@ -1260,10 +1274,10 @@ mod tests {
     }
 
     #[test]
-    fn ms_flags_top_down_ordering_is_observable() {
-        // A flag only on the lowest band must land at out[tot-1].
+    fn ms_flags_ascending_ordering_is_observable() {
+        // A flag only on the topmost band must land at out[tot-1].
         let mut flags = vec![false; 5];
-        flags[4] = true; // lowest band
+        flags[4] = true; // topmost band
         let bytes = pack_ms_flags(&flags);
         let mut reader = Sv7BitReader::new(&bytes);
         let got = decode_sv8_ms_flags(&mut reader, 5).unwrap();
