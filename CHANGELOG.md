@@ -33,6 +33,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 419** — **SV8 encode side: frame-body encoder, wire-symmetric
+  with the reference tools.** `sv8_huffman_encode` (canonical-Huffman
+  symbol→codeword inversion over all 21 staged tables + the §6.5
+  bounded-log and enumerative encoders, each exhaustively round-tripped
+  against its decoder) and `sv8_stereo_frame_encode` (the exact inverse
+  of the r419 frame-body decode: MUB, stereo res walk, M/S bitmap,
+  SCFI/DSCF/sample passes with the shared temporal SCF state).
+  `tests/sv8_corpus_reencode.rs` proves **byte-identical re-encode of
+  every `AP` packet of all seven corpus fixtures** — including the
+  64-frame packets, the CNS stream, the mono stream, and the
+  encoder-flush frame past the sample totals — so the encoder is
+  wire-symmetric with the reference transcoder/encoder on this corpus.
+  (`Sv8StereoFrameDecode` now records the per-band SCFI selectors so a
+  re-encode reproduces the exact codewords.)
+
 - **Round 419** — **SV8 decode closed end-to-end: stereo, mono,
   multi-packet, absolute loudness, externally validated.** The first
   real SV8 corpus (`tests/fixtures/sv8/`: the five staged SV7 fixtures

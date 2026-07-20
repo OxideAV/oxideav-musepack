@@ -106,7 +106,12 @@ CNS transcode carries the same oracle-noise-waveform limitation as its
 SV7 sibling (filed docs gap) and is gated on its noise-free first
 frame + correlation + the transcode-identity gate
 (`tests/sv8_corpus.rs`). `decode_mpc_stream` now routes both
-generations knob-free at absolute loudness.
+generations knob-free at absolute loudness. The round also grew the
+**SV8 encode side** (`sv8_huffman_encode` + `sv8_stereo_frame_encode`,
+the exact inverse of the pinned frame-body decode): re-encoding the
+decoded structure of **every corpus `AP` packet reproduces the
+reference producers' bytes exactly** (`tests/sv8_corpus_reencode.rs`)
+— the SV8 frame-body layer is wire-symmetric, like the SV7 side.
 
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
@@ -362,6 +367,14 @@ Musepack ships in two incompatible stream-format generations:
   applies the SV7-shared absolute law per band/channel. Real frame
   bodies are always two-channel — a mono `SH` merely selects mono
   output.
+- `sv8_huffman_encode` / `sv8_stereo_frame_encode` — the **SV8 encode
+  side** (round 419): canonical-Huffman symbol→codeword inversion for
+  all 21 staged tables plus §6.5 log/enumerative encoders
+  (exhaustively round-tripped), and the frame-body encoder inverting
+  `decode_sv8_stereo_frame` phase-for-phase (shared `Sv8FrameState`
+  temporal SCF memory; DSCF escape forms forced by the delta value).
+  Corpus-proven wire symmetry: every fixture `AP` payload re-encodes
+  byte-identically (`tests/sv8_corpus_reencode.rs`).
 - `sv8_stream` — SV8 **stream drivers**. `Sv8StreamDecoder` (round
   419) is the real-stream driver: whole `AP` packets in the
   fixture-pinned two-channel layout, persistent two-channel synthesis

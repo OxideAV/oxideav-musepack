@@ -203,7 +203,7 @@ pub const SPARSE_GROUP_SIZE: usize = 18;
 /// Computed with the multiplicative recurrence so no precomputed
 /// table is needed; `C(18, 9) = 48620` is the largest value reached
 /// in the sparse-band path and fits comfortably in `u32`.
-const fn binomial(n: u32, k: u32) -> u32 {
+pub(crate) const fn binomial(n: u32, k: u32) -> u32 {
     if k > n {
         return 0;
     }
@@ -227,7 +227,7 @@ const fn binomial(n: u32, k: u32) -> u32 {
 /// §6.5 prose describes: "Decode reads `bitlen − 1` bits; if the
 /// value reaches into the 'lost-codes' region it reads one more bit
 /// and rebases"). `total ≤ 1` ⇒ a single codeword carrying zero bits.
-const fn enum_bitlen_lost(total: u32) -> (u8, u32) {
+pub(crate) const fn enum_bitlen_lost(total: u32) -> (u8, u32) {
     if total <= 1 {
         return (0, 0);
     }

@@ -133,6 +133,25 @@ impl Sv8FrameState {
     pub fn last_nbands(&self) -> u8 {
         self.last_nbands
     }
+
+    /// The stored temporal reference for `(ch, band)`: the `SCF[2]` of
+    /// the last frame that coded the band, or `None` since the last
+    /// reset ("first use" pending). Shared with the encode side
+    /// ([`crate::sv8_stereo_frame_encode`]), which must track the same
+    /// state to choose the absolute-vs-delta `SCF[0]` form.
+    pub(crate) fn scf_ref(&self, ch: usize, band: usize) -> Option<i32> {
+        self.scf_mem[ch][band]
+    }
+
+    /// Record `(ch, band)`'s `SCF[2]` after its DSCF layer.
+    pub(crate) fn note_scf2(&mut self, ch: usize, band: usize, scf2: i32) {
+        self.scf_mem[ch][band] = Some(scf2);
+    }
+
+    /// Record the frame's `Max_used_Band` (the §6.2 non-key reference).
+    pub(crate) fn note_nbands(&mut self, nbands: u8) {
+        self.last_nbands = nbands;
+    }
 }
 
 impl Default for Sv8FrameState {
@@ -152,6 +171,12 @@ pub struct Sv8StereoFrameDecode {
     pub res: Vec<[i8; 2]>,
     /// Per-band M/S flag (all `false` when the stream M/S flag is off).
     pub ms_flags: Vec<bool>,
+    /// Per-band per-channel §6.3 SCFI selectors (`0..=3`; zero for an
+    /// empty channel). For a band with one non-zero channel both slots
+    /// carry that channel's selector (the §6.3 packed value
+    /// degenerates); recorded so a re-encode can reproduce the exact
+    /// SCFI codewords.
+    pub scfi: Vec<[u8; 2]>,
     /// Per-band per-channel three §6.3 granule SCF indices (zeroed for
     /// an empty channel).
     pub granule_scf: Vec<[[i32; SCF_GRANULES_PER_BAND]; 2]>,
@@ -268,6 +293,7 @@ pub fn decode_sv8_stereo_frame(
         nbands,
         res,
         ms_flags,
+        scfi,
         granule_scf,
         levels,
     })
@@ -675,6 +701,7 @@ mod tests {
             nbands: 1,
             res: vec![[3, 0]],
             ms_flags: vec![false],
+            scfi: vec![[3, 3]],
             granule_scf: vec![[[1, 1, 1], [0, 0, 0]]],
             levels: vec![[[1; SAMPLES_PER_BAND], [0; SAMPLES_PER_BAND]]],
         };
