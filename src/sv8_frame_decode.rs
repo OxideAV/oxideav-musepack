@@ -42,36 +42,27 @@
 //! interleaves per band) is not pinned cell-for-cell by the staged
 //! material — see the "Still GAP" note below.
 //!
-//! # Scope: single channel
+//! # Scope: single-channel bodies (a synthetic-stream primitive)
 //!
-//! This assembler walks **one channel**. The §3.4 prose reproduces only
-//! the per-band sample `switch`, not a channel loop, and the SV8
-//! per-channel interleaving (whether L and R bands alternate per band,
-//! or each channel is a full sweep) is GAP — the same gap
-//! [`crate::sv8_band_header`] documents. A mono stream, or one channel of
-//! a stereo stream whose channel layout the caller has already resolved,
-//! decodes fully here; the multi-channel composition (and the M/S undo
-//! that follows it) is left to a future round once the channel-loop shape
-//! is pinned. For the single-channel SCFI the band's non-zero-channel
-//! count is `1`, so [`decode_sv8_scfi`] reads the `scfi-1` context and
-//! the SCFI value is the channel's selector directly.
+//! This assembler walks **one channel** with a fused per-band
+//! SCF+sample loop. The r419 corpus pinned the real-stream layout as
+//! something else: every real SV8 frame body codes **two channels**
+//! with three separate band-major passes (SCFI, DSCF, samples) and a
+//! per-band M/S bitmap — see [`crate::sv8_stereo_frame`], the
+//! real-stream path. This module remains as the single-channel
+//! primitive for synthetic frame runs (its sub-walk composition is
+//! still the grounded one) but does **not** decode real `AP` payloads.
 //!
-//! # Still GAP downstream
-//!
-//! - **Cross-phase SCF/sample ordering** and **per-channel
-//!   interleaving** (above).
-//! - **The §6.3 "new-block" flag source.** §6.2 forces it set on every
-//!   key frame (scalefactors coded absolutely); on a non-key frame it is
-//!   a per-band flag whose bitstream position the staged material does
-//!   not pin. This assembler takes `new_block` as a caller argument
-//!   (set it `true` for a key frame).
-//! - **Dequant + per-granule SCF multiply + synthesis filterbank** — the
-//!   reconstruction beyond the structured per-band decode, documented in
-//!   `crate::reconstruct` / `crate::frame_reconstruct` (and partly GAP:
-//!   the absolute SCF anchor gain and the Layer-II synthesis window).
+//! Two further r419-pinned conventions this primitive does not model:
+//! the §6.3 non-key `SCF[0]` reference is **temporal** (the same
+//! band's previous-frame `SCF[2]`, with a first-use absolute base),
+//! not the previous band's `SCF[2]` this fused walk threads; and CNS
+//! bands (`Res == −1`) participate in the SCFI/DSCF layer. Callers
+//! needing real-stream behaviour should use
+//! [`crate::sv8_stereo_frame::decode_sv8_stereo_frame`].
 //!
 //! No new format facts are introduced: this is pure composition of the
-//! already-grounded sub-walks in the documented phase order.
+//! already-grounded sub-walks.
 //!
 //! Source-of-record: `docs/audio/musepack/musepack-sv7-sv8-spec.md`
 //! §2.3–§2.6 (frame-body phase layout) + §1 (32-subband geometry), and

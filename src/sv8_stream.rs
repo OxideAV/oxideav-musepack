@@ -99,8 +99,9 @@ pub struct Sv8FrameParams {
 /// automatically.
 #[derive(Debug, Clone)]
 pub struct Sv8MonoStreamDecoder {
-    /// §2.6 absolute SCF anchor — GAP, threaded as a constant (`0` for
-    /// the relative-loudness convention).
+    /// Relative SCF anchor for the single-channel primitive (`0` for
+    /// the relative-loudness convention; the real-stream path decodes
+    /// at the r419 corpus-pinned absolute loudness instead).
     anchor: i32,
     /// Persistent single-channel synthesis state (filterbank overlap).
     filter: SynthesisFilter,
@@ -111,8 +112,8 @@ pub struct Sv8MonoStreamDecoder {
 }
 
 impl Sv8MonoStreamDecoder {
-    /// Build a mono stream decoder. `anchor` is the §2.6 absolute SCF
-    /// anchor (GAP; pass `0` for the relative-loudness convention).
+    /// Build a mono stream decoder. `anchor` is the relative SCF
+    /// reference (pass `0` for the relative-loudness convention).
     #[must_use]
     pub fn new(anchor: i32) -> Self {
         Self {

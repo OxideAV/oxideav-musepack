@@ -38,14 +38,15 @@
 //! reconstruct to silence — the §6.2 used-band convention (an absent band
 //! contributes 36 zero subband samples).
 //!
-//! # Still GAP downstream
+//! # Absolute path (r419)
 //!
-//! - **Absolute SCF anchor gain** — the per-granule SCF multiply here is
-//!   *relative* to a caller `anchor`; the absolute reference-index gain is
-//!   GAP (see [`crate::reconstruct`]). Relative loudness between granules
-//!   and between anchor-sharing bands is exact.
-//! - **M/S undo** ([`crate::ms_stereo`]) and the **synthesis filterbank**
-//!   remain GAP / out-of-scope-of-`docs/audio/musepack/` respectively.
+//! The anchor-relative functions here serve the single-channel
+//! primitive ([`crate::sv8_frame_decode`]). The real-stream path uses
+//! the **absolute** reconstruction instead — corpus-pinned r419, the
+//! SV7-shared law: [`crate::reconstruct::reconstruct_sv8_band_absolute`]
+//! via [`crate::sv8_stereo_frame::reconstruct_sv8_stereo_frame`], with
+//! the corpus-pinned M/S undo ([`crate::ms_stereo::ms_to_lr`]) and the
+//! synthesis filterbank downstream.
 //!
 //! Source-of-record (facts only): `docs/audio/musepack/musepack-sv7-sv8-spec.md`
 //! §1 (32-subband geometry), §3 (SV8 reuses the SV7 signal path), §2.6
@@ -119,11 +120,11 @@ pub fn reconstruct_sv8_band(
 /// Subbands not present in `bands` (uncoded) keep their zero row.
 ///
 /// `anchor` is the shared signed SCF-ladder reference the per-granule
-/// gains are taken relative to (the absolute anchor value is still GAP per
-/// §2.6 — see [`crate::reconstruct`]); a fixed anchor makes relative
-/// loudness between granules and between bands exact, with the whole
-/// channel offset by the single global constant the GAP anchor would
-/// supply.
+/// gains are taken relative to; a fixed anchor makes relative loudness
+/// between granules and between bands exact, with the whole channel
+/// offset by a single global constant. (The real-stream path uses the
+/// r419 corpus-pinned absolute law instead —
+/// [`crate::reconstruct::reconstruct_sv8_band_absolute`].)
 ///
 /// # Errors
 ///
@@ -157,14 +158,14 @@ pub fn reconstruct_sv8_frame_channel(
 /// `nbands` is the §6.2 used-band count, `new_block` the §6.3 per-band
 /// new-block flag (set `true` for a key frame, where scalefactors are
 /// coded absolutely), and `cns` the shared CNS PRNG advanced by every
-/// noise band. `anchor` is the still-GAP absolute SCF reference (see the
-/// module docs); a fixed value makes relative loudness exact.
+/// noise band. `anchor` is the relative SCF reference (see the module
+/// docs); a fixed value makes relative loudness exact — the real-stream
+/// path uses the r419 absolute law instead.
 ///
-/// This is the single integration point from raw frame-body bits to
-/// reconstructed subband samples for a mono stream (or one already-
-/// resolved channel of a stereo stream); the multi-channel composition +
-/// M/S undo follow once their bitstream shape is pinned (GAP — see
-/// [`crate::sv8_frame_decode`]).
+/// This is the single-channel-body integration point from raw frame
+/// bits to reconstructed subband samples (a synthetic-stream primitive
+/// — real SV8 frame bodies are two-channel, r419; see
+/// [`crate::sv8_stereo_frame`] for the real-stream path).
 ///
 /// # Errors
 ///

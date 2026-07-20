@@ -46,10 +46,10 @@ reproduces the reference encoder's bytes exactly
 (`tests/sv7_corpus_reencode.rs`). The decoder is wired into the
 **`oxideav-core` registry** (`registry::register` /
 `oxideav_core::register!`) with a directly-callable
-`registry::make_decoder` factory. The SV8 grounded subset (mono,
-keyframe `AP`) still decodes at relative loudness — no SV8 corpus
-exists yet. ~670 lib tests + the corpus integration gates; remaining
-gaps tracked in `CHANGELOG.md` `[Unreleased]`.
+`registry::make_decoder` factory. (The SV8 path has since been closed
+and corpus-validated at absolute loudness — round 419, below.)
+~690 lib tests + the corpus integration gates; remaining gaps tracked
+in `CHANGELOG.md` `[Unreleased]`.
 
 **Round 405: CNS / PNS validated on the wire.** The freshly staged
 `cns-pns` fixture (mppenc 1.16 `--pns 1.0`; 215 noise-band instances
@@ -77,6 +77,36 @@ empirical wire facts into the spec itself: §1.1 now documents the
 20-bit prefix / four band-major passes / 11-bit trailer, and erratum
 E1 records the temporal `SCF[0]` predictor — module docs now cite
 those sections as source-of-record.
+
+**Round 419: SV8 decode is closed and externally validated — stereo,
+mono, multi-packet, absolute loudness.** The first real SV8 corpus
+(`tests/fixtures/sv8/`: the five staged SV7 fixtures losslessly
+transcoded with the reference `mpc2sv8` tool, plus fresh `mpcenc`
+streams — all black-box producers) pinned the whole real-stream frame
+layout the synthetic-only rounds could not reach, and corrected three
+sample-arm conventions (escape composition, sparse-bitmap orientation,
+keyframe `Max_used_Band` code space). The pinned layout
+(`sv8_stereo_frame`): per frame, `Max_used_Band` (keyframe log code /
+non-key `Bands` delta), the §6.2 band-resolution walk top-down with
+the two channels interleaved per band, the §6.2 M/S bitmap over
+non-zero bands (mask MSB = lowest band), then three band-major passes
+ascending — SCFI (joint packed, CNS participates), DSCF (temporal
+per-band per-channel `SCF[2]` memory; absolute base on key frame or
+first use), samples. Every frame body codes **two channels** even in a
+mono stream (the `SH` channel count selects the output shape); every
+`AP` packet opens with a key frame and resets the SCF memory. The
+absolute reconstruction is the SV7-shared corpus-pinned law. Result:
+all 92 transcoded-corpus frames decode structurally identical to their
+SV7 ground truth, the transcodes' f64 PCM is **bit-identical** to the
+SV7 decodes (the §3.6 lossless relationship, gated oracle-free), and
+every non-CNS stream — including the 77-frame two-packet stream and
+the mono stream — decodes **100% within ±1 LSB of the FFmpeg `mpc8`
+oracle** (~75–88% bit-exact, the f64-vs-f32 synthesis residue). The
+CNS transcode carries the same oracle-noise-waveform limitation as its
+SV7 sibling (filed docs gap) and is gated on its noise-free first
+frame + correlation + the transcode-identity gate
+(`tests/sv8_corpus.rs`). `decode_mpc_stream` now routes both
+generations knob-free at absolute loudness.
 
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
@@ -150,8 +180,10 @@ Musepack ships in two incompatible stream-format generations:
   band-type case so each arm's level convention (raw-unsigned PCM-escape
   vs already-centred Huffman vs CNS-PRNG) is centred/dequantised
   correctly, produces the reconstructed `f64` subband samples — relative
-  to a caller-supplied SCF anchor (the absolute anchor is GAP), so
-  granule-to-granule and anchor-sharing-band loudness is exact.
+  to a caller-supplied SCF anchor (the corpus-pinned **absolute** law
+  lives alongside: `reconstruct_sv7_band_absolute` /
+  `reconstruct_sv8_band_absolute`), so granule-to-granule and
+  anchor-sharing-band loudness is exact.
 - `frame_reconstruct` — SV7 §2.6 frame-level reconstruction assembler:
   `reconstruct_frame_channel(bands, anchor)` composes the per-band
   `reconstruct::reconstruct_sv7_band_from_levels` over the Layer-II
@@ -213,8 +245,9 @@ Musepack ships in two incompatible stream-format generations:
   SCF threaded off the previous band's `SCF[2]`, the §5.4 1-bit context
   selector for the grouped / per-sample-Huffman cases, then 36 sample
   levels) — emitting a `frame_reconstruct::BandLevels` sequence ready for
-  `reconstruct_frame_channel`. Cross-channel interleaving, the M/S undo,
-  and the absolute SCF anchor remain GAP.
+  `reconstruct_frame_channel`. (Cross-channel interleaving, the M/S
+  undo, and the absolute SCF anchor were closed by the r390 corpus —
+  see `sv7_stereo_frame` / `sv7_stream`.)
 - `sv8_frame_decode` — SV8 single-channel audio-packet frame-body
   assembler. `decode_sv8_frame_channel` joins the grounded SV8 sub-walks
   in the documented frame-body phase order (§2.3–§2.6): a §6.2
@@ -225,8 +258,10 @@ Musepack ships in two incompatible stream-format generations:
   Output is a per-coded-subband `Sv8BandDecode` sequence (subband index,
   `band_type`, three SCF indices, 36 sample levels) — the structured
   input the §2.6/§3.6 reconstruction (dequant + per-granule SCF multiply
-  + synthesis filterbank) consumes. Multi-channel interleaving, the M/S
-  undo, and the cross-phase SCF/sample ordering remain GAP.
+  + synthesis filterbank) consumes. A **synthetic-stream primitive**:
+  the r419 corpus pinned real frame bodies as two-channel with three
+  band-major passes and temporal SCF memory — `sv8_stereo_frame` is
+  the real-stream path.
 - `sv8_reconstruct` — SV8 frame-decode → reconstructed subband-sample
   bridge (the SV8 counterpart of `frame_reconstruct`).
   `reconstruct_sv8_frame_channel` turns the `Vec<Sv8BandDecode>` of
@@ -315,24 +350,34 @@ Musepack ships in two incompatible stream-format generations:
   SV8 whole-stream decoder. Self-decodable and spec-grounded
   (§1/§1.1/§4); byte-for-byte interop with externally-encoded files
   awaits a fixture corpus (none under `docs/audio/musepack/`).
-- `sv8_stream` — SV8 **mono stream driver**. `Sv8MonoStreamDecoder` is
-  the SV8 counterpart of `sv7_stream` for one channel: a persistent
-  single-channel `SynthesisFilter` + shared CNS PRNG threaded across the
-  `block_power`-derived frames of an `AP` packet; `decode_frame` runs §6
-  decode + §2.6/§3.6 reconstruct + synthesis per frame, with the per-frame
-  `Sv8FrameParams { nbands, new_block }` caller-supplied.
-- `sv8_decode` — SV8 **packet-stream → audio integration** (first wiring
-  of the packet layer to the audio decode). `decode_sv8_mono_stream`
-  walks an `MPCK` buffer, reads the `SH` header, and drives an
-  `Sv8MonoStreamDecoder` over every `AP` packet as one §6.2 key frame
-  (reading its own `Max_used_Band` log code), emitting `Sv8DecodedStream
-  { header, audio_packets, pcm }`. Supported subset is mono +
-  `block_power == 0` + key-frame `AP`; out-of-subset streams are rejected
-  with precise errors (`ChannelCountInvalid` / `UnsupportedBlockPower`).
-  SV8 stereo + multi-frame-packet wait on the per-channel-interleaving +
-  per-frame-`Max_used_Band` DOCS-GAPs. The SV7/SV8 multi-channel
-  composition is now wired (SV7 stereo via `sv7_stream`); only the §2.6
-  M/S-undo *arithmetic* and the absolute SCF anchor remain GAP.
+- `sv8_stereo_frame` — the SV8 **two-channel frame-body decode**
+  (round 419, fixture-pinned): `Max_used_Band` (keyframe log code over
+  the count range / non-key `Bands` delta), the §6.2 stereo resolution
+  walk (top-down, L/R interleaved per band, per-channel delta+context
+  chains), the §6.2 M/S bitmap over non-zero bands (mask MSB = lowest
+  band), then three band-major passes ascending: SCFI (joint packed;
+  CNS bands participate), DSCF (temporal per-band per-channel `SCF[2]`
+  memory via `Sv8FrameState`; absolute raw-7-bit base on key frame or
+  first use), and samples (L then R). `reconstruct_sv8_stereo_frame`
+  applies the SV7-shared absolute law per band/channel. Real frame
+  bodies are always two-channel — a mono `SH` merely selects mono
+  output.
+- `sv8_stream` — SV8 **stream drivers**. `Sv8StreamDecoder` (round
+  419) is the real-stream driver: whole `AP` packets in the
+  fixture-pinned two-channel layout, persistent two-channel synthesis
+  + free-running CNS PRNG + per-packet-reset SCF memory, M/S undo,
+  absolute loudness, interleaved or mono output.
+  `Sv8MonoStreamDecoder` remains as the single-channel-body primitive
+  for synthetic frame runs (per-frame
+  `Sv8FrameParams { nbands, new_block }` caller-supplied).
+- `sv8_decode` — SV8 **whole-stream decode** (round 419).
+  `decode_sv8_stream` walks an `MPCK` buffer (`SH` → `AP`×N → `SE`),
+  drives the `Sv8StreamDecoder` with
+  `min(frames_per_audio_packet, frames remaining)` frames per packet
+  (frame totals from the `SH` sample count), and gapless-trims the
+  output to the `SH` totals, emitting `Sv8DecodedStream { header,
+  audio_packets, frames_decoded, pcm }` + a `pcm_s16` helper. Mono and
+  stereo; >2 channels rejected (`ChannelCountInvalid`).
 - `sv8_band_decode` / `sv8_band_header` / `sv8_sample_decode` /
   `sv8_context` / `sv8_scf_header` / `sv8_dscf_loop` — SV8
   band-resolution walk, per-band sample-decode dispatcher (CNS / empty
@@ -390,10 +435,13 @@ Musepack ships in two incompatible stream-format generations:
 
 - **SV7 absolute SCF anchor — CLOSED (round 390, corpus-pinned):**
   `reconstruct::sv7_absolute_scf_gain` (unity at index 1, s16 domain).
-  The **SV8** absolute anchor remains open (no SV8 corpus).
+  The **SV8** absolute anchor is **CLOSED too (round 419)**: the
+  lossless-transcode corpus pins it as the same law
+  (`reconstruct::reconstruct_sv8_band_absolute`).
 - **SV7 M/S undo arithmetic — CLOSED (round 390, corpus-pinned):**
-  `ms_stereo::ms_to_lr` (`L = M + S`, `R = M − S`). The generic
-  closure entry point remains for the SV8 path.
+  `ms_stereo::ms_to_lr` (`L = M + S`, `R = M − S`) — corpus-proven for
+  the SV8 path too (round 419); the generic closure entry point
+  remains.
 - **CNS scalefactor participation** — CNS bands (`Res == −1`) now read
   SCFI + DSCF like coded bands (the §5.2 "`Res ≠ 0`" gate + the
   structural spec's "noise scaled by the band's scalefactor"), but the
@@ -421,16 +469,20 @@ Musepack ships in two incompatible stream-format generations:
   / mono output) now runs end-to-end for the grounded subset: SV7 stereo
   via `sv7_stream::Sv7StreamDecoder`, and SV8 mono keyframe streams via
   `sv8_decode::decode_sv8_mono_stream` → `sv8_stream::Sv8MonoStreamDecoder`,
-  with the filterbank overlap + CNS PRNG threaded across frames. Out of
-  scope still: the SV8 **stereo** path (per-channel band interleaving is
-  GAP) and the SV8 **multi-frame `AP`** path (`block_power > 0` — the
-  per-frame `Max_used_Band` position is GAP). The SV7 **whole-file
+  with the filterbank overlap + CNS PRNG threaded across frames. The
+  SV8 **stereo / multi-frame-`AP`** path is **closed too (round 419)**:
+  `sv8_decode::decode_sv8_stream` drives `sv8_stream::Sv8StreamDecoder`
+  over the fixture-pinned two-channel frame layout
+  (`sv8_stereo_frame`), chaining key → non-key frames inside each
+  packet and resetting the SCF memory at packet boundaries, with
+  gapless trim to the `SH` totals. The SV7 **whole-file
   path is closed and externally validated** (rounds 385 + 390): a raw
   `.mpc` buffer decodes end-to-end to s16-domain PCM over the
   corpus-pinned framing (20-bit per-frame prefixes, 11-bit trailer),
   `sv7_file_encode` writes the same layout (round-trip proven), and
   the four-fixture corpus gates hold every decoded sample within
-  ±1 LSB of the FFmpeg oracle.
+  ±1 LSB of the FFmpeg oracle; the seven-fixture SV8 corpus gates do
+  the same for SV8 (`tests/sv8_corpus.rs`).
 
 The SV8 sparse band (case 1) is now wired (see `sv8_sample_decode`),
 and the SV8 packet-size varint convention is resolved as inclusive

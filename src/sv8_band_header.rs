@@ -64,21 +64,19 @@
 //!   [`RawResVlc`] output) is retained for callers that want to drive
 //!   the context rule themselves or inspect the pre-wrap raw alphabet,
 //!   but new band-walk wiring should prefer the grounded function.
-//! - **Per-channel ordering / interleaving.** Unlike SV7 §2.3 (which
-//!   reproduces an explicit `for ch` inner loop, "left band first,
-//!   right band next"), the §3.4 prose reproduces only the per-band
-//!   sample `switch` — it does not spell out a channel loop for the
-//!   SV8 band-resolution header. This module therefore walks a
-//!   **single band-resolution sequence** and leaves the multi-channel
-//!   composition (and any per-channel `bands` count) to a future
-//!   round once the SH-packet channel-count field map (§3.2, GAP) and
-//!   the channel-loop shape are pinned.
-//! - **The SH-packet source of the used-subbands count.** Whether the
-//!   `bands` VLC count is the loop bound directly, or is itself
-//!   clamped by a separately-transmitted `max_band` SH-packet field,
-//!   is GAP (the §3.2 SH field map is GAP). [`decode_used_subbands`]
-//!   surfaces the decoded count as-is; the caller decides how to
-//!   bound the loop.
+//! - **Per-channel ordering — CLOSED (r419).** The real-stream stereo
+//!   composition is pinned by the r419 SV8 corpus:
+//!   [`decode_band_resolutions_stereo_grounded`] walks bands top-down
+//!   with the two channels interleaved per band, each channel folding
+//!   its own delta/context chain. The single-channel walks remain for
+//!   per-channel callers.
+//! - **The used-subbands count sources — CLOSED (r419).** On a key
+//!   frame `Max_used_Band` is the bounded log code over the count
+//!   range `0..=max_band+1` ([`decode_keyframe_max_used_band`]); on a
+//!   non-key frame it is the `bands`-table delta off the previous
+//!   frame's value ([`decode_nonkey_max_used_band`]).
+//!   [`decode_used_subbands`] (a raw single-VLC read) remains for
+//!   callers outside the frame walk.
 //!
 //! ## Source-of-record
 //!

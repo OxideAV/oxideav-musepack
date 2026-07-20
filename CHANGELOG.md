@@ -33,6 +33,45 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 419** — **SV8 decode closed end-to-end: stereo, mono,
+  multi-packet, absolute loudness, externally validated.** The first
+  real SV8 corpus (`tests/fixtures/sv8/`: the five staged SV7 fixtures
+  losslessly transcoded via the reference `mpc2sv8` tool + two fresh
+  reference-encoder streams, all black-box producers; FFmpeg `mpc8`
+  oracles) pinned the real-stream frame layout and closed every open
+  SV8 arm:
+  - `sv8_stereo_frame` — the fixture-pinned two-channel frame-body
+    decode: `Max_used_Band` (keyframe log code / non-key `Bands`
+    delta), §6.2 stereo resolution walk (top-down, L/R interleaved per
+    band via `sv8_band_header::decode_band_resolutions_stereo_grounded`),
+    §6.2 M/S bitmap over non-zero bands (mask MSB = lowest band),
+    then three band-major passes ascending: SCFI (joint packed; CNS
+    bands participate), DSCF (temporal per-band per-channel `SCF[2]`
+    memory via `Sv8FrameState`; absolute base on key frame or first
+    use), samples. Real frame bodies always code two channels — a
+    mono `SH` selects mono output only.
+  - `reconstruct::reconstruct_sv8_band_absolute` +
+    `sv8_stereo_frame::reconstruct_sv8_stereo_frame` — the SV8
+    absolute reconstruction, pinned as the SV7-shared law by the
+    lossless-transcode identity.
+  - `sv8_stream::Sv8StreamDecoder` — the real-stream driver:
+    per-packet key frame + SCF reset, persistent two-channel
+    synthesis, free-running CNS PRNG, corpus-pinned M/S undo.
+  - `sv8_decode::decode_sv8_stream` — the whole-stream path (packet
+    walk, frames-per-packet from `block_power`, gapless trim,
+    `pcm_s16`), replacing the synthetic mono-subset
+    `decode_sv8_mono_stream`; `mpc_decode::decode_mpc_stream` drops
+    its obsolete `sv8_anchor` knob and routes both generations
+    knob-free.
+  - `tests/sv8_corpus.rs` — seven-fixture conformance gates: header/
+    structure facts, ±1 LSB oracle agreement (≥70% bit-exact) for
+    every non-CNS stream incl. the 77-frame two-`AP` stream and the
+    mono stream, the oracle-free §3.6 transcode-identity gate (SV8
+    f64 PCM bit-identical to the SV7 sibling decode, CNS included),
+    and the CNS statistical gate (noise-free frame 0 ±1 LSB + global
+    corr > 0.7 — the oracle CNS-waveform docs gap carries over from
+    SV7).
+
 - **Round 405** — **SV7 PNS/CNS stream flag (version byte `0x17`).**
   The staged CNS fixture (`docs/audio/musepack/fixtures/cns-pns/`,
   docs commit `0f1b6a2`) pins version-byte bit `0x10` as the encoder's
