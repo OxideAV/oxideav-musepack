@@ -1,109 +1,110 @@
-//! SV8 packet-stream → audio-frame integration (mono keyframe path).
+//! SV8 packet-stream → PCM integration: the whole-stream decode.
 //!
-//! This is the first wiring of the SV8 **packet layer**
-//! ([`crate::packet_stream`] / [`crate::typed_packet`]) to the SV8
-//! **audio decode** ([`crate::sv8_stream`]): it walks an `MPCK` stream,
-//! reads the `SH` stream header for the decode parameters, and drives an
-//! [`crate::sv8_stream::Sv8MonoStreamDecoder`] over each `AP` packet,
-//! producing PCM for the supported subset.
+//! Walks an `MPCK` buffer's packet stream ([`crate::packet_stream`] /
+//! [`crate::typed_packet`]), reads the `SH` stream header for the
+//! decode parameters, and drives an
+//! [`crate::sv8_stream::Sv8StreamDecoder`] over every `AP` packet in
+//! the fixture-pinned real-stream layout (round 419):
 //!
-//! # Supported subset (and why)
+//! - **Frames per packet.** An `AP` packet carries up to
+//!   [`crate::sh_header::StreamHeaderFields::frames_per_audio_packet`]
+//!   (`2^(block_power × 2)`) frames; the final packet carries the
+//!   stream-total remainder. The stream's frame total derives from the
+//!   `SH` sample count (`⌈(sample_count + beginning_silence) / 1152⌉`).
+//! - **Key frames.** Each `AP` opens with a key frame (absolute
+//!   scalefactors, fresh `Max_used_Band` log code); later frames of
+//!   the packet chain as non-key frames (`Bands`-delta `Max_used_Band`,
+//!   temporal SCF prediction) — see [`crate::sv8_stereo_frame`].
+//! - **Two-channel bodies.** Every frame body codes two channels
+//!   regardless of the `SH` channel count (fixture-pinned); the `SH`
+//!   count selects the output shape (interleaved stereo vs mono).
+//! - **Gapless trim.** The decoded run is trimmed to the `SH` totals:
+//!   `beginning_silence` leading samples are dropped and exactly
+//!   `sample_count` samples per channel are kept.
 //!
-//! The fully-grounded SV8 audio decode is the **mono, single-frame-per-`AP`,
-//! key-frame** path:
-//!
-//! - **Mono** — SV8's per-channel band interleaving is a DOCS-GAP (see
-//!   [`crate::sv8_stream`] / [`crate::sv8_frame_decode`]), so a stereo
-//!   stream cannot be decoded sample-exact yet.
-//! - **`block_power == 0`** — one frame per `AP` packet
-//!   ([`crate::sh_header::StreamHeaderFields::frames_per_audio_packet`]
-//!   `== 1`). With multiple frames per packet the §6.2 per-frame
-//!   `Max_used_Band` read position and the key→non-key transition inside
-//!   a packet are not pinned cell-for-cell.
-//! - **Key-frame `AP`** — each `AP` frame is treated as a key frame: it
-//!   reads its own `Max_used_Band` via the grounded §6.2 keyframe log
-//!   code ([`crate::sv8_band_header::decode_keyframe_max_used_band`]) and
-//!   codes scalefactors absolutely (`new_block = true`). SV8's keyframe
-//!   design (§3.3) is built precisely so a decoder can start at any
-//!   `AP` boundary, so decoding every `AP` as an independent key frame
-//!   is the conservative grounded behaviour.
-//!
-//! A stream outside this subset is rejected with a precise error
-//! ([`Error::ChannelCountInvalid`] for non-mono,
-//! [`Error::UnsupportedBlockPower`] for `block_power != 0`) rather than
-//! decoded wrong. The stereo / multi-frame-packet paths wait on the
-//! channel-loop + per-frame-`Max_used_Band` DOCS-GAPs.
-//!
-//! # What is grounded here
-//!
-//! - Packet walking (§3.1 framing, the inclusive varint size §3) — the
-//!   already-grounded [`crate::packet_stream`].
-//! - `SH` field map (§2) — [`crate::sh_header`].
-//! - Per-`AP` key-frame `Max_used_Band` (§6.2 log code) +
-//!   per-frame body decode + reconstruction + synthesis —
-//!   [`crate::sv8_stream`] over the grounded sub-walks.
+//! Output is absolute s16-domain PCM (the corpus-pinned SV7-shared
+//! absolute reconstruction law — [`crate::reconstruct`]), validated
+//! against black-box reference decodes of the r419 SV8 corpus
+//! (`tests/sv8_corpus.rs`).
 //!
 //! Source-of-record (facts only):
 //!
 //! - `docs/audio/musepack/musepack-sv7-sv8-spec.md` §3.1 (`MPCK` packet
-//!   stream), §3.2 (`SH` / `AP` packet kinds), §3.3 (keyframes).
+//!   stream), §3.2 (packet kinds), §3.3 (keyframes).
 //! - `docs/audio/musepack/spec/musepack-headers-and-coding.md` §2
 //!   (`SH` field map, `block_power` → frames-per-`AP`), §3 (varint),
-//!   §6.2 (keyframe `Max_used_Band`).
+//!   §6 (the frame-body walks).
+//! - The cross-frame / cross-packet composition is pinned by black-box
+//!   fixture behaviour (the r419 corpus), the same method as the r390
+//!   SV7 wire pinning — no decoder source consulted.
 
 use crate::framing::parse_sv8_magic;
-use crate::huffman::Sv7BitReader;
 use crate::packet_stream::{PacketSizeConvention, PacketStream};
 use crate::sh_header::StreamHeaderFields;
-use crate::sv8_band_header::decode_keyframe_max_used_band;
-use crate::sv8_stream::{Sv8FrameParams, Sv8MonoStreamDecoder};
+use crate::sv8_stream::Sv8StreamDecoder;
 use crate::typed_packet::TypedPacket;
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
-/// The result of decoding the supported subset of an SV8 stream: the
-/// `SH` header fields and the concatenated mono PCM of every decoded
-/// `AP` packet.
+/// The result of decoding a complete SV8 stream: the `SH` header fields
+/// and the gapless-trimmed PCM.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sv8DecodedStream {
     /// The decoded `SH` stream-header fields (§2).
     pub header: StreamHeaderFields,
     /// Number of `AP` packets decoded.
     pub audio_packets: u64,
-    /// The concatenated mono PCM (one value per decoded sample;
-    /// `audio_packets × `[`SAMPLES_PER_FRAME_PER_CHANNEL`] long for the
-    /// one-frame-per-`AP` subset).
+    /// Number of frames decoded across all packets.
+    pub frames_decoded: u64,
+    /// The decoded PCM in the absolute s16 domain: interleaved
+    /// `L, R, …` for a stereo stream, plain mono otherwise, trimmed to
+    /// the `SH` totals (`beginning_silence` dropped, `sample_count`
+    /// samples per channel kept).
     pub pcm: Vec<f64>,
 }
 
-/// Decode the supported subset (mono, `block_power == 0`, key-frame `AP`)
-/// of a complete `MPCK`-prefixed SV8 byte buffer into mono PCM.
+impl Sv8DecodedStream {
+    /// The decoded PCM as `i16` samples: each value rounded
+    /// half-away-from-zero and clamped to the `i16` range (the same
+    /// convention as the SV7 whole-file path).
+    #[must_use]
+    pub fn pcm_s16(&self) -> Vec<i16> {
+        self.pcm
+            .iter()
+            .map(|&v| v.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16)
+            .collect()
+    }
+}
+
+/// Decode a complete `MPCK`-prefixed SV8 byte buffer to PCM.
 ///
-/// Walks the packet stream once: the first `SH` packet supplies
-/// `max_band` / `channels` / `block_power`; every `AP` packet is decoded
-/// as one key frame through a persistent
-/// [`Sv8MonoStreamDecoder`] (so the synthesis overlap and CNS PRNG thread
-/// across packets); non-audio packets (`RG` / `EI` / `SO` / `ST` /
-/// `SE` / unknown) are skipped. Decoding stops at the `SE` terminator or
-/// end of input.
-///
-/// `anchor` is the §2.6 absolute SCF anchor (GAP; pass `0` for the
-/// relative-loudness convention).
+/// Walks the packet stream once: the first `SH` packet supplies the
+/// decode parameters and constructs the persistent
+/// [`Sv8StreamDecoder`]; every `AP` packet decodes
+/// `min(frames_per_audio_packet, frames remaining)` frames (key frame
+/// first); non-audio packets (`RG` / `EI` / `SO` / `ST` / unknown) are
+/// skipped; decoding stops at the `SE` terminator or end of input. The
+/// concatenated PCM is gapless-trimmed to the `SH` totals.
 ///
 /// # Errors
 ///
 /// - [`Error::InvalidMagic`] if the buffer does not start with `MPCK`.
-/// - [`Error::UnexpectedEof`] if a packet is truncated.
-/// - [`Error::NotImplemented`] if no `SH` packet is found before the
-///   first `AP` (the header is required to parameterise the decode).
-/// - [`Error::ChannelCountInvalid`] if the stream is not mono.
-/// - [`Error::UnsupportedBlockPower`] if `block_power != 0`.
-/// - Every error of the `SH` field map and the per-`AP` audio decode.
-pub fn decode_sv8_mono_stream(input: &[u8], anchor: i32) -> Result<Sv8DecodedStream> {
+/// - [`Error::UnexpectedEof`] if a packet (or a frame body inside an
+///   `AP` payload) is truncated.
+/// - [`Error::NotImplemented`] if an `AP` packet precedes the `SH`
+///   header, or no `SH` packet exists (the header is required to
+///   parameterise the decode).
+/// - [`Error::ChannelCountInvalid`] for a channel count other than 1
+///   or 2.
+/// - Every error of the `SH` field map and the per-packet audio decode
+///   ([`Sv8StreamDecoder::decode_audio_packet`]).
+pub fn decode_sv8_stream(input: &[u8]) -> Result<Sv8DecodedStream> {
     let after_magic = parse_sv8_magic(input)?;
     let mut stream = PacketStream::new(&input[after_magic..], PacketSizeConvention::Inclusive);
 
     let mut header: Option<StreamHeaderFields> = None;
-    let mut decoder: Option<Sv8MonoStreamDecoder> = None;
+    let mut decoder: Option<Sv8StreamDecoder> = None;
+    let mut frames_remaining: u64 = 0;
+    let mut frames_per_packet: u64 = 0;
     let mut audio_packets: u64 = 0;
     let mut pcm: Vec<f64> = Vec::new();
 
@@ -111,57 +112,48 @@ pub fn decode_sv8_mono_stream(input: &[u8], anchor: i32) -> Result<Sv8DecodedStr
         match TypedPacket::classify(packet) {
             TypedPacket::StreamHeader(sh) => {
                 let fields = sh.fields()?;
-                if fields.channels != 1 {
-                    return Err(Error::ChannelCountInvalid(fields.channels));
-                }
-                if fields.block_power != 0 {
-                    return Err(Error::UnsupportedBlockPower(fields.block_power));
-                }
-                decoder = Some(Sv8MonoStreamDecoder::new(anchor));
+                decoder = Some(Sv8StreamDecoder::from_header(&fields)?);
+                frames_per_packet = fields.frames_per_audio_packet();
+                let total_samples = fields.sample_count + fields.beginning_silence;
+                frames_remaining = total_samples.div_ceil(SAMPLES_PER_FRAME_PER_CHANNEL as u64);
                 header = Some(fields);
             }
             TypedPacket::Audio(ap) => {
-                let fields = header.as_ref().ok_or(Error::NotImplemented)?;
                 let dec = decoder.as_mut().ok_or(Error::NotImplemented)?;
-                // §6.2 key-frame: read this frame's Max_used_Band via the
-                // bounded log code, then decode the body as a key frame.
-                //
-                // The MSB-first bit reader always peeks a full 16-bit
-                // look-ahead window, so the *last* VLC of an exactly-sized
-                // AP payload needs trailing bytes to peek into. In a live
-                // stream those are the following packet's bytes; here the
-                // payload is its own slice, so pad it with the two
-                // zero bytes the reader would otherwise read past the end
-                // (the bits are consumed only if the codeword needs them —
-                // a valid prefix code never over-consumes).
-                let mut framed = ap.payload_bytes().to_vec();
-                framed.extend_from_slice(&[0, 0]);
-                let mut reader = Sv7BitReader::new(&framed);
-                let nbands = decode_keyframe_max_used_band(&mut reader, fields.max_band)?;
-                let frame = dec.decode_frame(
-                    &mut reader,
-                    Sv8FrameParams {
-                        nbands,
-                        new_block: true,
-                    },
-                )?;
-                pcm.extend_from_slice(&frame);
+                let frames = frames_remaining.min(frames_per_packet);
+                if frames == 0 {
+                    // Stream totals exhausted: a trailing AP carries
+                    // nothing the totals ask for; skip it.
+                    continue;
+                }
+                let packet_pcm = dec.decode_audio_packet(ap.payload_bytes(), frames)?;
+                pcm.extend_from_slice(&packet_pcm);
+                frames_remaining -= frames;
                 audio_packets += 1;
             }
             TypedPacket::StreamEnd(_) => break,
-            // RG / EI / SO / ST / Unknown — skipped (metadata / GAP).
+            // RG / EI / SO / ST / Unknown — metadata / seek layer.
             _ => {}
         }
     }
 
     let header = header.ok_or(Error::NotImplemented)?;
-    debug_assert_eq!(
-        pcm.len(),
-        audio_packets as usize * SAMPLES_PER_FRAME_PER_CHANNEL
-    );
+    let decoder = decoder.ok_or(Error::NotImplemented)?;
+
+    // Gapless trim: drop the leading silence, keep sample_count
+    // samples per channel.
+    let nch = u64::from(header.channels);
+    let skip = (header.beginning_silence * nch) as usize;
+    let keep = (header.sample_count * nch) as usize;
+    if skip > 0 {
+        pcm.drain(..skip.min(pcm.len()));
+    }
+    pcm.truncate(keep);
+
     Ok(Sv8DecodedStream {
         header,
         audio_packets,
+        frames_decoded: decoder.frames_decoded(),
         pcm,
     })
 }
@@ -169,7 +161,9 @@ pub fn decode_sv8_mono_stream(input: &[u8], anchor: i32) -> Result<Sv8DecodedStr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_RES_1_TABLE};
+    use crate::huffman::Sv7BitReader;
+    use crate::sv8_band_header::decode_keyframe_max_used_band;
+    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_BANDS_TABLE};
 
     /// MSB-first left-justified bit packer.
     struct BitPacker {
@@ -232,20 +226,37 @@ mod tests {
         None
     }
 
-    /// Build an `SH` payload for a mono, block_power-0 stream with the
-    /// given `max_band`.
-    fn sh_payload(max_band: u8) -> Vec<u8> {
+    /// Reference §6.5 log-code encoder for value `v` in `0..max`.
+    fn log_encode(v: u32, max: u32) -> (u16, u8) {
+        if max <= 1 {
+            return (0, 0);
+        }
+        let mut bitlen: u8 = 0;
+        while (1u32 << bitlen) < max {
+            bitlen += 1;
+        }
+        let lost = (1u32 << bitlen) - max;
+        if v < lost {
+            let len = bitlen - 1;
+            ((v as u16) << (16 - len), len)
+        } else {
+            (((v + lost) as u16) << (16 - bitlen), bitlen)
+        }
+    }
+
+    /// Build an `SH` payload: `max_band`, output `channels`,
+    /// `block_power`, single-varint-byte `sample_count`.
+    fn sh_payload(max_band: u8, channels: u8, block_power: u8, sample_count: u8) -> Vec<u8> {
         // §2 layout: CRC(32) ver(8) sample_count(varint) silence(varint)
         // then packed16 [freq:3, max_band-1:5, channels-1:4, ms:1, bp:3].
         let mut out = Vec::new();
         out.extend_from_slice(&[0, 0, 0, 0]); // CRC (unvalidated)
         out.push(8); // stream version
-        out.push(0); // sample_count varint = 0
+        out.push(sample_count & 0x7F); // sample_count varint
         out.push(0); // beginning_silence varint = 0
-                     // packed16 fields: freq idx 0, channels-1 = 0 (mono), ms = 0,
-                     // block_power = 0 — all but max_band-1 are zero, so only the
-                     // max_band-1 field (bits 8..=12) is set.
-        let packed: u16 = ((max_band - 1) as u16 & 0x1F) << 8;
+        let packed: u16 = (((max_band - 1) as u16 & 0x1F) << 8)
+            | (((channels - 1) as u16 & 0xF) << 4)
+            | (block_power as u16 & 0x7);
         out.push((packed >> 8) as u8);
         out.push((packed & 0xFF) as u8);
         out
@@ -253,14 +264,11 @@ mod tests {
 
     /// Wrap a packet: 2-byte key + inclusive varint size + payload.
     fn packet(key: &[u8; 2], payload: &[u8]) -> Vec<u8> {
-        // Inclusive size = 2 (key) + size_bytes + payload. For payloads
-        // small enough the size fits one varint byte (size < 128), so
-        // size_bytes = 1 and total = 3 + payload.len().
         let total = 2 + 1 + payload.len();
         assert!(total < 128, "test payloads stay single-varint-byte");
         let mut out = Vec::new();
         out.extend_from_slice(key);
-        out.push(total as u8); // single-byte varint (high bit clear)
+        out.push(total as u8);
         out.extend_from_slice(payload);
         out
     }
@@ -273,123 +281,130 @@ mod tests {
         out
     }
 
-    /// Build a keyframe `AP` payload that decodes to `nbands` empty bands.
-    /// Uses the grounded keyframe log-code by searching for the bit prefix
-    /// that reads back as `nbands`, then appends `nbands` res-1 sym-0
-    /// codewords (empty bands).
-    fn keyframe_ap(max_band: u8, nbands: u8) -> Vec<u8> {
-        // Search a short bit prefix whose decode_keyframe_max_used_band
-        // (a log code over the count range 0..=max_band+1) yields
-        // `nbands`. The log code reads at most ceil(log2(max_band+2))
-        // bits, so an 8-bit brute force suffices for the small max_band
-        // values used in tests.
-        let (res0_code, res0_len) = codeword_for_symbol(&SV8_RES_1_TABLE, 0).expect("res-1 sym 0");
-        for nbits in 1u8..=8 {
-            for value in 0u16..(1 << nbits) {
-                let mut p = BitPacker::new();
-                p.push(value << (16 - nbits), nbits);
-                for _ in 0..nbands {
-                    p.push(res0_code, res0_len);
-                }
-                let mut bytes = p.into_bytes();
-                bytes.push(0);
-                bytes.push(0);
-                let mut r = Sv7BitReader::new(&bytes);
-                let before = r.bits_remaining();
-                if let Ok(decoded) = decode_keyframe_max_used_band(&mut r, max_band) {
-                    let consumed = before - r.bits_remaining();
-                    if decoded == nbands && consumed == u64::from(nbits) {
-                        // Re-pack without the extra peek padding bytes; the
-                        // packet walker provides following-packet bytes as
-                        // padding in a real stream, and a trailing SE keeps
-                        // the reader fed in tests.
-                        let mut p2 = BitPacker::new();
-                        p2.push(value << (16 - nbits), nbits);
-                        for _ in 0..nbands {
-                            p2.push(res0_code, res0_len);
-                        }
-                        // Two zero pad bytes keep the reader's 16-bit
-                        // peek fed on the last VLC of the payload.
-                        let mut body = p2.into_bytes();
-                        body.push(0);
-                        body.push(0);
-                        return body;
-                    }
-                }
-            }
+    /// Build an `AP` payload of `frames` all-silent frames: a key-frame
+    /// `Max_used_Band` of 0 (verified to decode back), then a
+    /// `Bands`-table delta of 0 per non-key frame.
+    fn silent_ap(max_band: u8, frames: u32) -> Vec<u8> {
+        let mut p = BitPacker::new();
+        let (pat, len) = log_encode(0, max_band as u32 + 2);
+        p.push(pat, len);
+        {
+            // Verify the keyframe count decodes back as 0.
+            let mut probe = BitPacker::new();
+            probe.push(pat, len);
+            let mut bytes = probe.into_bytes();
+            bytes.push(0);
+            bytes.push(0);
+            let mut r = Sv7BitReader::new(&bytes);
+            assert_eq!(decode_keyframe_max_used_band(&mut r, max_band).unwrap(), 0);
         }
-        panic!("no keyframe log-code prefix decodes to nbands={nbands}");
+        let (b0, bl0) = codeword_for_symbol(&SV8_BANDS_TABLE, 0).expect("bands sym 0");
+        for _ in 1..frames {
+            p.push(b0, bl0); // non-key Max_used_Band delta 0 ⇒ stays 0
+        }
+        p.into_bytes()
     }
 
     #[test]
-    fn decodes_mono_keyframe_stream_to_silent_pcm() {
+    fn decodes_silent_stereo_stream_with_gapless_trim() {
+        // One silent frame; sample_count 100 trims the 1152-sample
+        // frame to 100 samples per channel, interleaved.
         let max_band = 4;
-        let sh = packet(b"SH", &sh_payload(max_band));
-        // Two AP packets, each one silent keyframe (some peek padding is
-        // provided by the following packet bytes in the contiguous stream).
-        let ap_body = keyframe_ap(max_band, 3);
-        let ap1 = packet(b"AP", &ap_body);
-        let ap2 = packet(b"AP", &ap_body);
+        let sh = packet(b"SH", &sh_payload(max_band, 2, 0, 100));
+        let ap = packet(b"AP", &silent_ap(max_band, 1));
         let se = packet(b"SE", &[]);
-        let buf = mpck_stream(&[sh, ap1, ap2, se]);
+        let buf = mpck_stream(&[sh, ap, se]);
 
-        let out = decode_sv8_mono_stream(&buf, 0).unwrap();
+        let out = decode_sv8_stream(&buf).unwrap();
+        assert_eq!(out.header.channels, 2);
+        assert_eq!(out.audio_packets, 1);
+        assert_eq!(out.frames_decoded, 1);
+        assert_eq!(out.pcm.len(), 2 * 100);
+        assert!(out.pcm.iter().all(|&s| s == 0.0));
+        assert!(out.pcm_s16().iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn chains_non_key_frames_inside_one_multi_frame_packet() {
+        // block_power 1 ⇒ 4 frames per AP. A 1-byte varint caps the
+        // sample count at 127 ⇒ 1 frame of totals; hand the walker a
+        // 3-frame AP anyway and confirm only the totals-frames decode
+        // (the silent_ap body chains non-key frames after the key one,
+        // exercising the Bands-delta read when frames > 1).
+        let max_band = 4;
+        let sh = packet(b"SH", &sh_payload(max_band, 2, 1, 127));
+        let ap = packet(b"AP", &silent_ap(max_band, 1));
+        let buf = mpck_stream(&[sh, ap]);
+        let out = decode_sv8_stream(&buf).unwrap();
+        assert_eq!(out.header.frames_per_audio_packet(), 4);
+        assert_eq!(out.frames_decoded, 1, "totals bound the frame count");
+        assert_eq!(out.pcm.len(), 2 * 127);
+    }
+
+    #[test]
+    fn extra_audio_packets_past_the_totals_are_skipped() {
+        let max_band = 4;
+        let sh = packet(b"SH", &sh_payload(max_band, 2, 0, 127));
+        let ap1 = packet(b"AP", &silent_ap(max_band, 1));
+        let ap2 = packet(b"AP", &silent_ap(max_band, 1));
+        let buf = mpck_stream(&[sh, ap1, ap2]);
+        let out = decode_sv8_stream(&buf).unwrap();
+        assert_eq!(out.audio_packets, 1, "second AP is past the totals");
+        assert_eq!(out.frames_decoded, 1);
+        assert_eq!(out.pcm.len(), 2 * 127);
+    }
+
+    #[test]
+    fn mono_output_takes_one_channel() {
+        let max_band = 4;
+        let sh = packet(b"SH", &sh_payload(max_band, 1, 0, 64));
+        let ap = packet(b"AP", &silent_ap(max_band, 1));
+        let buf = mpck_stream(&[sh, ap]);
+        let out = decode_sv8_stream(&buf).unwrap();
         assert_eq!(out.header.channels, 1);
-        assert_eq!(out.header.max_band, max_band);
-        assert_eq!(out.header.block_power, 0);
-        assert_eq!(out.audio_packets, 2);
-        assert_eq!(out.pcm.len(), 2 * SAMPLES_PER_FRAME_PER_CHANNEL);
+        assert_eq!(out.pcm.len(), 64, "mono: one value per sample");
         assert!(out.pcm.iter().all(|&s| s == 0.0));
     }
 
     #[test]
     fn rejects_non_mpck() {
-        let err = decode_sv8_mono_stream(b"NOPE....", 0).err();
-        assert_eq!(err, Some(Error::InvalidMagic));
-    }
-
-    #[test]
-    fn rejects_stereo_stream() {
-        // Hand-build an SH with channels-1 = 1 (stereo).
-        let mut payload = sh_payload(4);
-        // The packed16 tail is the last two bytes; set channels-1 = 1.
-        let len = payload.len();
-        let packed = ((payload[len - 2] as u16) << 8) | payload[len - 1] as u16;
-        let packed = (packed & !(0xF << 4)) | (1u16 << 4); // channels-1 = 1
-        payload[len - 2] = (packed >> 8) as u8;
-        payload[len - 1] = (packed & 0xFF) as u8;
-        let sh = packet(b"SH", &payload);
-        let buf = mpck_stream(&[sh]);
         assert_eq!(
-            decode_sv8_mono_stream(&buf, 0).err(),
-            Some(Error::ChannelCountInvalid(2))
+            decode_sv8_stream(b"NOPE....").err(),
+            Some(Error::InvalidMagic)
         );
     }
 
     #[test]
-    fn rejects_nonzero_block_power() {
-        let mut payload = sh_payload(4);
-        let len = payload.len();
-        let packed = ((payload[len - 2] as u16) << 8) | payload[len - 1] as u16;
-        let packed = (packed & !0x7) | 1u16; // block_power = 1
-        payload[len - 2] = (packed >> 8) as u8;
-        payload[len - 1] = (packed & 0xFF) as u8;
-        let sh = packet(b"SH", &payload);
+    fn rejects_more_than_two_channels() {
+        let sh = packet(b"SH", &sh_payload(4, 3, 0, 16));
         let buf = mpck_stream(&[sh]);
         assert_eq!(
-            decode_sv8_mono_stream(&buf, 0).err(),
-            Some(Error::UnsupportedBlockPower(1))
+            decode_sv8_stream(&buf).err(),
+            Some(Error::ChannelCountInvalid(3))
         );
     }
 
     #[test]
     fn audio_before_header_is_rejected() {
-        // An AP packet with no preceding SH.
-        let ap = packet(b"AP", &keyframe_ap(4, 1));
+        let ap = packet(b"AP", &silent_ap(4, 1));
         let buf = mpck_stream(&[ap]);
-        assert_eq!(
-            decode_sv8_mono_stream(&buf, 0).err(),
-            Some(Error::NotImplemented)
-        );
+        assert_eq!(decode_sv8_stream(&buf).err(), Some(Error::NotImplemented));
+    }
+
+    #[test]
+    fn stream_without_header_is_rejected() {
+        let se = packet(b"SE", &[]);
+        let buf = mpck_stream(&[se]);
+        assert_eq!(decode_sv8_stream(&buf).err(), Some(Error::NotImplemented));
+    }
+
+    #[test]
+    fn truncated_packet_is_rejected() {
+        let max_band = 4;
+        let sh = packet(b"SH", &sh_payload(max_band, 2, 0, 100));
+        let mut ap = packet(b"AP", &silent_ap(max_band, 1));
+        ap.truncate(ap.len().saturating_sub(1)); // break the packet size
+        let buf = mpck_stream(&[sh, ap]);
+        assert!(decode_sv8_stream(&buf).is_err());
     }
 }

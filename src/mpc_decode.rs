@@ -8,15 +8,14 @@
 //!
 //! - **SV7** → [`crate::sv7_file_decode::decode_sv7_file`] (stereo; the
 //!   §1 header, the §1.1 continuous audio run, gapless trim).
-//! - **SV8** → [`crate::sv8_decode::decode_sv8_mono_stream`] (the
-//!   grounded SV8 subset: mono, `block_power == 0`, key-frame `AP`
-//!   packets; out-of-subset streams are rejected with precise errors).
+//! - **SV8** → [`crate::sv8_decode::decode_sv8_stream`] (mono + stereo,
+//!   multi-frame `AP` packets, key-frame chaining, gapless trim — the
+//!   r419 fixture-pinned real-stream path).
 //!
-//! The SV7 path is fully corpus-pinned (no knobs remain: the absolute
-//! SCF law, the M/S arithmetic, the per-frame 20-bit framing and 11-bit
-//! trailer are all fixture-validated — see [`crate::sv7_file_decode`]).
-//! The SV8 grounded subset is mono and keeps its §2.6 `sv8_anchor`
-//! GAP knob (no SV8 fixture corpus exists yet). Output is
+//! Both paths are knob-free and corpus-pinned: the absolute SCF law,
+//! the M/S arithmetic, and the per-generation framing are all
+//! fixture-validated (see [`crate::sv7_file_decode`] /
+//! [`crate::sv8_decode`]). Output is
 //! [`MpcDecodedStream`], which surfaces the common queries (PCM run,
 //! channel count, sample rate) without erasing the per-generation
 //! detail.
@@ -27,7 +26,7 @@
 
 use crate::framing::{identify_stream, StreamKind};
 use crate::sv7_file_decode::{decode_sv7_file, Sv7DecodedFile};
-use crate::sv8_decode::{decode_sv8_mono_stream, Sv8DecodedStream};
+use crate::sv8_decode::{decode_sv8_stream, Sv8DecodedStream};
 use crate::Result;
 
 /// A decoded Musepack stream of either generation.
@@ -35,7 +34,7 @@ use crate::Result;
 pub enum MpcDecodedStream {
     /// An SV7 (`MP+`) stereo stream.
     Sv7(Sv7DecodedFile),
-    /// An SV8 (`MPCK`) stream (grounded subset: mono).
+    /// An SV8 (`MPCK`) stream (mono or stereo).
     Sv8(Sv8DecodedStream),
 }
 
@@ -49,9 +48,10 @@ impl MpcDecodedStream {
         }
     }
 
-    /// The decoded PCM run: interleaved `L, R, …` for SV7 (s16-domain,
-    /// corpus-pinned absolute loudness), mono for SV8 (relative
-    /// loudness — the SV8 absolute anchor is still GAP).
+    /// The decoded PCM run in the corpus-pinned absolute s16 domain:
+    /// interleaved `L, R, …` for stereo (always, for SV7), plain mono
+    /// for a one-channel SV8 stream. SV8 output is gapless-trimmed to
+    /// the `SH` totals.
     #[must_use]
     pub fn pcm(&self) -> &[f64] {
         match self {
@@ -61,7 +61,7 @@ impl MpcDecodedStream {
     }
 
     /// Channel count: always 2 for SV7 (§1 derived fact); the `SH`
-    /// header's channel field for SV8 (1 within the grounded subset).
+    /// header's channel field for SV8 (1 or 2).
     #[must_use]
     pub fn channels(&self) -> u8 {
         match self {
@@ -83,22 +83,20 @@ impl MpcDecodedStream {
 
 /// Decode a complete `.mpc` buffer of either stream generation.
 ///
-/// The SV7 path is knob-free (fully corpus-pinned). `sv8_anchor` is the
-/// SV8 path's §2.6 absolute-SCF-anchor GAP knob (pass 0 for the
-/// relative convention); it is ignored for SV7 input.
+/// Both paths are knob-free and corpus-pinned (the former SV8
+/// `sv8_anchor` GAP knob is gone: the r419 corpus pins the SV8
+/// absolute law as the SV7-shared one).
 ///
 /// # Errors
 ///
 /// - [`crate::Error::InvalidMagic`] if `bytes` starts with neither
 ///   magic.
 /// - Every error of the routed whole-stream decoder
-///   ([`decode_sv7_file`] / [`decode_sv8_mono_stream`]).
-pub fn decode_mpc_stream(bytes: &[u8], sv8_anchor: i32) -> Result<MpcDecodedStream> {
+///   ([`decode_sv7_file`] / [`decode_sv8_stream`]).
+pub fn decode_mpc_stream(bytes: &[u8]) -> Result<MpcDecodedStream> {
     match identify_stream(bytes)? {
         StreamKind::Sv7 => Ok(MpcDecodedStream::Sv7(decode_sv7_file(bytes)?)),
-        StreamKind::Sv8 => Ok(MpcDecodedStream::Sv8(decode_sv8_mono_stream(
-            bytes, sv8_anchor,
-        )?)),
+        StreamKind::Sv8 => Ok(MpcDecodedStream::Sv8(decode_sv8_stream(bytes)?)),
     }
 }
 
@@ -143,7 +141,7 @@ mod tests {
     #[test]
     fn sv7_magic_routes_to_the_file_decoder() {
         let (hdr, raw) = sv7_file();
-        let out = decode_mpc_stream(&raw, 0).unwrap();
+        let out = decode_mpc_stream(&raw).unwrap();
         assert_eq!(out.kind(), StreamKind::Sv7);
         assert_eq!(out.channels(), 2);
         assert_eq!(out.sample_rate_hz(), Some(48000));
@@ -161,7 +159,7 @@ mod tests {
     #[test]
     fn sv8_magic_routes_to_the_packet_decoder() {
         let raw = sv8_stream();
-        let out = decode_mpc_stream(&raw, 0).unwrap();
+        let out = decode_mpc_stream(&raw).unwrap();
         assert_eq!(out.kind(), StreamKind::Sv8);
         assert_eq!(out.channels(), 1);
         assert_eq!(out.sample_rate_hz(), Some(44100));
@@ -170,16 +168,16 @@ mod tests {
 
     #[test]
     fn unknown_magic_is_rejected() {
-        assert_eq!(decode_mpc_stream(b"RIFFxxxx", 0), Err(Error::InvalidMagic));
+        assert_eq!(decode_mpc_stream(b"RIFFxxxx"), Err(Error::InvalidMagic));
         // Too short for either magic: the framing layer reports
         // starvation rather than a magic mismatch.
-        assert_eq!(decode_mpc_stream(b"", 0), Err(Error::UnexpectedEof));
+        assert_eq!(decode_mpc_stream(b""), Err(Error::UnexpectedEof));
     }
 
     #[test]
     fn sv7_decode_errors_propagate_through_the_dispatch() {
         let (_, mut raw) = sv7_file();
         raw.truncate(10); // valid magic, truncated header
-        assert_eq!(decode_mpc_stream(&raw, 0), Err(Error::UnexpectedEof));
+        assert_eq!(decode_mpc_stream(&raw), Err(Error::UnexpectedEof));
     }
 }

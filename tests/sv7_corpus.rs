@@ -156,7 +156,7 @@ fn corpus_pcm_matches_oracle_within_one_lsb() {
 fn corpus_streams_decode_through_unified_entry() {
     let e = &CORPUS[0];
     let bytes = fixture_bytes(e.name, "input.mpc");
-    let out = decode_mpc_stream(&bytes, 0).expect("decode");
+    let out = decode_mpc_stream(&bytes).expect("decode");
     assert_eq!(out.channels(), 2);
     assert_eq!(out.sample_rate_hz(), Some(44100));
     match out {

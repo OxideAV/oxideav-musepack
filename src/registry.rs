@@ -62,7 +62,7 @@ impl MpcStreamDecoder {
     /// Decode the accumulated stream and queue its PCM as S16
     /// interleaved frames of up to 1152 samples per channel.
     fn decode_buffer(&mut self) -> oxideav_core::Result<()> {
-        let out = decode_mpc_stream(&self.buffer, 0)
+        let out = decode_mpc_stream(&self.buffer)
             .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?;
         let channels = usize::from(out.channels().max(1));
         let pcm = out.pcm();

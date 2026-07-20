@@ -370,12 +370,12 @@ pub enum Error {
     /// (`spec/musepack-headers-and-coding.md` §2). The offending value
     /// is included for diagnostic logging.
     InvalidReplayGainVersion(u8),
-    /// The SV8 stream-level decode
-    /// ([`sv8_decode::decode_sv8_mono_stream`]) encountered a `block_power`
-    /// other than `0` (more than one frame per `AP` packet). The
-    /// multi-frame-per-packet path is a DOCS-GAP (the per-frame
-    /// `Max_used_Band` read position is not pinned cell-for-cell); the
-    /// offending value is included for diagnostic logging.
+    /// A caller rejected an SV8 `block_power` value. Historical: the
+    /// r419 real-stream path ([`sv8_decode::decode_sv8_stream`])
+    /// supports every `block_power` (multi-frame `AP` packets chain
+    /// key → non-key frames), so the crate no longer emits this
+    /// variant; it is retained for API stability. The offending value
+    /// is included for diagnostic logging.
     UnsupportedBlockPower(u8),
     /// An SV7 entropy **encoder** was asked to emit a symbol that has no
     /// codeword in the target `mpc_huffman` table (its value is outside

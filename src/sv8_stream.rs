@@ -1,8 +1,19 @@
-//! SV8 mono multi-frame driver: frames → PCM with persistent state.
+//! SV8 stream drivers: frames → PCM with persistent state.
 //!
-//! The SV8 counterpart of [`crate::sv7_stream`] for a **mono** stream
-//! (or one already-resolved channel of a stereo stream — the SV8
-//! per-channel interleaving is a DOCS-GAP, see the "Scope" note). An SV8
+//! Two drivers live here:
+//!
+//! - [`Sv8StreamDecoder`] — the **real-stream** driver (round 419):
+//!   whole `AP` packets in the fixture-pinned two-channel frame layout
+//!   ([`crate::sv8_stereo_frame`]), M/S undo, absolute loudness,
+//!   interleaved or mono output. This is the path
+//!   [`crate::sv8_decode::decode_sv8_stream`] drives.
+//! - [`Sv8MonoStreamDecoder`] — the earlier **single-channel-body**
+//!   primitive, retained for callers decoding a synthetic one-channel
+//!   frame run (real SV8 streams always code two channels per body —
+//!   see [`crate::sv8_stereo_frame`] — so this is not a real-stream
+//!   path).
+//!
+//! The SV8 counterpart of [`crate::sv7_stream`]. An SV8
 //! audio (`AP`) packet carries
 //! [`crate::sh_header::StreamHeaderFields::frames_per_audio_packet`]
 //! frames, and turning that run into continuous PCM needs the same two
@@ -40,14 +51,13 @@
 //! caller (who has resolved the keyframe structure) supplies the
 //! schedule.
 //!
-//! # Scope: mono / single resolved channel
+//! # [`Sv8MonoStreamDecoder`] scope: single-channel bodies only
 //!
-//! This drives **one channel**. SV8's per-channel band interleaving (the
-//! §6.2 "L/R `Res`" decode order, and the §6.3 SCFI L/R packed split's
-//! channel-loop shape) is a DOCS-GAP — the single-channel
-//! [`crate::sv8_frame_decode`] documents it. A mono stream decodes fully
-//! here; a stereo SV8 driver waits for that channel-loop shape to be
-//! pinned by a trace.
+//! The mono driver walks **one channel** per frame body. Real SV8
+//! streams always code two channels per body (fixture-pinned, r419 —
+//! [`crate::sv8_stereo_frame`]), so this primitive serves synthetic
+//! single-channel runs and per-channel experiments;
+//! [`Sv8StreamDecoder`] is the real-stream path.
 //!
 //! Source-of-record (facts only):
 //!
@@ -59,9 +69,14 @@
 
 use crate::cns::CnsPrng;
 use crate::huffman::Sv7BitReader;
+use crate::ms_stereo::undo_ms_stereo_pinned;
+use crate::sh_header::StreamHeaderFields;
 use crate::sv8_reconstruct::decode_and_reconstruct_sv8_channel;
-use crate::synthesis::{synthesize_frame_channel, SynthesisFilter};
-use crate::{Result, SAMPLES_PER_FRAME_PER_CHANNEL};
+use crate::sv8_stereo_frame::{
+    decode_sv8_stereo_frame, reconstruct_sv8_stereo_frame, Sv8FrameState,
+};
+use crate::synthesis::{synthesize_frame_channel, MultiChannelSynthesis, SynthesisFilter};
+use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
 /// One frame's §6.2 decode parameters: the used-band count and the §6.3
 /// per-band new-block flag (set on a key frame).
@@ -170,6 +185,139 @@ impl Sv8MonoStreamDecoder {
         for &params in schedule {
             let frame = self.decode_frame(reader, params)?;
             pcm.extend_from_slice(&frame);
+        }
+        Ok(pcm)
+    }
+}
+
+/// The **real-stream** SV8 driver (round 419): decodes whole `AP`
+/// packets of a stream in the fixture-pinned two-channel frame layout
+/// ([`crate::sv8_stereo_frame`]), threading every piece of cross-frame
+/// state, and emits absolute s16-domain PCM.
+///
+/// Owns:
+///
+/// - the two-channel synthesis filterbank state (the body always codes
+///   two channels — fixture-pinned — and the overlap spans 15 frames,
+///   so both filters persist across frames *and* packets);
+/// - the free-running CNS PRNG (§7, shared across bands / channels /
+///   frames in decode order, as in SV7);
+/// - the [`Sv8FrameState`] SCF memory + `Max_used_Band` reference,
+///   **reset at every `AP` boundary**: each packet opens with a key
+///   frame whose scalefactors are coded absolutely (spec §3.3
+///   keyframes; fixture-pinned — the multi-packet corpus stream decodes
+///   bit-exact under the reset and desynchronises without it).
+///
+/// Output-channel mapping: the frame body is always two channels; the
+/// `SH` channel count selects the output — `2` emits interleaved
+/// `L, R, …` after the §2.6 M/S undo, `1` emits the first decoded
+/// channel (for a mono stream the encoder's two body channels carry
+/// the same signal; oracle-validated by the r419 mono corpus stream).
+#[derive(Debug, Clone)]
+pub struct Sv8StreamDecoder {
+    /// `SH` highest-coded-subband field (debiased).
+    max_band: u8,
+    /// `SH` stream-wide mid/side flag.
+    stream_ms: bool,
+    /// `SH` output channel count (1 or 2).
+    channels: u8,
+    /// Persistent two-channel synthesis state.
+    synthesis: MultiChannelSynthesis,
+    /// Free-running CNS PRNG.
+    cns: CnsPrng,
+    /// Cross-frame SCF memory + Max_used_Band reference.
+    state: Sv8FrameState,
+    /// Total frames decoded.
+    frames_decoded: u64,
+}
+
+impl Sv8StreamDecoder {
+    /// Build a stream decoder from parsed `SH` fields.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ChannelCountInvalid`] for a channel count other than 1
+    /// or 2 (multi-channel SV8 needs a body layout this crate has no
+    /// fixture evidence for).
+    pub fn from_header(fields: &StreamHeaderFields) -> Result<Self> {
+        if !(1..=2).contains(&fields.channels) {
+            return Err(Error::ChannelCountInvalid(fields.channels));
+        }
+        Ok(Self {
+            max_band: fields.max_band,
+            stream_ms: fields.mid_side,
+            channels: fields.channels,
+            synthesis: MultiChannelSynthesis::new(2)?,
+            cns: CnsPrng::new(),
+            state: Sv8FrameState::new(),
+            frames_decoded: 0,
+        })
+    }
+
+    /// Total frames decoded so far.
+    #[must_use]
+    pub fn frames_decoded(&self) -> u64 {
+        self.frames_decoded
+    }
+
+    /// The output channel count (1 or 2, from the `SH` header).
+    #[must_use]
+    pub fn output_channels(&self) -> u8 {
+        self.channels
+    }
+
+    /// Decode one `AP` packet payload holding `frames` frames into
+    /// interleaved (or mono) s16-domain PCM.
+    ///
+    /// `frames` is `min(frames_per_audio_packet, frames remaining in
+    /// the stream)` — the packet layer knows the stream totals
+    /// ([`crate::sv8_decode::decode_sv8_stream`] computes this). Frame
+    /// 0 of the packet is the key frame; the packet-boundary state
+    /// reset happens here.
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`decode_sv8_stereo_frame`] /
+    /// [`reconstruct_sv8_stereo_frame`] plus the §2.6 M/S undo and
+    /// synthesis bounds (unreachable for a well-formed stream).
+    pub fn decode_audio_packet(&mut self, payload: &[u8], frames: u64) -> Result<Vec<f64>> {
+        // The canonical decoder always peeks a 16-bit window; the last
+        // codeword of an exactly-sized payload needs slack bytes to
+        // peek into (a valid prefix code never *consumes* past its
+        // codeword, so the pad bits are never decoded as data).
+        let mut framed = payload.to_vec();
+        framed.extend_from_slice(&[0, 0]);
+        let mut reader = Sv7BitReader::new(&framed);
+
+        // §3.3: every AP opens with a key frame; the SCF memory and
+        // Max_used_Band reference restart.
+        self.state.reset();
+
+        let nch = usize::from(self.channels);
+        let mut pcm = Vec::with_capacity(frames as usize * SAMPLES_PER_FRAME_PER_CHANNEL * nch);
+        for f in 0..frames {
+            let keyframe = f == 0;
+            let frame = decode_sv8_stereo_frame(
+                &mut reader,
+                self.max_band,
+                keyframe,
+                self.stream_ms,
+                &mut self.state,
+                &mut self.cns,
+            )?;
+            let mut stereo = reconstruct_sv8_stereo_frame(&frame)?;
+            undo_ms_stereo_pinned(&mut stereo, &frame.ms_flags)?;
+            let left = self.synthesis.synthesize_channel_frame(0, &stereo[0])?;
+            let right = self.synthesis.synthesize_channel_frame(1, &stereo[1])?;
+            if nch == 2 {
+                for (&l, &r) in left.iter().zip(right.iter()) {
+                    pcm.push(l);
+                    pcm.push(r);
+                }
+            } else {
+                pcm.extend_from_slice(&left);
+            }
+            self.frames_decoded += 1;
         }
         Ok(pcm)
     }
