@@ -523,6 +523,71 @@ pub fn decode_band_resolutions_grounded(
     Ok(tmp)
 }
 
+/// Walk the §6.2 band-resolution header for a **two-channel** frame
+/// body, fixture-pinned (r419): bands are decoded **top-down** with the
+/// two channels **interleaved per band** (left `Res` then right `Res`
+/// at each band before moving down), and each channel folds its own
+/// delta chain — the channel's res-table context comes from *that
+/// channel's* band-above `Res` ([`res_ctx_for_above`]), its delta adds
+/// onto *that channel's* band-above value, and every intermediate is
+/// re-wrapped by the §6.2 signed ring ("values > 15 wrap by −17").
+/// The top band reads both channels from context 0.
+///
+/// This is the stereo composition of
+/// [`decode_band_resolutions_grounded`], pinned by the r419 SV8 corpus:
+/// on the losslessly transcoded SV7 fixtures this walk reproduces the
+/// SV7 §5.1 ground-truth `Res` pairs for every band of every frame,
+/// while the channel-major alternative (all left bands then all right)
+/// desynchronises on the first frame.
+///
+/// The returned `Vec` is in **ascending band order** (`out[0]` = band
+/// 0); each element is `[left, right]` signed band_types ready for
+/// [`crate::sv8_band_decode::sv8_band_type_case`]. `nbands == 0` reads
+/// nothing.
+///
+/// # Errors
+///
+/// - [`Error::UnexpectedEof`] mid-walk if the reader starves.
+/// - [`Error::HuffmanNoMatch`] if a res peek matches no row
+///   (unreachable for the staged res tables).
+/// - [`Error::UnsupportedBandType`] if [`table_for_role`] cannot supply
+///   a context's res table (unreachable for `ctx ∈ {0,1}`; defensive).
+pub fn decode_band_resolutions_stereo_grounded(
+    reader: &mut Sv7BitReader<'_>,
+    nbands: u8,
+) -> Result<Vec<[i8; 2]>> {
+    let n = nbands as usize;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Decoded top-down; tmp[0] = top band. Per-channel `above` state.
+    let mut tmp: Vec<[i8; 2]> = Vec::with_capacity(n);
+    let mut above: [Option<i8>; 2] = [None, None];
+    for _ in 0..n {
+        let mut pair = [0_i8; 2];
+        for (ch, slot) in pair.iter_mut().enumerate() {
+            let ctx = match above[ch] {
+                None => 0,
+                Some(a) => res_ctx_for_above(a),
+            };
+            let table = table_for_role(Sv8TableRole::Res, ctx)
+                .ok_or(Error::UnsupportedBandType(i8::MIN))?;
+            let raw = table.decode(reader)? as i32;
+            let res = match above[ch] {
+                None => wrap_res(raw),
+                Some(a) => wrap_res(raw + a as i32),
+            };
+            *slot = res;
+            above[ch] = Some(res);
+        }
+        tmp.push(pair);
+    }
+
+    tmp.reverse();
+    Ok(tmp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1039,103 @@ mod tests {
         let got = decode_band_resolutions_grounded(&mut reader, 2).unwrap();
         // ascending: band 0 (decoded last / bottom) then band 1 (top).
         assert_eq!(got, vec![below_res, top_res]);
+    }
+
+    // ─── decode_band_resolutions_stereo_grounded (§6.2, r419) ──
+
+    /// Hand-replicate the stereo walk: per band top-down, L then R,
+    /// each channel folding its own chain (ctx from that channel's
+    /// band-above, delta onto it, §6.2 wrap). `rows[i] = [lrow, rrow]`
+    /// selects the length-table row each channel reads at step `i`
+    /// (step 0 = top band).
+    fn replicate_stereo(rows: &[[usize; 2]]) -> (Vec<u8>, Vec<[i8; 2]>) {
+        let mut p = BitPacker::new();
+        let mut top_down: Vec<[i8; 2]> = Vec::new();
+        let mut above: [Option<i8>; 2] = [None, None];
+        for pair in rows {
+            let mut out = [0i8; 2];
+            for ch in 0..2 {
+                let ctx = match above[ch] {
+                    None => 0,
+                    Some(a) => res_ctx_for_above_ref(a),
+                };
+                let table = if ctx == 0 {
+                    &SV8_RES_1_TABLE
+                } else {
+                    &SV8_RES_2_TABLE
+                };
+                let e = table.lengths[pair[ch]];
+                p.push(e.code, e.length);
+                let raw = symbol_for_row(table, pair[ch]) as i32;
+                let res = match above[ch] {
+                    None => wrap_res_ref(raw),
+                    Some(a) => wrap_res_ref(raw + a as i32),
+                };
+                out[ch] = res;
+                above[ch] = Some(res);
+            }
+            top_down.push(out);
+        }
+        let mut ascending = top_down.clone();
+        ascending.reverse();
+        (p.finish(), ascending)
+    }
+
+    #[test]
+    fn stereo_grounded_zero_bands_reads_nothing() {
+        let mut reader = Sv7BitReader::new(&[0xFF; 4]);
+        let before = reader.bits_remaining();
+        let res = decode_band_resolutions_stereo_grounded(&mut reader, 0).unwrap();
+        assert!(res.is_empty());
+        assert_eq!(reader.bits_remaining(), before);
+    }
+
+    #[test]
+    fn stereo_grounded_matches_replicated_spec_walk() {
+        let chains: &[&[[usize; 2]]] = &[
+            &[[0, 0]],
+            &[[0, 1], [2, 3], [1, 0]],
+            &[[5, 0], [7, 1], [0, 5], [3, 3]],
+            &[[10, 11], [10, 11], [0, 0], [11, 10], [1, 2]],
+        ];
+        for chain in chains {
+            let (bytes, expected) = replicate_stereo(chain);
+            let mut reader = Sv7BitReader::new(&bytes);
+            let got =
+                decode_band_resolutions_stereo_grounded(&mut reader, chain.len() as u8).unwrap();
+            assert_eq!(got, expected, "chain {chain:?}");
+        }
+    }
+
+    #[test]
+    fn stereo_grounded_channels_fold_independent_chains() {
+        // A left chain that ends >2 must NOT flip the right channel's
+        // context: give the right channel a small chain and confirm it
+        // keeps reading ctx 0 while the left reads ctx 1 below the top.
+        // Top band: L raw 5 (ctx0), R raw 0 (ctx0). Next band down:
+        // L ctx = above 5 > 2 ⇒ res-2; R ctx = above 0 ⇒ res-1.
+        let (bytes, expected) = replicate_stereo(&[[5, 0], [0, 0]]);
+        let mut reader = Sv7BitReader::new(&bytes);
+        let got = decode_band_resolutions_stereo_grounded(&mut reader, 2).unwrap();
+        assert_eq!(got, expected);
+        // Sanity: the two channels differ, proving both were decoded.
+        assert_ne!(got[1][0], got[1][1]);
+    }
+
+    #[test]
+    fn stereo_grounded_propagates_eof_mid_walk() {
+        // One full pair then starvation on band 2's left read.
+        let e = SV8_RES_1_TABLE.lengths[0];
+        let mut p = BitPacker::new();
+        p.push(e.code, e.length);
+        p.push(e.code, e.length);
+        let mut bytes = p.bytes.clone();
+        if p.nbits > 0 {
+            bytes.push((p.acc << (8 - p.nbits)) as u8);
+        }
+        let mut reader = Sv7BitReader::new(&bytes);
+        let res = decode_band_resolutions_stereo_grounded(&mut reader, 2);
+        assert!(matches!(res, Err(Error::UnexpectedEof)));
     }
 
     #[test]

@@ -444,6 +444,53 @@ pub fn reconstruct_sv7_band_absolute(
     Ok(())
 }
 
+/// Full absolute reconstruction of one **SV8** band: from the decoded
+/// `[i32; 36]` level buffer to s16-domain `f64` subband samples,
+/// `out[i] = level[i] × C[band_type + 1] × gain(granule_scf[i / 12])`,
+/// with the same corpus-pinned absolute gain law as SV7
+/// ([`sv7_absolute_scf_gain`]).
+///
+/// The SV8 twin of [`reconstruct_sv7_band_absolute`], differing in the
+/// two SV8 conventions:
+///
+/// - **No escape centring.** Every SV8 sample arm emits already-signed,
+///   already-centred levels (the §6.4.3 escape recentres by `D` inside
+///   [`crate::sv8_sample_decode::decode_sv8_escape_band`]), so the
+///   levels multiply straight through for every `band_type`.
+/// - **Shared absolute law across generations.** The r419 SV8 corpus
+///   (lossless SV7→SV8 transcodes) decodes to *identical* SCF indices
+///   and levels as its SV7 ground truth, so §3.6's "only the entropy
+///   layer differs" extends to the reconstruction: the SV7-pinned
+///   `gain(idx) = SCF_STEP_RATIO^(idx − 1)` anchor applies unchanged
+///   to the signed SV8 index range (`−6..=121`, all below the
+///   [`SCF_ABSOLUTE_SENTINEL`] clamp).
+///
+/// CNS bands (`band_type == -1`) scale the PRNG levels by `C[0]` times
+/// the granule gains — in SV8 the CNS band *does* carry a §6.3 SCF
+/// layer (fixture-pinned by the transcoded CNS corpus stream, r419),
+/// unlike the earlier no-SCF synthetic reading.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedBandType`] for a `band_type` outside `-1..=17`.
+pub fn reconstruct_sv8_band_absolute(
+    band_type: i8,
+    levels: &[i32; SAMPLES_PER_BAND],
+    granule_scf: [i32; GRANULES_PER_BAND],
+    out: &mut [f64; SAMPLES_PER_BAND],
+) -> Result<()> {
+    let idx = band_type_index(band_type).ok_or(Error::UnsupportedBandType(band_type))?;
+    let c = DEQUANT_COEFFICIENT_C[idx];
+    for (g, &scf) in granule_scf.iter().enumerate() {
+        let gain = c * sv7_absolute_scf_gain(scf);
+        let start = g * SAMPLES_PER_GRANULE;
+        for k in start..start + SAMPLES_PER_GRANULE {
+            out[k] = f64::from(levels[k]) * gain;
+        }
+    }
+    Ok(())
+}
+
 /// Compile-time sanity: the reconstruct-layer granule geometry must
 /// match the scf-layer's `SCF_GRANULES_PER_BAND`, and the 3×12 split
 /// must tile the full 36-sample band exactly.
