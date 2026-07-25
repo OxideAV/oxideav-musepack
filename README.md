@@ -113,6 +113,48 @@ decoded structure of **every corpus `AP` packet reproduces the
 reference producers' bytes exactly** (`tests/sv8_corpus_reencode.rs`)
 — the SV8 frame-body layer is wire-symmetric, like the SV7 side.
 
+**Round 429: the from-PCM SV8 encoder is closed and oracle-validated —
+and the gapless decode window is re-pinned against the reference
+console decoder.** The encoder pipeline is complete: `analysis` (the
+32-band polyphase **analysis** filterbank, the forward twin of
+`synthesis` — same ISO prototype ÷ 32, forward cosine matrix,
+convention pinned by the unity-gain 481-sample round trip through the
+oracle-validated synthesis), `sv8_quantize` (the algebraic inverse of
+the corpus-pinned absolute law: maximal-SCF selection, ±D-confined
+levels, a flat-noise-step `Res` policy), `sv8_frame_build` (per-band
+M/S election — mid/side halving, the forward of the pinned undo —
+plus the **forced** SCFI-from-equalities rule: the `dscf-1` table has
+no identity-delta codeword, and the `Res` cap at the SV8 ring maximum
+15), and `sv8_file_encode` (§3 varint/packet writers, `SH` with the
+**fixture-pinned CRC-32** — the standard reflected IEEE variant
+reproduces all seven corpus checksums; alternates match none —
+`RG`/`EI` composers, key-frame-led `AP` packets, `SE`). Registry:
+`make_encoder` joins the dual API (`caps.encode`). Measured with the
+default settings: stereo multitone ~81/85 dB SNR at ~173 kbps, mono
+sine ~82 dB at ~61 kbps, full-band white noise ~65 dB (the filterbank
+pair's design-ripple bound); decode → re-encode of our own `AP`
+packets is **byte-exact** with exact bit budgets
+(`tests/sv8_encoder_pcm.rs`). **Black-box oracle closure**
+(`tests/sv8_encoder_oracle.rs`, binary-gated): the reference console
+decoder plays our streams to **exactly N input-aligned samples**
+(81.3/81.7 dB vs input; 85–86 dB / max 1 LSB parity with our own
+decode — the corpus-typical f32-vs-f64 residue), and FFmpeg matches
+our window at the `481 + silence` offset (87.7/88.6 dB, max 1 LSB).
+Building the encoder surfaced and fixed two decode-side wire bugs:
+the §6.5 enumerative index read broke past 16 bits (any M/S bitmap
+scope ≥ 20 bands at mid-range counts — unreached by the corpus), and
+— the big one — the **gapless window semantics**: the reference
+console decoder pins `output = decoded[481 + silence .. 481 +
+sample_count]` (a 481-sample synthesis-priming skip the r419
+FFmpeg-pinned trim lacked, FFmpeg performing no skip at all), with
+the tail past the coded frames supplied first by the reference
+producers' **undeclared flush frame** (SV7: after the 11-bit trailer;
+SV8: extra coded frames while ≥ 8 real payload bits remain) and then
+by zero-fed synthesis drain. Both generations' corpus gates are
+re-pinned on the shifted window; the encoder picks the smallest
+`beginning_silence` (0..=481) that keeps its real tail inside the
+coded frames, so its own streams never rely on drain approximation.
+
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
 every decode path bit-for-bit against the readers/decoders already in
@@ -217,6 +259,31 @@ Musepack ships in two incompatible stream-format generations:
   frames, so each channel's filter must be reused across all frames) and
   `synthesize_stereo_frame_interleaved` produces interleaved `2 × 1152`
   `L, R, …` PCM from the post-M/S-undo L/R subband matrices.
+- `analysis` — the 32-band polyphase **analysis** subband filter
+  (round 429), the forward counterpart of `synthesis` and the
+  encoder's front end: 512-sample FIFO, analysis window = the
+  in-crate ISO Table 3-B.3 prototype ÷ 32, forward cosine matrix
+  `cos[(2·sb+1)(j−16)π/64]`. Convention pinned empirically against
+  the oracle-validated synthesis: unity gain at exactly
+  `ANALYSIS_SYNTHESIS_DELAY` (481) samples, ≈ 84 dB round-trip SNR
+  (the pair's design ripple); wrong variants collapse to single
+  digits.
+- `sv8_quantize` / `sv8_frame_build` / `sv8_file_encode` / `sv8_crc`
+  — the **from-PCM SV8 encoder** (round 429). `sv8_quantize` inverts
+  the corpus-pinned absolute reconstruction law (largest-fitting SCF
+  per granule, nearest-level rounding confined to `±D[Res]`, and a
+  flat s16-domain noise-step `Res` policy); `sv8_frame_build` elects
+  L/R vs M/S per band (mid = `(L+R)/2`, side = `(L−R)/2` — the
+  forward of the pinned undo; identical channels elect M/S with a
+  silent side, which is also the cheap mono body), caps `Res` at the
+  SV8 ring maximum 15, and derives SCFI from the granule-SCF
+  equalities (**forced** by the `dscf-1` table's missing
+  identity-delta codeword); `sv8_file_encode` composes the stream
+  (§3 varint + inclusive-size packet writers, `SH` with the
+  fixture-pinned IEEE CRC-32 from `sv8_crc`, `RG`/`EI`,
+  key-frame-led `AP` packets, `SE`) with gapless fields chosen so
+  the decoder's `481 + silence` window returns exactly the input
+  (`encode_sv8_from_pcm_f64` / `_s16`).
 - `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo *structure*:
   `undo_ms_stereo(stereo, ms_flags, undo)` walks a stereo pair of
   `SubbandMatrix` rows, transforming each `msflag`-set subband's
