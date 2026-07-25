@@ -237,6 +237,13 @@
 //!   matrixing coefficient ([`synthesis::matrix_coefficient`]) is the
 //!   closed-form `cos[(16+i)(2k+1)π/64]` the figure gives.
 //!
+//! - [`analysis`] — the forward counterpart of [`synthesis`]: the
+//!   32-band polyphase **analysis** subband filter (the encoder's
+//!   front end). Shares the synthesis prototype window (÷32) and the
+//!   forward cosine matrix; convention pinned empirically by the
+//!   unity-gain 481-sample-delay round trip through the
+//!   oracle-validated synthesis filter.
+//!
 //! Per-field header decoding (including the per-band SCF anchor
 //! the [`scf`] module currently takes as an argument), the SV7
 //! per-frame 20-bit length prefix + "read in 32-LSB units"
@@ -248,6 +255,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod analysis;
 pub mod cns;
 pub mod ei_header;
 pub mod frame_reconstruct;

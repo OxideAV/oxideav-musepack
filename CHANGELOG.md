@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 429** — **32-band polyphase analysis filterbank** (`analysis`):
+  the forward counterpart of `synthesis` and the encoder's front end.
+  `AnalysisFilter` (512-sample FIFO; window = the in-crate ISO Table
+  3-B.3 prototype ÷ 32; forward cosine matrix
+  `cos[(2·sb+1)(j−16)π/64]`) and `analyze_frame_channel` (1152 PCM →
+  `SubbandMatrix`). Convention pinned empirically against the
+  oracle-validated synthesis filter: the analysis → synthesis round
+  trip is unity-gain at exactly `ANALYSIS_SYNTHESIS_DELAY` (481)
+  samples with ≈ 84 dB reconstruction SNR on white noise (the
+  pseudo-QMF pair's design ripple at the window's print precision);
+  wrong sign/order/scale variants collapse to single-digit SNR.
+
 ### Fixed
 
 - **Round 419** — **SV8 sample-arm conventions corrected against the
