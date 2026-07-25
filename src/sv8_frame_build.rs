@@ -354,8 +354,13 @@ mod tests {
         }
         let mut stereo = reconstruct_sv8_stereo_frame(&frame).unwrap();
         undo_ms_stereo_pinned(&mut stereo, &frame.ms_flags).unwrap();
-        for b in 0..frame.nbands as usize {
-            let (l_band, r_band) = (&stereo[0][b], &stereo[1][b]);
+        let (left_out, right_out) = stereo.split_at(1);
+        for (b, (l_band, r_band)) in left_out[0]
+            .iter()
+            .zip(right_out[0].iter())
+            .take(frame.nbands as usize)
+            .enumerate()
+        {
             for (k, (&lv, &rv)) in l_band.iter().zip(r_band.iter()).enumerate() {
                 assert_eq!(lv, rv, "band {b} sample {k}: L must equal R");
             }
