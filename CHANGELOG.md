@@ -6,7 +6,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Round 429** — **§6.5 enumerative decode broke on wide M/S scopes.**
+  `enum_decode_subset` read its phased-binary index with a single
+  `read_bits(bitlen − 1)`, but the bit reader caps one fixed read at
+  16 bits — any §6.2 M/S bitmap with `C(n, k) > 2^17` codewords
+  (n ≥ 20 at mid-range k) failed with `HuffmanNoMatch`. Found by
+  round-tripping the new from-PCM encoder's busy stereo frames (the
+  sparse path's `C(18, 9)` fits 16 bits and the corpus never elected
+  that many M/S bands). Now assembled from two reads, high half first;
+  the frame-body encoder's complement mask also gains the `n = 32`
+  field guard (`1u32 << 32` overflow). Fuzz-gated across every scope
+  `n ≤ 32` with worst-case `k = n/2` masks.
+
 ### Added
+
+- **Round 429** — **SV8 whole-stream from-PCM encoder**
+  (`sv8_file_encode` + `sv8_crc`): `encode_sv8_from_pcm_f64` /
+  `_s16` compose `MPCK` → `SH`/`RG`/`EI` → `AP`×N → `SE` on top of
+  analysis → build → wire-encode. Packet layer: §3 varint writer +
+  inclusive-size fixed point; `SH` composer is the exact inverse of
+  the parser with the CRC-32 **empirically pinned** against all seven
+  corpus fixtures (standard reflected IEEE/zlib variant; alternates
+  match none) and re-verified per run; `RG`/`EI` composers parse back
+  through their field-map decoders. Gapless: `beginning_silence =
+  481` (the filterbank delay), `sample_count = N` — own-decode
+  returns exactly N samples per channel, time-aligned. Each `AP`
+  opens with a key frame; `block_power` drives the packet split; mono
+  declares 1 channel and codes the M/S silent-side two-channel body.
+  End-to-end gates (`tests/sv8_encoder_pcm.rs`): stereo multitone
+  ~81/85 dB SNR at ~173 kbps, mono sine ~82 dB at ~61 kbps,
+  full-band white noise ~65 dB (the filterbank pair's ripple bound),
+  quality-knob monotonicity, byte-exact AP re-parse (decode →
+  re-encode reproduces every packet bit-for-bit, budgets exact), and
+  s16-entry equivalence.
 
 - **Round 429** — **SV8 frame builder** (`sv8_frame_build`): analysed
   subband matrices → the structured `Sv8StereoFrameDecode` the wire
