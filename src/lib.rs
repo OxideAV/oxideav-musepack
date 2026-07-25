@@ -293,6 +293,7 @@ pub mod sv8_band_header;
 pub mod sv8_context;
 pub mod sv8_decode;
 pub mod sv8_dscf_loop;
+pub mod sv8_frame_build;
 pub mod sv8_frame_decode;
 pub mod sv8_huffman;
 pub mod sv8_huffman_encode;

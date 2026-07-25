@@ -8,6 +8,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 429** — **SV8 frame builder** (`sv8_frame_build`): analysed
+  subband matrices → the structured `Sv8StereoFrameDecode` the wire
+  encoder consumes. Per band: L/R vs M/S election (mid = `(L+R)/2`,
+  side = `(L−R)/2`, the forward of the corpus-pinned undo; elected on
+  estimated bit cost — a silent side makes M/S strictly cheaper, which
+  is also the cheap mono body: pass the same matrix twice), `Res`
+  selection via the `sv8_quantize` policy **capped at the SV8 ring
+  maximum 15** (the §6.2 wrap makes 16/17 unreachable on the SV8
+  wire), quantisation, and SCFI derived from granule-SCF equalities —
+  **forced**, not policy: the `dscf-1` table has no identity-delta
+  codeword, so equal neighbours must ride the SCFI share bits.
+  Gated: build → wire-encode → wire-decode structural identity,
+  half-step reconstruction error bounds after M/S undo, mono-shape
+  election, forced-SCFI consistency, ring confinement, max_band
+  bounds.
 - **Round 429** — **SV8 forward quantisation** (`sv8_quantize`): the
   algebraic inverse of the corpus-pinned absolute reconstruction law
   (`level × C[Res+1] × SCF_STEP_RATIO^(scf−1)`, s16 domain).
