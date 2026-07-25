@@ -47,6 +47,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 429** — **Registry encoder + black-box oracle gates.**
+  `registry::make_encoder` (the dual-API encoder factory, also
+  installed via `register!` with `caps.encode`): a whole-stream
+  `oxideav_core::Encoder` — S16 interleaved frames in, one complete
+  `MPCK` packet out at flush — with registry round-trip and
+  shape-rejection tests. `tests/sv8_encoder_oracle.rs` adds
+  binary-gated oracle gates (graceful skip when the tools are not on
+  PATH): the reference console decoder must play our streams to
+  **exactly N input-aligned samples** (measured: 81.3/81.7 dB vs
+  input, 85–86 dB / max 1 LSB parity with our own decode), and FFmpeg
+  must match our window at the `481 + silence` offset (87.7/88.6 dB,
+  max 1 LSB).
+
 - **Round 429** — **SV8 whole-stream from-PCM encoder**
   (`sv8_file_encode` + `sv8_crc`): `encode_sv8_from_pcm_f64` /
   `_s16` compose `MPCK` → `SH`/`RG`/`EI` → `AP`×N → `SE` on top of

@@ -1,6 +1,7 @@
 //! oxideav-core integration: the registry entry point and the direct
-//! `make_decoder` factory (the crate's dual-API convention — both the
-//! `oxideav_core::register!` path and a directly-callable factory).
+//! `make_decoder` / `make_encoder` factories (the crate's dual-API
+//! convention — both the `oxideav_core::register!` path and
+//! directly-callable factories).
 //!
 //! The [`Decoder`] implementation is a whole-stream decoder: Musepack
 //! `.mpc` files are single continuous streams (SV7 has no packet
@@ -10,12 +11,17 @@
 //! PCM is emitted as interleaved [`oxideav_core::SampleFormat::S16`]
 //! frames of up to 1152 samples per channel.
 //!
-//! SV7 decode is the corpus-validated path
-//! ([`crate::sv7_file_decode::decode_sv7_file`], ±1 LSB vs the FFmpeg
-//! oracle); SV8 input routes to the grounded mono subset
-//! ([`crate::sv8_decode`], relative loudness — its absolute anchor is
-//! still a docs gap) through the same magic dispatch
-//! ([`crate::mpc_decode::decode_mpc_stream`]).
+//! Both stream generations decode through the magic dispatch
+//! ([`crate::mpc_decode::decode_mpc_stream`]) at absolute loudness,
+//! each corpus-validated to ±1 LSB against black-box reference
+//! decodes (SV7: [`crate::sv7_file_decode::decode_sv7_file`], r390;
+//! SV8: [`crate::sv8_decode::decode_sv8_stream`], r419/r429).
+//!
+//! The [`oxideav_core::Encoder`] implementation (round 429) is the
+//! whole-stream from-PCM **SV8 encoder**
+//! ([`crate::sv8_file_encode`]): S16 interleaved frames in, one
+//! complete `MPCK` stream out at flush (the `SH` totals are only
+//! known once the input ends).
 
 use std::collections::VecDeque;
 
@@ -149,6 +155,150 @@ impl Decoder for MpcStreamDecoder {
     }
 }
 
+/// Whole-stream SV8 **encoder** (round 429): accumulates interleaved
+/// S16 PCM frames and, at [`Encoder::flush`], runs the from-PCM SV8
+/// pipeline ([`crate::sv8_file_encode::encode_sv8_from_pcm_s16`]) and
+/// emits the complete `MPCK` stream as a single packet. Whole-stream
+/// because a Musepack stream's `SH` header carries the total sample
+/// count up front — the totals are only known once the input ends.
+struct MpcStreamEncoder {
+    codec_id: CodecId,
+    output_params: CodecParameters,
+    sample_freq_index: u8,
+    channels: u8,
+    /// Accumulated interleaved input samples.
+    pcm: Vec<i16>,
+    /// The encoded stream, produced at flush and drained by
+    /// `receive_packet`.
+    encoded: Option<Vec<u8>>,
+    flushed: bool,
+}
+
+impl MpcStreamEncoder {
+    fn new(params: &CodecParameters) -> oxideav_core::Result<Self> {
+        let sample_rate = params
+            .sample_rate
+            .ok_or_else(|| oxideav_core::Error::invalid("musepack: sample_rate is required"))?;
+        let sample_freq_index = crate::sh_header::SV8_SAMPLE_RATES
+            .iter()
+            .position(|&r| r == sample_rate)
+            .ok_or_else(|| {
+                oxideav_core::Error::unsupported(format!(
+                    "musepack: sample rate {sample_rate} Hz is not one of {:?}",
+                    crate::sh_header::SV8_SAMPLE_RATES
+                ))
+            })? as u8;
+        let channels = params.channels.unwrap_or(2);
+        if !(1..=2).contains(&channels) {
+            return Err(oxideav_core::Error::unsupported(format!(
+                "musepack: {channels} channels (only mono and stereo are wired)"
+            )));
+        }
+        if let Some(fmt) = params.sample_format {
+            if fmt != oxideav_core::SampleFormat::S16 {
+                return Err(oxideav_core::Error::unsupported(format!(
+                    "musepack: encoder input must be S16 interleaved, got {fmt:?}"
+                )));
+            }
+        }
+        let mut output_params = CodecParameters::audio(params.codec_id.clone());
+        output_params.sample_rate = Some(sample_rate);
+        output_params.channels = Some(channels);
+        output_params.sample_format = Some(oxideav_core::SampleFormat::S16);
+        Ok(Self {
+            codec_id: params.codec_id.clone(),
+            output_params,
+            sample_freq_index,
+            channels: channels as u8,
+            pcm: Vec::new(),
+            encoded: None,
+            flushed: false,
+        })
+    }
+}
+
+impl oxideav_core::Encoder for MpcStreamEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.codec_id
+    }
+
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> oxideav_core::Result<()> {
+        if self.flushed {
+            return Err(oxideav_core::Error::invalid(
+                "musepack: encoder already flushed",
+            ));
+        }
+        let Frame::Audio(af) = frame else {
+            return Err(oxideav_core::Error::invalid("musepack: audio frames only"));
+        };
+        let data = af.data.first().ok_or_else(|| {
+            oxideav_core::Error::invalid("musepack: audio frame carries no plane")
+        })?;
+        let want = af.samples as usize * usize::from(self.channels) * 2;
+        if data.len() < want {
+            return Err(oxideav_core::Error::invalid(format!(
+                "musepack: frame declares {} samples but carries {} bytes",
+                af.samples,
+                data.len()
+            )));
+        }
+        for pair in data[..want].chunks_exact(2) {
+            self.pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
+        }
+        Ok(())
+    }
+
+    fn receive_packet(&mut self) -> oxideav_core::Result<Packet> {
+        match self.encoded.take() {
+            Some(bytes) => {
+                let rate = self.output_params.sample_rate.unwrap_or(44_100);
+                Ok(Packet::new(
+                    0,
+                    oxideav_core::TimeBase::from_rate(rate),
+                    bytes,
+                ))
+            }
+            None if self.flushed => Err(oxideav_core::Error::Eof),
+            None => Err(oxideav_core::Error::NeedMore),
+        }
+    }
+
+    fn flush(&mut self) -> oxideav_core::Result<()> {
+        if self.flushed {
+            return Ok(());
+        }
+        self.flushed = true;
+        let enc = crate::sv8_file_encode::encode_sv8_from_pcm_s16(
+            &self.pcm,
+            self.channels,
+            self.sample_freq_index,
+            &crate::sv8_file_encode::Sv8EncoderSettings::default(),
+        )
+        .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?;
+        self.encoded = Some(enc.bytes);
+        Ok(())
+    }
+}
+
+/// Direct encoder factory — the crate's dual-API encoder endpoint,
+/// also installed as the registry's encoder factory. Produces SV8
+/// (`MPCK`) streams from S16 interleaved PCM.
+///
+/// # Errors
+///
+/// [`oxideav_core::Error::InvalidData`] / `Unsupported` for a missing
+/// or non-SV8 sample rate, an unsupported channel count, or a
+/// non-S16 sample format.
+pub fn make_encoder(
+    params: &CodecParameters,
+) -> oxideav_core::Result<Box<dyn oxideav_core::Encoder>> {
+    Ok(Box::new(MpcStreamEncoder::new(params)?))
+}
+
 /// Direct decoder factory — the crate's historical-signature endpoint,
 /// also installed as the registry's decoder factory.
 ///
@@ -165,11 +315,13 @@ pub fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn De
 pub fn register(ctx: &mut RuntimeContext) {
     let mut caps = CodecCapabilities::audio("musepack_sw");
     caps.decode = true;
+    caps.encode = true;
     caps.lossy = true;
     ctx.codecs.register(
         CodecInfo::new(CodecId::new(MUSEPACK_CODEC_ID))
             .capabilities(caps)
-            .decoder(make_decoder),
+            .decoder(make_decoder)
+            .encoder(make_encoder),
     );
 }
 
@@ -279,5 +431,92 @@ mod tests {
         let mut ctx = RuntimeContext::default();
         crate::__oxideav_entry(&mut ctx);
         assert!(ctx.codecs.first_decoder(&params()).is_ok());
+    }
+
+    fn encoder_params(rate: u32, channels: u16) -> CodecParameters {
+        let mut p = CodecParameters::audio(CodecId::new(MUSEPACK_CODEC_ID));
+        p.sample_rate = Some(rate);
+        p.channels = Some(channels);
+        p.sample_format = Some(oxideav_core::SampleFormat::S16);
+        p
+    }
+
+    /// Encoder → decoder round trip through the registry surfaces: an
+    /// S16 sine goes in as audio frames, one `MPCK` packet comes out
+    /// at flush, and the packet decodes back through `make_decoder` to
+    /// the same sample count with real (non-silent) content.
+    #[test]
+    fn encoder_round_trips_through_the_registry_decoder() {
+        let mut e = make_encoder(&encoder_params(44_100, 1)).unwrap();
+        assert_eq!(e.codec_id().as_str(), MUSEPACK_CODEC_ID);
+        assert_eq!(e.output_params().sample_rate, Some(44_100));
+
+        let n = 3_000usize;
+        let pcm: Vec<i16> = (0..n)
+            .map(|i| (10_000.0 * (0.05 * i as f64).sin()) as i16)
+            .collect();
+        let mut data = Vec::with_capacity(2 * n);
+        for &s in &pcm {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        e.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: None,
+            data: vec![data],
+        }))
+        .unwrap();
+        assert!(matches!(
+            e.receive_packet(),
+            Err(oxideav_core::Error::NeedMore)
+        ));
+        e.flush().unwrap();
+        let pkt = e.receive_packet().unwrap();
+        assert_eq!(&pkt.data[..4], b"MPCK");
+        assert!(matches!(e.receive_packet(), Err(oxideav_core::Error::Eof)));
+
+        let mut d = make_decoder(&params()).unwrap();
+        d.send_packet(&pkt).unwrap();
+        let mut decoded = 0usize;
+        let mut nonzero = false;
+        loop {
+            match d.receive_frame() {
+                Ok(Frame::Audio(af)) => {
+                    decoded += af.samples as usize;
+                    nonzero |= af.data[0].iter().any(|&b| b != 0);
+                }
+                Ok(_) => panic!("audio frames only"),
+                Err(oxideav_core::Error::Eof) => break,
+                Err(e) => panic!("decode: {e}"),
+            }
+        }
+        assert_eq!(decoded, n, "gapless sample count through the registry");
+        assert!(nonzero, "decoded audio must not be silence");
+    }
+
+    #[test]
+    fn encoder_rejects_unsupported_shapes() {
+        assert!(make_encoder(&params()).is_err(), "missing sample rate");
+        assert!(
+            make_encoder(&encoder_params(11_025, 2)).is_err(),
+            "non-SV8 rate"
+        );
+        assert!(
+            make_encoder(&encoder_params(44_100, 3)).is_err(),
+            "channel count"
+        );
+        let mut p = encoder_params(44_100, 2);
+        p.sample_format = Some(oxideav_core::SampleFormat::F32);
+        assert!(make_encoder(&p).is_err(), "sample format");
+    }
+
+    #[test]
+    fn registry_lookup_finds_the_encoder() {
+        let mut ctx = RuntimeContext::default();
+        register(&mut ctx);
+        let e = ctx
+            .codecs
+            .first_encoder(&encoder_params(44_100, 2))
+            .expect("registered encoder");
+        assert_eq!(e.codec_id().as_str(), MUSEPACK_CODEC_ID);
     }
 }
