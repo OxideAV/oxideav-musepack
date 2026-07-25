@@ -24,15 +24,23 @@
 //!
 //! # Gapless fields
 //!
-//! The analysis → synthesis filterbank pair delays the signal by
-//! [`ANALYSIS_SYNTHESIS_DELAY`] (481) samples, so the encoder writes
-//! `beginning_silence = 481` and `sample_count = N` (the input
-//! length): a decoder that honours the `SH` totals (§2 fields 3-4)
-//! drops the 481 warm-up samples and returns exactly the input span,
-//! time-aligned. Enough frames are coded to cover `N + 481` samples
-//! (`⌈(N + 481) / 1152⌉` — the same derivation
-//! [`crate::sv8_decode::decode_sv8_stream`] uses), the tail
-//! zero-padded.
+//! A Musepack decoder outputs
+//! `decoded[481 + silence .. 481 + sample_count]` (the
+//! reference-decoder-pinned window — see
+//! [`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`] and
+//! [`crate::sv8_decode::decode_sv8_stream`]), decoding
+//! `⌈sample_count / 1152⌉` frames and draining the filterbank for any
+//! remainder. The analysis front end already delays the signal by the
+//! matching [`ANALYSIS_SYNTHESIS_DELAY`] (481) samples, so a stream
+//! with `silence = 0`, `sample_count = N` decodes to exactly the
+//! input, time-aligned. The encoder additionally picks the smallest
+//! front pad `silence ∈ 0..=481` with
+//! `(N + silence) mod 1152 ∈ 1..=671`, which keeps the coded frames'
+//! slack past the nominal timeline at ≥ 481 samples — the drain then
+//! only ever covers padding, never real audio (unlike the reference
+//! posture on exact-multiple streams, whose last 481 samples are
+//! flush-approximated). Decoders skip `481 + silence` and return
+//! exactly `sample_count − silence = N` samples.
 //!
 //! # Mono
 //!
@@ -265,10 +273,26 @@ pub fn encode_sv8_from_pcm_f64(
     let nch = channels as usize;
     let n = (pcm.len() / nch) as u64;
 
-    // Gapless geometry (module docs): silence = the filterbank delay,
-    // frames cover N + delay.
-    let silence = ANALYSIS_SYNTHESIS_DELAY as u64;
-    let frames = (n + silence).div_ceil(SAMPLES_PER_FRAME_PER_CHANNEL as u64);
+    // Gapless geometry (module docs). The decoder outputs
+    // `decoded[481 + silence .. 481 + sample_count]`, decoding
+    // `⌈sample_count / 1152⌉` frames and draining the rest — so the
+    // encoder picks the smallest `beginning_silence` pad that keeps
+    // the real tail inside the coded frames:
+    // `(n + silence) mod 1152 ∈ 1..=671` ⇒ the frame slack past the
+    // nominal timeline is ≥ 481 (the priming skip) and the drain
+    // never has to approximate real samples.
+    let frame_len = SAMPLES_PER_FRAME_PER_CHANNEL as u64;
+    let delay = ANALYSIS_SYNTHESIS_DELAY as u64;
+    let r = n % frame_len;
+    let silence = if (1..=(frame_len - delay)).contains(&r) {
+        0
+    } else if r == 0 {
+        1
+    } else {
+        frame_len - r + 1
+    };
+    let sample_count = n + silence;
+    let frames = sample_count.div_ceil(frame_len);
     let frames_per_packet = 1u64 << (u32::from(settings.block_power) * 2);
 
     let build = Sv8FrameBuildSettings {
@@ -280,7 +304,7 @@ pub fn encode_sv8_from_pcm_f64(
     let mut out = Vec::new();
     out.extend_from_slice(&SV8_MAGIC);
     let sh = sh_payload(
-        n,
+        sample_count,
         silence,
         sample_freq_index,
         settings.max_band,
@@ -310,8 +334,14 @@ pub fn encode_sv8_from_pcm_f64(
             let mut matrices = Vec::with_capacity(nch);
             for (ch, filter) in filters.iter_mut().enumerate() {
                 for (k, slot) in frame_pcm.iter_mut().enumerate() {
-                    let idx = (base + k as u64) * nch as u64 + ch as u64;
-                    *slot = pcm.get(idx as usize).copied().unwrap_or(0.0);
+                    // The fed timeline is [silence pad][input][tail pad].
+                    let t = base + k as u64;
+                    *slot = if t < silence {
+                        0.0
+                    } else {
+                        let idx = (t - silence) * nch as u64 + ch as u64;
+                        pcm.get(idx as usize).copied().unwrap_or(0.0)
+                    };
                 }
                 matrices.push(analyze_frame_channel(filter, &frame_pcm));
             }
@@ -569,7 +599,9 @@ mod tests {
                 let payload = sh.payload_bytes();
                 let fields = StreamHeaderFields::parse(payload).unwrap();
                 assert_eq!(fields.crc, sv8_crc32(&payload[4..]));
-                assert_eq!(fields.beginning_silence, 481);
+                // n = 512 ⇒ 512 mod 1152 = 512 ∈ 1..=671 ⇒ no pad.
+                assert_eq!(fields.beginning_silence, 0);
+                assert_eq!(fields.sample_count, 512);
                 return;
             }
         }

@@ -235,11 +235,16 @@ fn cns_frame0_pcm_matches_oracle_within_one_lsb() {
     let bytes = fixture_bytes("cns-pns", "input.mpc");
     let oracle = oracle_s16("cns-pns");
     let ours = decode_sv7_file(&bytes).expect("decode").pcm_s16();
-    let frame0 = 2 * 1152;
+    // The r429 gapless window starts 481 samples per channel into the
+    // untrimmed oracle run, so the CNS-free coded frame 0 covers only
+    // the first `2 × (1152 − 481)` output values.
+    let offset = 2 * 481;
+    let frame0 = 2 * 1152 - offset;
     let mut exact = 0usize;
     for i in 0..frame0 {
-        let err = (i32::from(ours[i]) - i32::from(oracle[i])).abs();
-        assert!(err <= 1, "sample {i}: {} vs oracle {}", ours[i], oracle[i]);
+        let (a, b) = (ours[i], oracle[offset + i]);
+        let err = (i32::from(a) - i32::from(b)).abs();
+        assert!(err <= 1, "sample {i}: {a} vs oracle {b}");
         if err == 0 {
             exact += 1;
         }
@@ -261,7 +266,9 @@ fn cns_stream_pcm_tracks_oracle_statistically() {
     let bytes = fixture_bytes("cns-pns", "input.mpc");
     let oracle = oracle_s16("cns-pns");
     let ours = decode_sv7_file(&bytes).expect("decode").pcm_s16();
-    let n = ours.len().min(oracle.len());
+    // r429 window: ours[i] aligns with oracle[962 + i].
+    let offset = 2 * 481;
+    let n = ours.len().min(oracle.len() - offset);
 
     let mut dot = 0.0f64;
     let mut na = 0.0f64;
@@ -269,7 +276,7 @@ fn cns_stream_pcm_tracks_oracle_statistically() {
     let mut err2 = 0.0f64;
     for i in 0..n {
         let a = f64::from(ours[i]);
-        let b = f64::from(oracle[i]);
+        let b = f64::from(oracle[offset + i]);
         dot += a * b;
         na += a * a;
         nb += b * b;

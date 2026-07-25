@@ -75,6 +75,23 @@ pub const V_LEN: usize = 1024;
 /// synthesis window of ISO Table 3-B.3).
 pub const WINDOW_LEN: usize = 512;
 
+/// The decoder-side **synthesis priming skip**, in PCM samples per
+/// channel: a Musepack decoder discards the first `481` synthesized
+/// samples (plus the `SH` `beginning_silence`) before the stream's
+/// nominal sample 0 — the filterbank pair's warm-up transient
+/// (`512 − 32 + 1`, the analysis+synthesis group delay).
+///
+/// Pinned **empirically, black-box** (r429) against the reference
+/// console decoder (`mpcdec`, Musepack tools — the same black-box
+/// family as the corpus producers): for both the SV7 and SV8 staged
+/// fixtures it emits exactly `sample_count` samples equal to the
+/// untrimmed decode shifted by 481, and on encoder-written streams
+/// with a non-zero `beginning_silence` it skips `481 + silence` and
+/// emits `sample_count − silence`. The staged §1 field-1 note
+/// ("adjusted for gapless / synth-delay",
+/// `spec/musepack-headers-and-coding.md`) names the same adjustment.
+pub const SYNTHESIS_PRIME_SAMPLES: usize = WINDOW_LEN - SUBBANDS + 1;
+
 /// ISO/IEC 11172-3 Table 3-B.3 — coefficients `D_i` of the synthesis
 /// window, all 512 values in index order `D[0]..=D[511]`.
 ///

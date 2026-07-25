@@ -131,10 +131,22 @@ fn corpus_pcm_matches_oracle_within_one_lsb() {
             .collect();
         let out = decode_sv7_file(&bytes).expect("decode");
         let ours = out.pcm_s16();
-        // The oracle is untrimmed; compare over the trimmed length.
-        assert!(ours.len() <= oracle.len(), "{}", e.name);
+        // The oracle emits the untrimmed decoded run with no
+        // synthesis-priming skip; our r429 gapless window starts 481
+        // samples (962 interleaved values) into it. The comparison is
+        // bounded by the oracle length: on the exact-multiple fixture
+        // the oracle lacks the flush frame, so our drained tail has no
+        // oracle counterpart there (the SV8 sibling's oracle covers
+        // it — see tests/sv8_corpus.rs).
+        let offset = 2 * 481;
+        let overlap = ours.len().min(oracle.len().saturating_sub(offset));
+        assert!(
+            overlap * 10 >= ours.len() * 9,
+            "{}: overlap too small",
+            e.name
+        );
         let mut exact = 0usize;
-        for (i, (&a, &b)) in ours.iter().zip(oracle.iter()).enumerate() {
+        for (i, (&a, &b)) in ours.iter().zip(oracle[offset..].iter()).enumerate() {
             let err = (i32::from(a) - i32::from(b)).abs();
             assert!(err <= 1, "{}: sample {i}: {a} vs oracle {b}", e.name);
             if err == 0 {
@@ -142,7 +154,7 @@ fn corpus_pcm_matches_oracle_within_one_lsb() {
             }
         }
         assert!(
-            exact * 10 >= ours.len() * 7,
+            exact * 10 >= overlap * 7,
             "{}: only {exact}/{} samples bit-exact",
             e.name,
             ours.len()

@@ -81,8 +81,10 @@ use core::f64::consts::PI;
 /// `481 = 512 − 32 + 1`: the two 512-tap polyphase halves overlap all
 /// but one sample of their combined support. Pinned empirically by the
 /// module tests (the delay scan finds the correlation peak at 481 and
-/// unity gain there).
-pub const ANALYSIS_SYNTHESIS_DELAY: usize = 481;
+/// unity gain there). Identical by construction to the decoder-side
+/// [`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`] skip — the decoder
+/// discards exactly the pair's warm-up.
+pub const ANALYSIS_SYNTHESIS_DELAY: usize = crate::synthesis::SYNTHESIS_PRIME_SAMPLES;
 
 /// The analysis window `C[i]`: the shared lowpass prototype scaled to
 /// make the critically-sampled analysis+synthesis pair unity-gain

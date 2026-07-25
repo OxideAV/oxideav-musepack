@@ -286,9 +286,11 @@ impl Sv8StreamDecoder {
         // codeword of an exactly-sized payload needs slack bytes to
         // peek into (a valid prefix code never *consumes* past its
         // codeword, so the pad bits are never decoded as data).
+        let payload_bits = payload.len() as u64 * 8;
         let mut framed = payload.to_vec();
         framed.extend_from_slice(&[0, 0]);
         let mut reader = Sv7BitReader::new(&framed);
+        let total_bits = reader.bits_remaining();
 
         // §3.3: every AP opens with a key frame; the SCF memory and
         // Max_used_Band reference restart.
@@ -296,7 +298,23 @@ impl Sv8StreamDecoder {
 
         let nch = usize::from(self.channels);
         let mut pcm = Vec::with_capacity(frames as usize * SAMPLES_PER_FRAME_PER_CHANNEL * nch);
-        for f in 0..frames {
+        let mut f = 0u64;
+        loop {
+            if f >= frames {
+                // r429: reference producers append an undeclared
+                // **flush frame** past the totals-derived count on
+                // exact-multiple streams (it carries the encoder-side
+                // tail the gapless window still needs). The byte
+                // padding after the last real frame is always < 8
+                // bits (corpus-pinned: the re-encode gates reproduce
+                // every payload byte-exactly under this bound), so
+                // ≥ 8 unconsumed payload bits mean another real frame
+                // follows.
+                let consumed = total_bits - reader.bits_remaining();
+                if payload_bits.saturating_sub(consumed) < 8 {
+                    break;
+                }
+            }
             let keyframe = f == 0;
             let frame = decode_sv8_stereo_frame(
                 &mut reader,
@@ -319,8 +337,42 @@ impl Sv8StreamDecoder {
                 pcm.extend_from_slice(&left);
             }
             self.frames_decoded += 1;
+            f += 1;
         }
         Ok(pcm)
+    }
+
+    /// Synthesize one **drain frame**: run both persistent filters
+    /// over an all-zero subband frame, emitting the 1152 samples per
+    /// channel still held in the filterbank overlap (interleaved or
+    /// mono per the `SH` channel count, like
+    /// [`Self::decode_audio_packet`]).
+    ///
+    /// The stream layer uses this to cover the decoder-side
+    /// synthesis-priming skip
+    /// ([`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]) when the coded
+    /// frame run ends before `481 + sample_count` samples — the
+    /// reference tools' "flush frame" behaviour on exact-multiple
+    /// streams.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ChannelCountInvalid`] is structurally unreachable (the
+    /// decoder always holds two filters).
+    pub fn drain_frame(&mut self) -> Result<Vec<f64>> {
+        let zero = crate::frame_reconstruct::zero_subband_matrix();
+        let left = self.synthesis.synthesize_channel_frame(0, &zero)?;
+        let right = self.synthesis.synthesize_channel_frame(1, &zero)?;
+        if self.channels == 2 {
+            let mut pcm = Vec::with_capacity(2 * SAMPLES_PER_FRAME_PER_CHANNEL);
+            for (&l, &r) in left.iter().zip(right.iter()) {
+                pcm.push(l);
+                pcm.push(r);
+            }
+            Ok(pcm)
+        } else {
+            Ok(left.to_vec())
+        }
     }
 }
 

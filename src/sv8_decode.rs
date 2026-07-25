@@ -10,7 +10,8 @@
 //!   [`crate::sh_header::StreamHeaderFields::frames_per_audio_packet`]
 //!   (`2^(block_power × 2)`) frames; the final packet carries the
 //!   stream-total remainder. The stream's frame total derives from the
-//!   `SH` sample count (`⌈(sample_count + beginning_silence) / 1152⌉`).
+//!   `SH` sample count (`⌈sample_count / 1152⌉` — the nominal timeline,
+//!   which includes the leading silence).
 //! - **Key frames.** Each `AP` opens with a key frame (absolute
 //!   scalefactors, fresh `Max_used_Band` log code); later frames of
 //!   the packet chain as non-key frames (`Bands`-delta `Max_used_Band`,
@@ -18,9 +19,19 @@
 //! - **Two-channel bodies.** Every frame body codes two channels
 //!   regardless of the `SH` channel count (fixture-pinned); the `SH`
 //!   count selects the output shape (interleaved stereo vs mono).
-//! - **Gapless trim.** The decoded run is trimmed to the `SH` totals:
-//!   `beginning_silence` leading samples are dropped and exactly
-//!   `sample_count` samples per channel are kept.
+//! - **Gapless window (r429, reference-decoder-pinned).** The output
+//!   is `decoded[481 + silence .. 481 + sample_count]` per channel:
+//!   the decoder discards the synthesis-priming warm-up
+//!   ([`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]) **plus** the `SH`
+//!   `beginning_silence`, then keeps `sample_count − silence` samples.
+//!   When the coded frames end inside that window (exact-multiple
+//!   streams) the tail comes from zero-fed synthesis drain frames —
+//!   the reference tools' flush. Pinned black-box against the
+//!   reference console decoder, which emits exactly this window for
+//!   the staged corpus and for encoder-written streams with non-zero
+//!   silence; the r419 trim (drop `silence`, keep `sample_count` from
+//!   sample 0) reproduced the FFmpeg oracle only because that oracle
+//!   performs no skip at all.
 //!
 //! Output is absolute s16-domain PCM (the corpus-pinned SV7-shared
 //! absolute reconstruction law — [`crate::reconstruct`]), validated
@@ -42,6 +53,7 @@ use crate::framing::parse_sv8_magic;
 use crate::packet_stream::{PacketSizeConvention, PacketStream};
 use crate::sh_header::StreamHeaderFields;
 use crate::sv8_stream::Sv8StreamDecoder;
+use crate::synthesis::SYNTHESIS_PRIME_SAMPLES;
 use crate::typed_packet::TypedPacket;
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
@@ -56,9 +68,10 @@ pub struct Sv8DecodedStream {
     /// Number of frames decoded across all packets.
     pub frames_decoded: u64,
     /// The decoded PCM in the absolute s16 domain: interleaved
-    /// `L, R, …` for a stereo stream, plain mono otherwise, trimmed to
-    /// the `SH` totals (`beginning_silence` dropped, `sample_count`
-    /// samples per channel kept).
+    /// `L, R, …` for a stereo stream, plain mono otherwise, in the
+    /// r429 gapless window `decoded[481 + silence .. 481 +
+    /// sample_count]` (`sample_count − silence` samples per channel —
+    /// see the module docs).
     pub pcm: Vec<f64>,
 }
 
@@ -114,8 +127,14 @@ pub fn decode_sv8_stream(input: &[u8]) -> Result<Sv8DecodedStream> {
                 let fields = sh.fields()?;
                 decoder = Some(Sv8StreamDecoder::from_header(&fields)?);
                 frames_per_packet = fields.frames_per_audio_packet();
-                let total_samples = fields.sample_count + fields.beginning_silence;
-                frames_remaining = total_samples.div_ceil(SAMPLES_PER_FRAME_PER_CHANNEL as u64);
+                // The coded frame run covers the nominal `sample_count`
+                // timeline (which includes the leading silence); the
+                // synthesis-priming tail past it comes from the drain
+                // below, matching the reference decoder (whose flush
+                // covers exact-multiple streams).
+                frames_remaining = fields
+                    .sample_count
+                    .div_ceil(SAMPLES_PER_FRAME_PER_CHANNEL as u64);
                 header = Some(fields);
             }
             TypedPacket::Audio(ap) => {
@@ -138,16 +157,25 @@ pub fn decode_sv8_stream(input: &[u8]) -> Result<Sv8DecodedStream> {
     }
 
     let header = header.ok_or(Error::NotImplemented)?;
-    let decoder = decoder.ok_or(Error::NotImplemented)?;
+    let mut decoder = decoder.ok_or(Error::NotImplemented)?;
 
-    // Gapless trim: drop the leading silence, keep sample_count
-    // samples per channel.
+    // Gapless window (mpcdec-pinned — see
+    // [`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]): the output is
+    // `decoded[481 + silence .. 481 + sample_count]` per channel —
+    // the priming skip plus the encoder silence dropped, and
+    // `sample_count − silence` real samples kept. When the coded run
+    // ends before the window does (exact-multiple streams), drain the
+    // filterbank overlap with zero-fed synthesis frames — the
+    // reference tools' flush behaviour.
     let nch = u64::from(header.channels);
-    let skip = (header.beginning_silence * nch) as usize;
-    let keep = (header.sample_count * nch) as usize;
-    if skip > 0 {
-        pcm.drain(..skip.min(pcm.len()));
+    let prime = SYNTHESIS_PRIME_SAMPLES as u64;
+    let end = ((prime + header.sample_count) * nch) as usize;
+    while pcm.len() < end {
+        pcm.extend_from_slice(&decoder.drain_frame()?);
     }
+    let skip = ((prime + header.beginning_silence) * nch) as usize;
+    let keep = (header.sample_count.saturating_sub(header.beginning_silence) * nch) as usize;
+    pcm.drain(..skip.min(pcm.len()));
     pcm.truncate(keep);
 
     Ok(Sv8DecodedStream {

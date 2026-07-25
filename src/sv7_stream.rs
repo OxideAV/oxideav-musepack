@@ -46,6 +46,7 @@
 //! ([`crate::sv7_stereo_frame`]).
 
 use crate::cns::CnsPrng;
+use crate::frame_reconstruct::zero_subband_matrix;
 use crate::huffman::Sv7BitReader;
 use crate::ms_stereo::undo_ms_stereo_pinned;
 use crate::sv7_stereo_frame::{decode_sv7_stereo_frame, Sv7ScfMemory};
@@ -207,6 +208,26 @@ impl Sv7StreamDecoder {
             }
         }
         Ok(pcm)
+    }
+
+    /// Synthesize one **drain frame**: run the persistent filterbank
+    /// over an all-zero subband frame, emitting the 2 × 1152
+    /// interleaved samples still held in the filters' overlap (the
+    /// windowed decay of the last coded frames).
+    ///
+    /// The whole-file layer uses this to cover the decoder-side
+    /// synthesis-priming skip
+    /// ([`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]) when the coded
+    /// frame run ends before `481 + total` samples — the reference
+    /// tools' "flush frame" behaviour on exact-multiple streams.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::ChannelCountInvalid`] is structurally
+    /// unreachable (the decoder always holds two filters).
+    pub fn drain_frame(&mut self) -> Result<Vec<f64>> {
+        let zero = zero_subband_matrix();
+        synthesize_stereo_frame_interleaved(&mut self.synthesis, &zero, &zero)
     }
 }
 

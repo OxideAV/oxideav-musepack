@@ -71,7 +71,10 @@ const CORPUS: [Expect; 7] = [
         block_power: 3,
         sample_count: 18432,
         audio_packets: 1,
-        frames: 16,
+        // 16 totals-declared frames plus the reference producer's
+        // undeclared flush frame (r429: decoded like a real frame —
+        // it carries the tail the 481-sample gapless window needs).
+        frames: 17,
         sv7_sibling: Some("exact-multiple-16-frames"),
         oracle_per_sample: true,
     },
@@ -185,15 +188,20 @@ fn non_cns_streams_match_the_oracle_within_one_lsb() {
     for e in CORPUS.iter().filter(|e| e.oracle_per_sample) {
         let ours = decode(e.name).pcm_s16();
         let oracle = oracle_s16("sv8", e.name);
-        // The oracle emits untrimmed full frames (and possibly a flush
-        // frame); our gapless-trimmed output is a prefix of it.
+        // The oracle emits the untrimmed decoded run (plus a flush
+        // frame where the coded run ends inside the gapless window);
+        // our r429 window starts 481 samples per channel into it.
+        // Where the oracle carries a flush frame (exact-multiple),
+        // this comparison also validates our zero-fed drain against
+        // the oracle's flush.
+        let offset = 481 * e.channels as usize;
         assert!(
-            oracle.len() >= ours.len(),
-            "{}: oracle shorter than decode",
+            oracle.len() >= offset + ours.len(),
+            "{}: oracle shorter than the shifted window",
             e.name
         );
         let mut exact = 0usize;
-        for (i, (&a, &b)) in ours.iter().zip(oracle.iter()).enumerate() {
+        for (i, (&a, &b)) in ours.iter().zip(oracle[offset..].iter()).enumerate() {
             let d = (i32::from(a) - i32::from(b)).abs();
             assert!(d <= 1, "{}: sample {i}: {a} vs oracle {b}", e.name);
             if d == 0 {
@@ -246,19 +254,24 @@ fn cns_stream_matches_oracle_on_the_noise_free_frame_and_statistically() {
     // gap; see tests/sv7_cns_corpus.rs for the SV7-side analysis).
     let ours = decode("cns-pns").pcm_s16();
     let oracle = oracle_s16("sv8", "cns-pns");
-    let frame0 = 2 * 1152;
+    // Our r429 window starts 481 samples per channel into the
+    // untrimmed oracle run, so the CNS-free coded frame 0 covers only
+    // the first `2 × (1152 − 481)` output values.
+    let offset = 2 * 481;
+    let frame0 = 2 * 1152 - offset;
     for i in 0..frame0 {
-        let d = (i32::from(ours[i]) - i32::from(oracle[i])).abs();
-        assert!(d <= 1, "frame-0 sample {i}: {} vs {}", ours[i], oracle[i]);
+        let (a, b) = (ours[i], oracle[offset + i]);
+        let d = (i32::from(a) - i32::from(b)).abs();
+        assert!(d <= 1, "frame-0 sample {i}: {a} vs {b}");
     }
     // Global correlation over the whole trimmed run: the decoded noise
     // has the right per-band per-granule energy (SCF layer) even though
     // the waveform differs, so correlation stays high.
-    let n = ours.len().min(oracle.len());
+    let n = ours.len().min(oracle.len() - offset);
     let (mut sxy, mut sxx, mut syy) = (0f64, 0f64, 0f64);
     for i in 0..n {
         let a = f64::from(ours[i]);
-        let b = f64::from(oracle[i]);
+        let b = f64::from(oracle[offset + i]);
         sxy += a * b;
         sxx += a * a;
         syy += b * b;

@@ -23,9 +23,15 @@
 //!    case).
 //! 5. **Ignored tail** — anything after the trailer (mppenc appends an
 //!    undeclared flush frame on some streams) is skipped.
-//! 6. **Gapless trim** — when the §1 true-gapless flag (field 13) is
-//!    set and the last-frame valid-sample count (field 14) is non-zero,
-//!    the final frame contributes only that many samples per channel.
+//! 6. **Gapless window (r429, reference-decoder-pinned)** — the output
+//!    is `decoded[481 .. 481 + effective_total]` per channel: the
+//!    synthesis-priming skip
+//!    ([`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]) is discarded,
+//!    then the §1 fields-13/14 gapless total kept (when true-gapless is
+//!    set the final frame contributes only `last_frame_samples`). A
+//!    coded run ending inside the window is completed with zero-fed
+//!    drain frames (the reference tools' flush on exact-multiple
+//!    streams).
 //!
 //! Output PCM is in the **signed-16-bit domain** (the corpus-pinned
 //! absolute reconstruction — see
@@ -40,6 +46,7 @@ use crate::sv7_file_encode::{SV7_FRAME_LENGTH_PREFIX_BITS, SV7_LAST_FRAME_TRAILE
 use crate::sv7_header::{Sv7HeaderFields, SV7_SAMPLES_PER_FRAME};
 use crate::sv7_header_encode::SV7_HEADER_BITS;
 use crate::sv7_stream::Sv7StreamDecoder;
+use crate::synthesis::SYNTHESIS_PRIME_SAMPLES;
 use crate::{Error, Result};
 
 /// A fully decoded SV7 stream: the parsed §1 header and the interleaved
@@ -108,6 +115,10 @@ pub fn decode_sv7_file(bytes: &[u8]) -> Result<Sv7DecodedFile> {
     // the pad bits are never decoded as data).
     let mut swapped = crate::sv7_word_swap::word_swap_sv7_body(bytes);
     swapped.extend_from_slice(&[0u8; 4]);
+    // Real stream bits, excluding the 4 slack bytes just appended
+    // (the word swap zero-extends to a word boundary; those pad bits
+    // count as stream space a flush frame may legitimately occupy).
+    let real_bits = ((swapped.len() - 4) as u64) * 8;
     let mut reader = Sv7BitReader::new(&swapped);
     let total_bits = reader.bits_remaining();
 
@@ -149,10 +160,58 @@ pub fn decode_sv7_file(bytes: &[u8]) -> Result<Sv7DecodedFile> {
     } else {
         None
     };
-    // 5. Anything after the trailer (flush frame, padding) is ignored.
-
-    // 6. §1 fields 13/14: gapless trim of the final frame.
-    pcm.truncate((2 * header.effective_total_samples()) as usize);
+    // 5-6. Gapless window (r429, reference-decoder-pinned): the
+    // output is `decoded[481 .. 481 + effective_total]` per channel —
+    // the synthesis-priming skip
+    // ([`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]) precedes the §1
+    // fields-13/14 total. When the declared frames end inside that
+    // window (exact-multiple streams), the tail comes first from the
+    // **undeclared flush frame** mppenc appends after the trailer
+    // (decoded like a regular prefixed frame, budget-verified;
+    // transcoding it is what makes the SV8 sibling's tail decode —
+    // spec §3.6 payload identity), and only then from zero-fed drain
+    // frames. Black-box pinned: the reference console decoder emits
+    // exactly this window for the staged SV7 corpus, bit-identical to
+    // its SV8-transcode decode.
+    let effective = header.effective_total_samples();
+    let end = (2 * (SYNTHESIS_PRIME_SAMPLES as u64 + effective)) as usize;
+    while pcm.len() < end {
+        // A plausible flush frame needs its 20-bit prefix plus a
+        // minimal body inside the real stream bits; anything shorter
+        // is padding.
+        let consumed = total_bits - reader.bits_remaining();
+        if real_bits.saturating_sub(consumed) < u64::from(SV7_FRAME_LENGTH_PREFIX_BITS) + 8 {
+            break;
+        }
+        let attempt = (|| -> Result<Vec<f64>> {
+            let hi = u32::from(reader.read_bits(16)?);
+            let lo = u32::from(reader.read_bits(SV7_FRAME_LENGTH_PREFIX_BITS - 16)?);
+            let declared = (hi << (SV7_FRAME_LENGTH_PREFIX_BITS - 16)) | lo;
+            let start = total_bits - reader.bits_remaining();
+            let frame_pcm = decoder.decode_frame(&mut reader)?;
+            let consumed = (total_bits - reader.bits_remaining() - start) as u32;
+            if consumed != declared {
+                return Err(Error::FrameBitLengthMismatch {
+                    frame: u32::MAX,
+                    declared,
+                    consumed,
+                });
+            }
+            Ok(frame_pcm)
+        })();
+        match attempt {
+            Ok(frame_pcm) => pcm.extend_from_slice(&frame_pcm),
+            // Not a decodable flush frame — trailing padding. The
+            // remainder of the window comes from the drain below.
+            Err(_) => break,
+        }
+    }
+    while pcm.len() < end {
+        let drained = decoder.drain_frame()?;
+        pcm.extend_from_slice(&drained);
+    }
+    pcm.drain(..(2 * SYNTHESIS_PRIME_SAMPLES).min(pcm.len()));
+    pcm.truncate((2 * effective) as usize);
 
     Ok(Sv7DecodedFile {
         header,

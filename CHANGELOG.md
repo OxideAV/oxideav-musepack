@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Round 429** — **Gapless window semantics corrected against the
+  reference console decoder (black-box).** The r419 trim (drop
+  `beginning_silence`, keep `sample_count` from decoded sample 0) was
+  pinned against the FFmpeg oracle — which performs **no** skip at
+  all. The reference console decoder pins the real law: output =
+  `decoded[481 + silence .. 481 + sample_count]` — a 481-sample
+  **synthesis-priming skip** (`SYNTHESIS_PRIME_SAMPLES`, the
+  filterbank pair's warm-up; the §1 "adjusted for gapless /
+  synth-delay" note) on top of the silence, with `sample_count`
+  counting the nominal timeline *including* the silence. Both
+  generations now decode that window (SV7: `decoded[481 .. 481 +
+  effective_total]`, bit-identical to the SV8 transcode as before);
+  where the coded frames end inside it, the tail comes from the
+  reference producers' **undeclared flush frame** (SV7: a normal
+  prefixed frame after the 11-bit trailer; SV8: extra coded frames
+  while ≥ 8 real payload bits remain — the bound the byte-exact
+  re-encode gates already proved) and only then from zero-fed
+  synthesis **drain** frames (`drain_frame` on both stream decoders).
+  Corpus gates re-pinned on the shifted window (oracle offset
+  `481 × channels`; the exact-multiple fixture's oracle flush frame
+  now validates our tail per-sample). The encoder picks the smallest
+  `beginning_silence` (`0..=481`) that keeps its real tail inside the
+  coded frames, so its streams never rely on drain approximation:
+  the reference decoder returns exactly N input-aligned samples.
+
 - **Round 429** — **§6.5 enumerative decode broke on wide M/S scopes.**
   `enum_decode_subset` read its phased-binary index with a single
   `read_bits(bitlen − 1)`, but the bit reader caps one fixed read at
