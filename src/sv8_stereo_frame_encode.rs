@@ -287,8 +287,11 @@ pub fn encode_sv8_stereo_frame(
         let cnt = mask.count_ones();
         write_log_code(writer, cnt, n + 1)?;
         if cnt > 0 && cnt < n {
+            // A full 32-band scope fills the u32: guard the field
+            // mask like the §6.5 subset coder itself does.
+            let field = if n >= 32 { u32::MAX } else { (1u32 << n) - 1 };
             let (coded, k) = if cnt > n / 2 {
-                ((!mask) & ((1 << n) - 1), n - cnt)
+                ((!mask) & field, n - cnt)
             } else {
                 (mask, cnt)
             };

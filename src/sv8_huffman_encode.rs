@@ -389,6 +389,43 @@ mod tests {
         }
     }
 
+    /// Regression (r429): wide subset spaces. `C(n, ⌊n/2⌋)` exceeds
+    /// 2^17 from `n = 20` upward, so the decoder's phased-binary index
+    /// read spans more than the bit reader's 16-bit single-read cap —
+    /// the M/S-bitmap path over many coded bands. Random masks across
+    /// every `n` up to the full 32-band scope must round-trip
+    /// (previously `HuffmanNoMatch` for `n ≥ 20` at mid-range `k`).
+    #[test]
+    fn enum_subset_round_trips_wide_scopes() {
+        let mut state = 0x0A11_C0DE_5EED_2026_u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        for n in 13..=32u32 {
+            // Deterministic random masks plus the worst-case k = n/2
+            // shapes (alternating and block masks).
+            let field = if n == 32 { u32::MAX } else { (1u32 << n) - 1 };
+            let mut masks: Vec<u32> = (0..64).map(|_| (next() as u32) & field).collect();
+            masks.push(0x5555_5555 & field);
+            masks.push(0xAAAA_AAAA & field);
+            masks.push(field >> (n / 2));
+            for mask in masks {
+                let k = mask.count_ones();
+                let mut w = Sv7BitWriter::new();
+                write_enum_subset(&mut w, mask, k, n).unwrap();
+                w.write_bits(0, 16);
+                w.write_bits(0, 16);
+                let bytes = w.finish();
+                let mut r = Sv7BitReader::new(&bytes);
+                let got = enum_decode_subset(&mut r, k, n).unwrap();
+                assert_eq!(got, mask, "n {n} k {k} mask {mask:#034b}");
+            }
+        }
+    }
+
     #[test]
     fn enum_subset_rejects_wrong_popcount_or_stray_bits() {
         let mut w = Sv7BitWriter::new();

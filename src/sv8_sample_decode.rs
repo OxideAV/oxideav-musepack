@@ -197,12 +197,14 @@ const fn sign_extend_nibble(n: u8) -> i8 {
 /// (§6.4.1: "the 36 samples are decoded in two halves of 18").
 pub const SPARSE_GROUP_SIZE: usize = 18;
 
-/// Binomial coefficient `C(n, k)` for the small `n ≤ 18` the §6.5
-/// enumerative coder operates over.
+/// Binomial coefficient `C(n, k)` for the `n ≤ 32` the §6.5
+/// enumerative coder operates over (18 positions in the sparse-band
+/// path, up to 32 bands in the §6.2 M/S selection).
 ///
 /// Computed with the multiplicative recurrence so no precomputed
-/// table is needed; `C(18, 9) = 48620` is the largest value reached
-/// in the sparse-band path and fits comfortably in `u32`.
+/// table is needed; `C(32, 16) = 601 080 390` is the largest value
+/// reachable and fits `u32` (the u64 intermediate keeps the
+/// recurrence exact).
 pub(crate) const fn binomial(n: u32, k: u32) -> u32 {
     if k > n {
         return 0;
@@ -240,6 +242,26 @@ pub(crate) const fn enum_bitlen_lost(total: u32) -> (u8, u32) {
     (bitlen, lost)
 }
 
+/// Fixed-width read wider than the bit reader's 16-bit single-read
+/// cap: assemble up to 31 bits from two [`Sv7BitReader::read_bits`]
+/// calls, high half first (the same §4 convention the 32-bit header
+/// quantities use).
+///
+/// Needed by the §6.5 enumerative index read: a §6.2 M/S bitmap over
+/// `n` bands has `C(n, ⌊n/2⌋)` codewords — up to `C(32, 16) ≈ 6·10⁸`,
+/// a 30-bit code space — so the phased-binary index read can span up
+/// to 29 bits (the sparse-band path's `C(18, 9)` fits 16 bits, which
+/// is why the cap was never hit before wide M/S scopes).
+fn read_bits_wide(reader: &mut Sv7BitReader<'_>, n: u8) -> Result<u32> {
+    debug_assert!(n < 32);
+    if n <= 16 {
+        return Ok(u32::from(reader.read_bits(n)?));
+    }
+    let hi = u32::from(reader.read_bits(n - 16)?);
+    let lo = u32::from(reader.read_bits(16)?);
+    Ok((hi << 16) | lo)
+}
+
 /// Decode one §6.5 enumerative (combinatorial) codeword naming a
 /// specific `k`-subset of `n` positions, returning the selected
 /// positions as a low-`n`-bit mask (bit `p` set ⇒ position `p`
@@ -271,7 +293,7 @@ pub(crate) fn enum_decode_subset(reader: &mut Sv7BitReader<'_>, k: u32, n: u32) 
     let mut code: u32 = if bitlen == 0 {
         0
     } else {
-        let mut c = reader.read_bits(bitlen - 1)? as u32;
+        let mut c = read_bits_wide(reader, bitlen - 1)?;
         if c >= lost {
             c = (c << 1) - lost + reader.read_bits(1)? as u32;
         }
