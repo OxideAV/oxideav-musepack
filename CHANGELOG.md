@@ -8,6 +8,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 429** — **SV8 forward quantisation** (`sv8_quantize`): the
+  algebraic inverse of the corpus-pinned absolute reconstruction law
+  (`level × C[Res+1] × SCF_STEP_RATIO^(scf−1)`, s16 domain).
+  `choose_granule_scf` (largest SCF index whose gain spans the granule
+  peak — the finest step that keeps levels in `±D[Res]`),
+  `quantize_granule`/`quantize_band` (nearest-level rounding, clamped
+  alphabet, zero-granule neighbour SCF reuse for SCFI sharing), and
+  the `band_type_for_peak` bit-allocation policy (smallest `Res`
+  meeting a flat s16-domain noise-step target; policy only — every
+  choice yields a valid stream). Gated: SCF maximality, half-step
+  round-trip error bound over all 17 sample-bearing band types,
+  alphabet confinement past headroom, policy monotonicity.
 - **Round 429** — **32-band polyphase analysis filterbank** (`analysis`):
   the forward counterpart of `synthesis` and the encoder's front end.
   `AnalysisFilter` (512-sample FIFO; window = the in-crate ISO Table

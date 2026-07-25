@@ -296,6 +296,7 @@ pub mod sv8_dscf_loop;
 pub mod sv8_frame_decode;
 pub mod sv8_huffman;
 pub mod sv8_huffman_encode;
+pub mod sv8_quantize;
 pub mod sv8_reconstruct;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;
