@@ -3,9 +3,11 @@
 //! Wraps a [`crate::packet_stream::PacketRef`] in a typed sum that
 //! discriminates the spec §3.2 packet vocabulary at the API surface,
 //! routing each known 2-byte key to a per-kind borrowed newtype that
-//! carries the opaque payload slice. The payload **bytes** are still
-//! not interpreted — field maps for `SH` / `RG` / `EI` / `SO` / `ST`
-//! remain GAP per spec §3.2 and live downstream of this module — but
+//! carries the opaque payload slice. The payload **bytes** are not
+//! interpreted here — the `SH` / `RG` / `EI` field maps
+//! (headers-and-coding §2) and the `SO` / `ST` seek maps
+//! (headers-and-coding §9) are decoded by the per-kind `fields()`
+//! hooks downstream of this module — but
 //! a caller that wants to write `if let TypedPacket::StreamHeader(sh)
 //! = ...` instead of matching on a `PacketKey` enum + re-validating
 //! the raw byte slice gets one.
@@ -113,7 +115,10 @@ impl<'a> EncoderInfoPacket<'a> {
 }
 
 /// Seek-table-offset (`SO`) packet — a single offset pointing at the
-/// `ST` seek table per spec §3.2. Field map is GAP.
+/// `ST` seek table per spec §3.2. The field map (a §3 varint byte
+/// distance to the `ST` packet, zero-padded to 5 payload bytes) is
+/// decoded by [`SeekTableOffsetPacket::fields`] per
+/// `docs/audio/musepack/spec/musepack-headers-and-coding.md` §9.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeekTableOffsetPacket<'a> {
     payload: &'a [u8],
@@ -124,10 +129,21 @@ impl<'a> SeekTableOffsetPacket<'a> {
     pub fn payload_bytes(&self) -> &'a [u8] {
         self.payload
     }
+
+    /// Decode the `SO` payload field-map (headers-and-coding §9.1)
+    /// into [`crate::sv8_seek::SeekOffsetFields`]. See that type for
+    /// the per-field errors.
+    pub fn fields(&self) -> crate::Result<crate::sv8_seek::SeekOffsetFields> {
+        crate::sv8_seek::SeekOffsetFields::parse(self.payload)
+    }
 }
 
 /// Seek-table (`ST`) packet — entry count + delta-coded offsets per
-/// spec §3.2. Field map is GAP.
+/// spec §3.2. The field map (entry-count varint, 4-bit
+/// `seek_pwr_delta`, two absolute varint entries, Golomb `k = 12`
+/// second-difference residuals) is decoded by
+/// [`SeekTablePacket::fields`] per
+/// `docs/audio/musepack/spec/musepack-headers-and-coding.md` §9.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeekTablePacket<'a> {
     payload: &'a [u8],
@@ -137,6 +153,15 @@ impl<'a> SeekTablePacket<'a> {
     /// Opaque payload bytes.
     pub fn payload_bytes(&self) -> &'a [u8] {
         self.payload
+    }
+
+    /// Decode the `ST` payload field-map (headers-and-coding §9.2)
+    /// into [`crate::sv8_seek::SeekTableFields`]: the entry-count
+    /// varint, the 4-bit `seek_pwr_delta`, and the entry stream
+    /// (two absolute varints + Golomb `k = 12` second-difference
+    /// residuals). See that type for the per-field errors.
+    pub fn fields(&self) -> crate::Result<crate::sv8_seek::SeekTableFields> {
+        crate::sv8_seek::SeekTableFields::parse(self.payload)
     }
 }
 

@@ -303,6 +303,7 @@ pub mod sv8_quantize;
 pub mod sv8_reconstruct;
 pub mod sv8_sample_decode;
 pub mod sv8_scf_header;
+pub mod sv8_seek;
 pub mod sv8_stereo_frame;
 pub mod sv8_stereo_frame_encode;
 pub mod sv8_stream;
@@ -423,6 +424,14 @@ pub enum Error {
         /// Bits the decoder actually consumed.
         consumed: u32,
     },
+    /// An SV8 seek-layer structure (`SO` / `ST`,
+    /// headers-and-coding §9) failed validation: the `SO` offset does
+    /// not land on an `ST` packet inside the buffer, an `ST` entry
+    /// count exceeds what its payload's bits can carry, a Golomb
+    /// residual run overflows the offset bound, or a reconstructed
+    /// entry position goes negative. The static message names the
+    /// specific violation for diagnostics.
+    SeekTableCorrupt(&'static str),
     /// The 11-bit last-frame-samples trailer after the final frame body
     /// disagrees with §1 header field 14 on a true-gapless stream. Both
     /// values are surfaced for diagnostics.
@@ -511,6 +520,10 @@ impl core::fmt::Display for Error {
             Error::LastFrameTrailerMismatch { header, stream } => write!(
                 f,
                 "oxideav-musepack: SV7 11-bit last-frame trailer {stream} disagrees with header field 14 ({header})",
+            ),
+            Error::SeekTableCorrupt(what) => write!(
+                f,
+                "oxideav-musepack: SV8 seek layer (headers-and-coding \u{a7}9) rejected: {what}",
             ),
         }
     }

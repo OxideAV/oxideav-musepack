@@ -6,6 +6,46 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 450** — **SV8 seek layer complete (headers-and-coding §9;
+  docs `af8e75c` + `dd39285`) — the `SO` / `ST` payload gap is
+  closed.** New [`sv8_seek`] module:
+  - `SeekOffsetFields` — the §9.1 `SO` field map (varint byte
+    distance to the `ST` packet, zero-padded to the fixed 5-byte
+    back-patchable payload) with a bidirectional parse/compose and
+    the 35-bit reach bound.
+  - `SeekTableFields` — the §9.2 `ST` field map: entry-count
+    varint, 4-bit `seek_pwr_delta`, two absolute varint entries,
+    then **second-difference residuals under the `k = 12` Golomb
+    code** (sign in the code word's LSB; `code 0`/`1` both a zero
+    residual), all read MSB-first through the bit reader without
+    byte alignment. Parse and compose are exact inverses;
+    re-composing the parsed table reproduces the reference
+    encoder's `ST` payload **byte-for-byte on all 7 corpus
+    streams** (`tests/sv8_seek_corpus.rs`). Hostile inputs
+    (overpromising `n_entries`, truncations, negative-position
+    residual chains, Golomb-run overflow) fail loud via the new
+    `Error::SeekTableCorrupt` without allocation.
+  - `Sv8SeekIndex` — the resolved index: `from_seek_packets` walks
+    the prefix to `SO`, jumps `SO_position + st_offset` to the
+    table (§9.1) and resolves entries against `header_position`
+    (§9.2 reference point); `from_packet_walk` is the scan
+    fallback / ground truth. Corpus gates pin the §9.0 skeleton
+    (`MPCK SH RG EI SO AP… ST SE`), the §9.1 measured distance +
+    zero padding, the `seek_pwr_delta == 1` / `n_entries ==
+    ceil(n_AP / 2)` posture, and entry-position equality with the
+    measured `AP` offsets on all 7 fixtures.
+  - `decode_sv8_from_entry` — random access: enter the packet
+    stream at any index entry (every `AP` opens a key frame and
+    entropy state resets per packet, so entropy decode is exact
+    from any entry; the synthesis filterbank enters cold). The
+    corpus gate proves entry decodes rejoin the linear decode
+    within ±1 LSB past the 481-sample priming transient.
+  - `SO` / `ST` `TypedPacket` wrappers gain `fields()` hooks like
+    their `SH` / `RG` / `EI` siblings; their "field map is GAP"
+    notes are retired.
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the
