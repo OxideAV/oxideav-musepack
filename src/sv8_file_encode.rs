@@ -92,6 +92,11 @@ pub struct Sv8EncoderSettings {
     /// The `EI` profile byte's 7-bit profile field (the quality
     /// preset × 8; informational).
     pub profile: u8,
+    /// Noise-substitution threshold in s16-domain subband peak units
+    /// (`0.0` = CNS emission off, the default) — see
+    /// [`Sv8FrameBuildSettings::pns_threshold`]. When enabled the
+    /// `EI` packet's PNS flag is set.
+    pub pns_threshold: f64,
 }
 
 impl Default for Sv8EncoderSettings {
@@ -105,6 +110,7 @@ impl Default for Sv8EncoderSettings {
             max_band: 31,
             block_power: 3,
             profile: 80,
+            pns_threshold: 0.0,
         }
     }
 }
@@ -237,11 +243,11 @@ pub fn rg_payload(title_gain: u16, title_peak: u16, album_gain: u16, album_peak:
 ///
 /// [`Error::HeaderFieldOutOfRange`] if `profile` exceeds its 7-bit
 /// field.
-pub fn ei_payload(profile: u8, major: u8, minor: u8, build: u8) -> Result<Vec<u8>> {
+pub fn ei_payload(profile: u8, pns: bool, major: u8, minor: u8, build: u8) -> Result<Vec<u8>> {
     if profile > 0x7F {
         return Err(Error::HeaderFieldOutOfRange("profile"));
     }
-    Ok(vec![profile << 1, major, minor, build])
+    Ok(vec![(profile << 1) | u8::from(pns), major, minor, build])
 }
 
 /// The result of a whole-stream encode: the `MPCK` bytes plus the
@@ -308,6 +314,7 @@ pub fn encode_sv8_from_pcm_f64(
     let build = Sv8FrameBuildSettings {
         step_target: settings.step_target,
         stream_ms: settings.stream_ms,
+        pns_threshold: settings.pns_threshold,
     };
 
     // Stream prefix: magic + SH + RG + EI.
@@ -324,7 +331,11 @@ pub fn encode_sv8_from_pcm_f64(
     )?;
     write_packet(&mut out, *b"SH", &sh);
     write_packet(&mut out, *b"RG", &rg_payload(0, 0, 0, 0));
-    write_packet(&mut out, *b"EI", &ei_payload(settings.profile, 0, 1, 0)?);
+    write_packet(
+        &mut out,
+        *b"EI",
+        &ei_payload(settings.profile, settings.pns_threshold > 0.0, 0, 1, 0)?,
+    );
 
     // §9.0/§9.1: the SO packet precedes the audio; its payload is a
     // fixed 5-byte slot back-patched with the ST distance below.
@@ -525,11 +536,11 @@ mod tests {
             (1, 2, 3, 4)
         );
 
-        let ei = EncoderInfoFields::parse(&ei_payload(80, 0, 1, 0).unwrap()).unwrap();
+        let ei = EncoderInfoFields::parse(&ei_payload(80, false, 0, 1, 0).unwrap()).unwrap();
         assert_eq!(ei.profile_int(), 10);
         assert!(!ei.pns);
         assert!(matches!(
-            ei_payload(0x80, 0, 0, 0),
+            ei_payload(0x80, false, 0, 0, 0),
             Err(Error::HeaderFieldOutOfRange("profile"))
         ));
     }

@@ -193,6 +193,26 @@ fn write_band_samples(
     }
 }
 
+/// Exact wire cost, in bits, of one band's §6.4 sample pass at
+/// `band_type` for the given quantised levels — the bits
+/// [`encode_sv8_stereo_frame`]'s sample pass would emit for this
+/// band/channel, measured by running the real per-case encoder into a
+/// scratch writer. Encoder policy helper (rate-distortion election in
+/// [`crate::sv8_frame_build`]); the cases with running context start
+/// from the §6.4.2 reset state, exactly as the per-band sample pass
+/// does.
+///
+/// # Errors
+///
+/// As the sample pass: [`Error::SampleOutOfRange`] /
+/// [`Error::SymbolNotEncodable`] for levels outside the `band_type`
+/// alphabet.
+pub fn band_sample_bits(band_type: i8, levels: &[i32; SAMPLES_PER_BAND]) -> Result<u64> {
+    let mut scratch = Sv7BitWriter::new();
+    write_band_samples(&mut scratch, band_type, levels)?;
+    Ok(scratch.bit_len())
+}
+
 /// Encode one SV8 two-channel frame body: the exact inverse of
 /// [`crate::sv8_stereo_frame::decode_sv8_stereo_frame`].
 ///

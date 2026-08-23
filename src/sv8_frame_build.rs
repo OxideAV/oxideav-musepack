@@ -46,12 +46,16 @@
 //! format facts.
 
 use crate::frame_reconstruct::SubbandMatrix;
-use crate::requant::{band_type_index, QUANTIZER_OFFSET_D};
+use crate::requant::{DEQUANT_COEFFICIENT_C, SCF_STEP_RATIO};
 use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
-use crate::sv8_quantize::{band_type_for_peak, quantize_band};
+use crate::sv8_quantize::{
+    band_type_for_peak, quant_step, quantize_band, QuantizedBand, SAMPLES_PER_GRANULE, SV8_SCF_MAX,
+    SV8_SCF_MIN,
+};
 use crate::sv8_stereo_frame::Sv8StereoFrameDecode;
+use crate::sv8_stereo_frame_encode::band_sample_bits;
 use crate::{Error, Result};
 
 /// Highest band type reachable on the SV8 wire: the §6.2 fold confines
@@ -70,32 +74,102 @@ pub struct Sv8FrameBuildSettings {
     /// set. When `false` no band elects M/S (and the frame encoder
     /// writes no bitmap).
     pub stream_ms: bool,
+    /// Noise-substitution threshold, in s16-domain subband peak
+    /// units; `0.0` disables CNS emission (the default). When
+    /// positive, a coded channel whose band peak sits below the
+    /// threshold is emitted as a `Res == −1` noise band: **zero**
+    /// sample-pass bits, with the scalefactor chosen so the decoder's
+    /// PRNG noise ([`crate::cns`]) reproduces the band's power. The
+    /// substituted waveform is noise, not the original — a loudness-
+    /// preserving trade of waveform fidelity for rate on hiss-like
+    /// bands (the spec §5.4/§6.4 `Res = −1` path; wire-compatible
+    /// with the corpus `cns-pns` fixtures).
+    pub pns_threshold: f64,
 }
 
 impl Default for Sv8FrameBuildSettings {
     /// Default: `step_target = 2.0` s16 LSBs (a noise floor roughly
     /// 84 dB below full scale per band before SCF granularity),
-    /// stream M/S on.
+    /// stream M/S on, CNS emission off.
     fn default() -> Self {
         Self {
             step_target: 2.0,
             stream_ms: true,
+            pns_threshold: 0.0,
         }
     }
 }
 
-/// Rough per-band bit-cost estimate for electing L/R vs M/S coding:
-/// `36 × log2(2·D[bt] + 1)` sample bits plus a flat per-coded-channel
-/// SCF/SCFI overhead. Policy only — used for a comparison, never for
-/// budgets.
-fn band_cost_estimate(band_type: i8) -> f64 {
-    if band_type == 0 {
-        return 0.0;
+/// RMS of one decoder CNS noise level: the PRNG sample is the sum of
+/// the four bytes of a 32-bit word minus 510 (staged
+/// `cns-prng-params` facts), i.e. a sum of four uniform 0..=255
+/// byte values recentred — variance `4 × (256² − 1) / 12`, rms
+/// ≈ 147.8. Derived from the staged generator facts alone.
+const CNS_LEVEL_RMS: f64 = 147.791_573_839_773;
+
+/// Pick the SCF index whose gain makes the decoder's CNS noise rms
+/// (`CNS_LEVEL_RMS × C[0] × gain(scf)`) match `target_rms` most
+/// closely (nearest in log domain), clamped to the SV8 SCF ring.
+fn cns_scf_for_rms(target_rms: f64) -> i32 {
+    let base = CNS_LEVEL_RMS * DEQUANT_COEFFICIENT_C[0];
+    if target_rms <= 0.0 {
+        return SV8_SCF_MAX;
     }
-    let idx = band_type_index(band_type).expect("builder band types are 0..=15");
-    let d = f64::from(QUANTIZER_OFFSET_D[idx]);
-    let bits_per_sample = (2.0 * d + 1.0).log2();
-    36.0 * bits_per_sample + 24.0
+    let scf = 1 + ((target_rms / base).ln() / SCF_STEP_RATIO.ln()).round() as i32;
+    scf.clamp(SV8_SCF_MIN, SV8_SCF_MAX)
+}
+
+/// Flat per-coded-channel SCFI + DSCF overhead estimate, in bits,
+/// for the posture election (the exact DSCF spend depends on the
+/// temporal prediction state, which is not known band-locally; a
+/// flat mean keeps the comparison honest between one- and
+/// two-coded-channel postures). Policy only.
+const CODED_CHANNEL_OVERHEAD_BITS: f64 = 22.0;
+
+/// One quantised channel candidate for the posture election.
+struct ChannelCandidate {
+    bt: i8,
+    q: QuantizedBand,
+}
+
+impl ChannelCandidate {
+    fn build(data: &[f64; SAMPLES_PER_BAND], step_target: f64) -> Result<Self> {
+        let bt = band_type_for_peak(band_peak(data), step_target).min(SV8_MAX_RES);
+        let q = if bt == 0 {
+            QuantizedBand {
+                scf: [0; SCF_GRANULES_PER_BAND],
+                levels: [0; SAMPLES_PER_BAND],
+            }
+        } else {
+            quantize_band(bt, data)?
+        };
+        Ok(Self { bt, q })
+    }
+
+    /// Exact §6.4 sample-pass wire bits plus the flat SCF overhead.
+    fn bits(&self) -> Result<f64> {
+        if self.bt == 0 {
+            return Ok(0.0);
+        }
+        Ok(band_sample_bits(self.bt, &self.q.levels)? as f64 + CODED_CHANNEL_OVERHEAD_BITS)
+    }
+
+    /// Reconstructed samples (`level × step`), zero for an uncoded
+    /// band.
+    fn recon(&self) -> Result<[f64; SAMPLES_PER_BAND]> {
+        let mut out = [0.0_f64; SAMPLES_PER_BAND];
+        if self.bt == 0 {
+            return Ok(out);
+        }
+        for g in 0..SCF_GRANULES_PER_BAND {
+            let step = quant_step(self.bt, self.q.scf[g])?;
+            let range = g * SAMPLES_PER_GRANULE..(g + 1) * SAMPLES_PER_GRANULE;
+            for (o, &lv) in out[range.clone()].iter_mut().zip(&self.q.levels[range]) {
+                *o = f64::from(lv) * step;
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// The per-band peak magnitude.
@@ -149,54 +223,100 @@ pub fn build_sv8_stereo_frame(
     let mut granule_scf: Vec<[[i32; SCF_GRANULES_PER_BAND]; 2]> = Vec::with_capacity(nb_considered);
     let mut levels: Vec<[[i32; SAMPLES_PER_BAND]; 2]> = Vec::with_capacity(nb_considered);
 
+    // Rate-distortion weight for the posture election: at a uniform
+    // quantiser near the step target, one extra bit of rate buys
+    // roughly a 4x noise-power reduction, i.e. Δsse per sample per
+    // bit ≈ step²/16 — used as the Lagrangian λ so bit costs and
+    // squared errors are commensurable. Policy only.
+    let lambda = settings.step_target * settings.step_target / 16.0;
+
     for b in 0..nb_considered {
         let l = &left[b];
         let r = &right[b];
 
-        // L/R posture.
-        let bt_l = band_type_for_peak(band_peak(l), settings.step_target).min(SV8_MAX_RES);
-        let bt_r = band_type_for_peak(band_peak(r), settings.step_target).min(SV8_MAX_RES);
+        // L/R posture candidate.
+        let cand_l = ChannelCandidate::build(l, settings.step_target)?;
+        let cand_r = ChannelCandidate::build(r, settings.step_target)?;
 
-        // M/S posture (only when the stream allows it).
-        let mut use_ms = false;
+        // M/S posture candidate (only when the stream allows it),
+        // elected by measured rate + distortion: the mid/side
+        // transform halves a correlated pair's side energy (cheap)
+        // but sums the two channels' quantisation errors back into
+        // L/R (r390-pinned undo `L = M + S`, `R = M − S`), which the
+        // sse term prices in — unlike a pure alphabet-size estimate.
         let mut mid = [0.0_f64; SAMPLES_PER_BAND];
         let mut side = [0.0_f64; SAMPLES_PER_BAND];
-        let mut bt_m = 0_i8;
-        let mut bt_s = 0_i8;
-        if settings.stream_ms {
-            for k in 0..SAMPLES_PER_BAND {
-                mid[k] = (l[k] + r[k]) / 2.0;
-                side[k] = (l[k] - r[k]) / 2.0;
-            }
-            bt_m = band_type_for_peak(band_peak(&mid), settings.step_target).min(SV8_MAX_RES);
-            bt_s = band_type_for_peak(band_peak(&side), settings.step_target).min(SV8_MAX_RES);
-            let cost_lr = band_cost_estimate(bt_l) + band_cost_estimate(bt_r);
-            let cost_ms = band_cost_estimate(bt_m) + band_cost_estimate(bt_s);
-            use_ms = cost_ms < cost_lr;
+        for k in 0..SAMPLES_PER_BAND {
+            mid[k] = (l[k] + r[k]) / 2.0;
+            side[k] = (l[k] - r[k]) / 2.0;
         }
 
-        let (bt0, bt1, ch0, ch1): (i8, i8, &[f64; SAMPLES_PER_BAND], &[f64; SAMPLES_PER_BAND]) =
-            if use_ms {
-                (bt_m, bt_s, &mid, &side)
-            } else {
-                (bt_l, bt_r, l, r)
-            };
+        let mut use_ms = false;
+        let mut cand_ms: Option<(ChannelCandidate, ChannelCandidate)> = None;
+        if settings.stream_ms {
+            let cand_m = ChannelCandidate::build(&mid, settings.step_target)?;
+            let cand_s = ChannelCandidate::build(&side, settings.step_target)?;
+
+            // Measured L/R-domain squared error of each posture.
+            let (rec_l, rec_r) = (cand_l.recon()?, cand_r.recon()?);
+            let (rec_m, rec_s) = (cand_m.recon()?, cand_s.recon()?);
+            let mut sse_lr = 0.0_f64;
+            let mut sse_ms = 0.0_f64;
+            for k in 0..SAMPLES_PER_BAND {
+                sse_lr += (l[k] - rec_l[k]).powi(2) + (r[k] - rec_r[k]).powi(2);
+                sse_ms +=
+                    (l[k] - (rec_m[k] + rec_s[k])).powi(2) + (r[k] - (rec_m[k] - rec_s[k])).powi(2);
+            }
+            let j_lr = sse_lr + lambda * (cand_l.bits()? + cand_r.bits()?);
+            let j_ms = sse_ms + lambda * (cand_m.bits()? + cand_s.bits()?);
+            if j_ms < j_lr {
+                use_ms = true;
+                cand_ms = Some((cand_m, cand_s));
+            }
+        }
+
+        let (mut c0, mut c1) = if use_ms {
+            let (m, s) = cand_ms.expect("set with use_ms");
+            (m, s)
+        } else {
+            (cand_l, cand_r)
+        };
+
+        // CNS election (opt-in): a coded channel whose peak sits
+        // below the threshold becomes a Res = −1 noise band — zero
+        // sample-pass bits; a single SCF index across the three
+        // granules (so SCFI shares everything) sets the decoder
+        // PRNG's noise power to the channel's measured rms.
+        if settings.pns_threshold > 0.0 {
+            let (d0, d1): (&[f64; SAMPLES_PER_BAND], &[f64; SAMPLES_PER_BAND]) =
+                if use_ms { (&mid, &side) } else { (l, r) };
+            for (c, data) in [(&mut c0, d0), (&mut c1, d1)] {
+                if c.bt > 0 && band_peak(data) < settings.pns_threshold {
+                    let rms =
+                        (data.iter().map(|x| x * x).sum::<f64>() / SAMPLES_PER_BAND as f64).sqrt();
+                    c.bt = -1;
+                    c.q = QuantizedBand {
+                        scf: [cns_scf_for_rms(rms); SCF_GRANULES_PER_BAND],
+                        levels: [0; SAMPLES_PER_BAND],
+                    };
+                }
+            }
+        }
 
         let mut band_scfi = [0_u8; 2];
         let mut band_scf = [[0_i32; SCF_GRANULES_PER_BAND]; 2];
         let mut band_levels = [[0_i32; SAMPLES_PER_BAND]; 2];
-        for (ch, (bt, data)) in [(bt0, ch0), (bt1, ch1)].into_iter().enumerate() {
-            if bt == 0 {
+        for (ch, c) in [&c0, &c1].into_iter().enumerate() {
+            if c.bt == 0 {
                 continue;
             }
-            let q = quantize_band(bt, data)?;
-            band_scfi[ch] = scfi_for(&q.scf);
-            band_scf[ch] = q.scf;
-            band_levels[ch] = q.levels;
+            band_scfi[ch] = scfi_for(&c.q.scf);
+            band_scf[ch] = c.q.scf;
+            band_levels[ch] = c.q.levels;
         }
 
-        res.push([bt0, bt1]);
-        ms_flags.push(use_ms && (bt0 != 0 || bt1 != 0));
+        res.push([c0.bt, c1.bt]);
+        ms_flags.push(use_ms && (c0.bt != 0 || c1.bt != 0));
         scfi.push(band_scfi);
         granule_scf.push(band_scf);
         levels.push(band_levels);

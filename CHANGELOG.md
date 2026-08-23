@@ -116,6 +116,39 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Clean runs after the fixes: 82 k (sv7), 16 k (sv8 stream) and
   109 k (seek) executions with zero artifacts.
 
+- **Round 450** — **Encoder: measured rate-distortion posture
+  election + opt-in CNS emission.**
+
+  - **RD posture election.** The per-band L/R-vs-M/S choice now
+    compares *measured* costs: exact §6.4 sample-pass wire bits (new
+    [`sv8_stereo_frame_encode::band_sample_bits`], which runs the
+    real per-case encoder into a scratch writer) against the
+    *measured* L/R-domain squared error of each posture — which
+    prices the M/S error coupling (`L = M + S` sums both channels'
+    quantisation noise) that the old alphabet-size estimate ignored
+    — under a Lagrangian `λ = step_target²/16`. Honest measurement:
+    A/B frontier sweeps on partially-correlated and near-mono
+    program material show the old heuristic was already
+    frontier-efficient — the RD election lands on the same
+    rate/SNR frontier (± measurement noise) with a better-defined
+    operating point per `step_target`; the flat-step allocation
+    itself measures as reverse-waterfilling-optimal for the format's
+    entropy tools (sample pass = 90.7 % of stream bits).
+  - **CNS emission (`pns_threshold`, default off).** A coded channel
+    whose band peak sits under the threshold is emitted as a spec
+    §6.4 `Res == −1` noise band — zero sample-pass bits, one shared
+    SCF chosen so the decoder PRNG's noise power (level rms
+    `sqrt(4·(256²−1)/12) ≈ 147.8` from the staged generator facts,
+    × `C[0]` × SCF gain) matches the band's measured rms; the `EI`
+    PNS flag is raised. Only possible to validate because of this
+    round's generator-identity result: gates
+    (`tests/sv8_encoder_cns.rs`) show a tones+hiss encode shrink
+    from 88 133 to 9 987 bytes (−88.7 %) with 3 594 CNS instances,
+    tone projection error 0.006 %, substituted-noise loudness ratio
+    1.000, and — binary-gated — the reference console decoder
+    decoding our CNS stream to **max |delta| = 1 LSB** against our
+    own decode.
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the
