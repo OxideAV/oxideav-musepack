@@ -34,7 +34,11 @@
 //!   per the clean-room wall its source cannot be consulted, so this
 //!   suite gates the noise **statistically** (documented measured
 //!   values) instead of per-sample and the exact-match corpus gate
-//!   excludes this fixture.
+//!   excludes this fixture. (r450 epilogue: against the **native**
+//!   console-decoder oracle staged since — `expected-mpcdec.pcm` —
+//!   the very same decode IS per-sample exact within ±1 LSB; see
+//!   `tests/cns_native_oracle.rs`. The mismatch documented above is
+//!   the FFmpeg oracle's own generator, exactly as suspected.)
 
 use oxideav_musepack::cns::CnsPrng;
 use oxideav_musepack::framing::{SV7Header, SV7_VERSION_PNS_FLAG};

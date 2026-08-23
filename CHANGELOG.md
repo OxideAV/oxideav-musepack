@@ -64,6 +64,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   console decoder and the FFmpeg oracle both still decode the
   seek-bearing streams input-aligned (existing oracle gates).
 
+- **Round 450** — **CNS noise waveform conformance-proven against
+  the native console-decoder oracle — the r405 waveform gap is
+  closed.** The docs staging (`af8e75c`) added a second decode oracle
+  for the `cns-pns` fixtures: the native console decoder (binary
+  only, black-box), whose gapless window is the same r429 law this
+  crate emits, so the decodes align 1:1. Result
+  (`tests/cns_native_oracle.rs`, fixtures
+  `tests/fixtures/sv{7,8}/cns-pns/expected-mpcdec.pcm`):
+
+  - **max |delta| = 1 LSB over all 44 100 samples** on both the SV7
+    stream and its SV8 transcode — the CNS *waveform* is per-sample
+    conformant (49.9 % bit-exact; the ±1 residue is f64-vs-f32
+    synthesis rounding, as across the corpus). This retro-validates
+    the staged two-LFSR generator facts and this crate's
+    generator-consumption order (whole-stream state advanced in
+    band-decode order) as the native decoder's own. The r405
+    "oracle noise not reproducible from the staged facts" finding
+    was the FFmpeg oracle's different generator, not a docs gap.
+  - Loudness + noise-region (high-pass) energy calibrate to the
+    native level at ratio 1.0002 / 1.0001 (the FFmpeg oracle sits
+    ~1.14× / ~1.7× above — the staged notes' band-8..27 excess).
+  - Our SV7 and SV8 decodes of the transcode pair are
+    **identical** (0 differing samples), mirroring the staged fact
+    that the native decodes of the pair are byte-identical.
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the
