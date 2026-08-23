@@ -149,6 +149,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     decoding our CNS stream to **max |delta| = 1 LSB** against our
     own decode.
 
+- **Round 450** — **From-PCM SV7 encoder — the encode side now
+  covers both stream generations.** New [`sv7_frame_build`] (the SV7
+  twin of the SV8 builder: full `Res 1..=17` ladder, SV7 6-bit SCF
+  grid, measured-bits context-selector choice, the same RD posture
+  election and opt-in CNS emission) and [`sv7_pcm_encode`]
+  (`encode_sv7_from_pcm_f64/s16`: §1 header + prefixed frame run +
+  11-bit trailer via `Sv7FileWriter`, which gains
+  `finish_with_flush` / `finish_gapless_with_flush`). Notable wire
+  constraints the builder enforces:
+
+  - **§5.1 res reachability** — band 0 is a raw 4-bit absolute
+    (`0..=15`); later bands take a delta in `−5..=3` or an unsigned
+    4-bit escape, so `Res` 16/17 are re-quantised down to 15 when
+    out of delta reach, and the CNS `−1` is entered through a
+    **bridge band** (`Res = 4`, always escapable) when the previous
+    band sits above the delta floor — mirroring how the corpus
+    streams enter their CNS runs from low/empty bands.
+  - **Gapless with no silence field** — SV7's decode window is fixed
+    at `decoded[481 .. 481+total]`, so when the declared frames'
+    slack is under the priming tail the encoder appends the
+    reference producers' **undeclared post-trailer flush frame**
+    (r429 semantics) instead of letting the tail be
+    drain-approximated.
+  - **§5.4 escape levels** — the PCM-escape arms (`Res 8..=17`)
+    carry raw unsigned levels (`signed + Dc`), unlike the signed
+    Huffman arms.
+
+  Black-box closure (`tests/sv7_encoder_oracle.rs`, binary-gated):
+  the reference console decoder plays our SV7 streams — flush-frame
+  case included — to exactly N input-aligned samples at
+  **max |delta| = 1 LSB** vs our own decode (76.0/76.6 dB vs input),
+  the FFmpeg oracle matches at the 481-sample priming offset (max
+  1 LSB), and an `MP+ 0x17` CNS stream (7 800 vs 54 016 bytes,
+  −85.6 %) decodes at the same 1-LSB reference parity.
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the

@@ -190,7 +190,15 @@ L/R-domain error). The round also **fuzz-hardened** the frame
 readers: a `fuzz/` libFuzzer harness (3 targets) plus always-on
 hostile-input gates surfaced and fixed an SV8 drain DoS (hostile `SH`
 totals), an `ST` extrapolation overflow, and an unbounded speculative
-allocation (`tests/hostile_inputs.rs`).
+allocation (`tests/hostile_inputs.rs`). Finally, the encode side now
+covers **both generations from PCM**: `sv7_frame_build` +
+`sv7_pcm_encode` land the from-PCM SV7 encoder (§5.1 res-reachability
+legality incl. the CNS bridge-band entry, the no-silence-field
+gapless geometry with the reference producers' undeclared flush
+frame, raw-unsigned escape levels), oracle-closed at **max 1 LSB**
+reference-decoder parity — CNS streams included (−85.6 % rate on
+tones+hiss) — and 1-LSB FFmpeg parity at the priming offset
+(`tests/sv7_encoder_oracle.rs`).
 
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips

@@ -297,6 +297,23 @@ impl Sv7FileWriter {
     /// through [`Sv7FileWriter::finish_gapless`]'s overrides — see
     /// there).
     pub fn finish(self) -> Result<Vec<u8>> {
+        self.finish_with_flush(None)
+    }
+
+    /// [`Sv7FileWriter::finish`], optionally appending one
+    /// **undeclared flush frame** after the 11-bit trailer — the
+    /// reference producers' posture for streams whose declared frames
+    /// end inside the decoder's 481-sample synthesis-priming window
+    /// (r429; the whole-file decoder reads any post-trailer prefixed
+    /// frame as flush before draining). The flush frame is coded like
+    /// any other (`[20-bit length][body]`, same cross-frame SCF
+    /// memory) but is **not** counted in the §1 frame count.
+    ///
+    /// # Errors
+    ///
+    /// See [`Sv7FileWriter::finish`]; plus any frame-encode error of
+    /// the flush body.
+    pub fn finish_with_flush(self, flush: Option<&Sv7EncStereoFrame>) -> Result<Vec<u8>> {
         let mut header = self.template;
         header.frame_count = self.frames;
         let mut writer = Sv7BitWriter::new();
@@ -307,11 +324,16 @@ impl Sv7FileWriter {
         let mut logical = writer.finish();
         debug_assert_eq!(logical.len(), 25);
         let mut tail = self.body;
+        let mut scf = self.scf;
         if self.frames > 0 {
             tail.write_bits(
                 u32::from(header.last_frame_samples),
                 SV7_LAST_FRAME_TRAILER_BITS,
             );
+        }
+        if let Some(frame) = flush {
+            let bands = header.max_band as usize + 1;
+            write_prefixed_frame(&mut tail, frame, bands, header.mid_side, &mut scf)?;
         }
         logical.extend_from_slice(&tail.finish());
         Ok(crate::sv7_word_swap::word_swap_sv7_body(&logical))
@@ -328,13 +350,28 @@ impl Sv7FileWriter {
     /// - [`Error::HeaderFieldOutOfRange`]`("last_frame_samples")` if
     ///   `last_frame_samples` exceeds the 1152-sample frame geometry.
     /// - See [`Sv7FileWriter::finish`].
-    pub fn finish_gapless(mut self, last_frame_samples: u16) -> Result<Vec<u8>> {
+    pub fn finish_gapless(self, last_frame_samples: u16) -> Result<Vec<u8>> {
+        self.finish_gapless_with_flush(last_frame_samples, None)
+    }
+
+    /// [`Sv7FileWriter::finish_gapless`] with an optional undeclared
+    /// flush frame ([`Sv7FileWriter::finish_with_flush`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Sv7FileWriter::finish_gapless`] /
+    /// [`Sv7FileWriter::finish_with_flush`].
+    pub fn finish_gapless_with_flush(
+        mut self,
+        last_frame_samples: u16,
+        flush: Option<&Sv7EncStereoFrame>,
+    ) -> Result<Vec<u8>> {
         if u64::from(last_frame_samples) > crate::sv7_header::SV7_SAMPLES_PER_FRAME {
             return Err(Error::HeaderFieldOutOfRange("last_frame_samples"));
         }
         self.template.true_gapless = true;
         self.template.last_frame_samples = last_frame_samples;
-        self.finish()
+        self.finish_with_flush(flush)
     }
 }
 
