@@ -297,7 +297,12 @@ impl Sv8StreamDecoder {
         self.state.reset();
 
         let nch = usize::from(self.channels);
-        let mut pcm = Vec::with_capacity(frames as usize * SAMPLES_PER_FRAME_PER_CHANNEL * nch);
+        // Pre-allocate for the common packet sizes only: a hostile
+        // caller-side `frames` (e.g. a max block_power on a truncated
+        // payload) must not commit hundreds of MB before the first
+        // frame decode fails.
+        let mut pcm =
+            Vec::with_capacity((frames as usize).min(64) * SAMPLES_PER_FRAME_PER_CHANNEL * nch);
         let mut f = 0u64;
         loop {
             if f >= frames {

@@ -159,6 +159,15 @@ pub fn decode_sv8_stream(input: &[u8]) -> Result<Sv8DecodedStream> {
     let header = header.ok_or(Error::NotImplemented)?;
     let mut decoder = decoder.ok_or(Error::NotImplemented)?;
 
+    // Hostile-input bound: the `SH` totals promised
+    // `⌈sample_count / 1152⌉` coded frames; a stream whose `AP` run
+    // ends before delivering them is truncated — fail loud instead of
+    // letting the drain below zero-fill an unbounded window (a tiny
+    // buffer declaring a 2^40 sample count must not drain for hours).
+    if frames_remaining > 0 {
+        return Err(Error::UnexpectedEof);
+    }
+
     // Gapless window (mpcdec-pinned — see
     // [`crate::synthesis::SYNTHESIS_PRIME_SAMPLES`]): the output is
     // `decoded[481 + silence .. 481 + sample_count]` per channel —

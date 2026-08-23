@@ -89,6 +89,33 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     **identical** (0 differing samples), mirroring the staged fact
     that the native decodes of the pair are byte-identical.
 
+- **Round 450** — **Fuzz hardening of the SV7/SV8 frame readers.**
+  New `fuzz/` libFuzzer harness (3 targets: `sv7_file_decode`,
+  `sv8_stream_decode`, `sv8_seek_index`, corpus-seeded from the
+  staged fixtures) plus an always-on CI companion
+  (`tests/hostile_inputs.rs`: fixed-seed point mutations,
+  truncations, magic-wearing noise buffers, crafted CRC-valid
+  headers). Findings, all fixed in the same commit:
+
+  - **SV8 drain DoS** — a tiny stream whose CRC-valid `SH` declared
+    a huge `sample_count` (e.g. 2^40) with no audio behind it made
+    the gapless drain loop zero-fill the whole declared window.
+    `decode_sv8_stream` now fails loud (`UnexpectedEof`) when the
+    `AP` run ends before delivering the totals-derived frame count,
+    which also bounds the drain to the priming tail on every path.
+  - **`ST` parse arithmetic overflow** — hostile varint entries near
+    2^63 overflowed the §9.2 second-order extrapolation
+    (`2·pos[i−1]`) in debug builds. Entries are now bounded by
+    `SEEK_ENTRY_BOUND` (2^40, far past the 35-bit `SO` reach), on
+    parse and compose both.
+  - **Speculative allocation bound** — `decode_audio_packet` no
+    longer pre-commits `frames × 1152 × nch` capacity for a hostile
+    frame count (max `block_power` promises 16384 frames/packet)
+    before the first frame decode can fail.
+
+  Clean runs after the fixes: 82 k (sv7), 16 k (sv8 stream) and
+  109 k (seek) executions with zero artifacts.
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the

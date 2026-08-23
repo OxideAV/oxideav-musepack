@@ -63,6 +63,12 @@ pub const SEEK_GOLOMB_K: u8 = 12;
 /// bound).
 pub const SEEK_TABLE_CAP: u64 = 65536;
 
+/// Sanity bound on a decoded entry position (bytes from
+/// `header_position`): 2^40 — far beyond the 35-bit `SO` reach and
+/// any real stream, tight enough that the §9.2 second-order
+/// extrapolation arithmetic can never overflow on hostile input.
+pub const SEEK_ENTRY_BOUND: u64 = 1 << 40;
+
 /// Decoded `SO` (seek-table offset) payload — headers-and-coding §9.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeekOffsetFields {
@@ -170,11 +176,12 @@ impl SeekTableFields {
         let seek_pwr_delta = reader.read_bits(4)? as u8;
         let n = n_entries as usize;
         let mut entries: Vec<u64> = Vec::with_capacity(n);
-        if n >= 1 {
-            entries.push(read_bit_varint(&mut reader)?);
-        }
-        if n >= 2 {
-            entries.push(read_bit_varint(&mut reader)?);
+        for _ in 0..n.min(2) {
+            let e = read_bit_varint(&mut reader)?;
+            if e >= SEEK_ENTRY_BOUND {
+                return Err(Error::SeekTableCorrupt("entry position out of bounds"));
+            }
+            entries.push(e);
         }
         for i in 2..n {
             // Golomb k=12: `l` leading zeros, a terminating 1, then
@@ -191,9 +198,14 @@ impl SeekTableFields {
             // Sign in the LSB: odd ⇒ negative second difference.
             let magnitude = (code >> 1) as i64;
             let d2 = if code & 1 != 0 { -magnitude } else { magnitude };
+            // Both predecessors are < 2^40 and |d2| < 2^47, so this
+            // cannot overflow.
             let pos = d2 + 2 * entries[i - 1] as i64 - entries[i - 2] as i64;
             if pos < 0 {
                 return Err(Error::SeekTableCorrupt("entry position went negative"));
+            }
+            if pos as u64 >= SEEK_ENTRY_BOUND {
+                return Err(Error::SeekTableCorrupt("entry position out of bounds"));
             }
             entries.push(pos as u64);
         }
@@ -217,6 +229,9 @@ impl SeekTableFields {
     pub fn payload(&self) -> Result<Vec<u8>> {
         if self.seek_pwr_delta > 0xF {
             return Err(Error::SeekTableCorrupt("seek_pwr_delta exceeds 4 bits"));
+        }
+        if self.entries.iter().any(|&e| e >= SEEK_ENTRY_BOUND) {
+            return Err(Error::SeekTableCorrupt("entry position out of bounds"));
         }
         let mut w = Sv7BitWriter::new();
         write_bit_varint(&mut w, self.entries.len() as u64);
