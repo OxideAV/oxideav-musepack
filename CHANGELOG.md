@@ -46,6 +46,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     their `SH` / `RG` / `EI` siblings; their "field map is GAP"
     notes are retired.
 
+- **Round 450** — **The from-PCM SV8 encoder writes the seek
+  layer.** [`encode_sv8_from_pcm_f64`] now emits the full §9.0
+  skeleton `MPCK SH RG EI SO AP… ST SE`: the `SO` packet goes out
+  before the audio as the fixed 5-byte slot and is back-patched with
+  the measured `ST` distance (§9.1); the `ST` table indexes one `AP`
+  per `2^SEEK_PWR_DELTA` (= 2, the corpus posture) under the §9.2
+  Golomb `k = 12` second-difference entry code. Gates
+  (`tests/sv8_encoder_seek.rs`): the emitted table parses back to
+  exactly the encoder's own measured `AP` offsets; mid-stream random
+  access on a 29-packet stream rejoins the linear decode within
+  ±1 LSB past the priming transient; the layer is transparent to
+  linear decode; and — black-box, binary-gated — **a third-party
+  demuxer's `-ss` seek honours the generated table**, landing on an
+  entry-aligned frame boundary near the requested time and matching
+  its own linear decode byte-for-byte thereafter. The reference
+  console decoder and the FFmpeg oracle both still decode the
+  seek-bearing streams input-aligned (existing oracle gates).
+
 ### Fixed
 
 - **Round 429** — **Gapless window semantics corrected against the

@@ -11,10 +11,14 @@
 //!
 //! # Stream shape
 //!
-//! `MPCK`, then `SH` → `RG` → `EI` → `AP`×N → `SE` (the fixture
-//! corpus's packet order, minus the seek layer: the `SO` / `ST`
-//! payload maps are a standing docs gap, and a stream without them
-//! decodes fine — the decode side skips unknown/absent seek packets).
+//! `MPCK`, then `SH` → `RG` → `EI` → `SO` → `AP`×N → `ST` → `SE` —
+//! the full §9.0 packet skeleton including the seek layer
+//! (headers-and-coding §9, wired r450): `SO` is written before the
+//! audio as the fixed 5-byte back-patchable forward reference and
+//! patched once the `ST` position is known; `ST` carries one entry
+//! per `2^seek_pwr_delta` `AP` packets (the corpus posture
+//! `seek_pwr_delta = 1`) under the §9.2 Golomb `k = 12`
+//! second-difference entry code ([`crate::sv8_seek`]).
 //!
 //! Every `AP` packet carries up to `2^(block_power × 2)` frames
 //! (headers-and-coding §2, field 9) and opens with a **key frame**
@@ -65,6 +69,7 @@ use crate::sh_header::{SV8_SAMPLE_RATES, SV8_STREAM_VERSION};
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv8_crc::sv8_crc32;
 use crate::sv8_frame_build::{build_sv8_stereo_frame, Sv8FrameBuildSettings};
+use crate::sv8_seek::{SeekOffsetFields, SeekTableFields};
 use crate::sv8_stereo_frame::Sv8FrameState;
 use crate::sv8_stereo_frame_encode::encode_sv8_stereo_frame;
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
@@ -103,6 +108,11 @@ impl Default for Sv8EncoderSettings {
         }
     }
 }
+
+/// §9.2 seek granularity the encoder writes: one `ST` entry per
+/// `2^SEEK_PWR_DELTA` `AP` packets (the reference default posture,
+/// `seek_pwr_delta = 1`).
+pub const SEEK_PWR_DELTA: u8 = 1;
 
 /// Append a §3 varint: big-endian 7-bit groups, continuation high bit
 /// on all but the last byte.
@@ -316,14 +326,21 @@ pub fn encode_sv8_from_pcm_f64(
     write_packet(&mut out, *b"RG", &rg_payload(0, 0, 0, 0));
     write_packet(&mut out, *b"EI", &ei_payload(settings.profile, 0, 1, 0)?);
 
+    // §9.0/§9.1: the SO packet precedes the audio; its payload is a
+    // fixed 5-byte slot back-patched with the ST distance below.
+    let so_pos = out.len();
+    write_packet(&mut out, *b"SO", &[0u8; crate::sv8_seek::SO_PAYLOAD_LEN]);
+
     // Audio: per-channel analysis filters persist across the whole
     // stream; the frame-state resets per packet.
     let mut filters = vec![AnalysisFilter::new(); nch];
     let mut frame_pcm = [0.0_f64; SAMPLES_PER_FRAME_PER_CHANNEL];
     let mut audio_packets = 0u64;
+    let mut ap_offsets: Vec<u64> = Vec::new();
     let mut frame_index = 0u64;
     while frame_index < frames {
         let packet_frames = frames_per_packet.min(frames - frame_index);
+        ap_offsets.push(out.len() as u64);
         let mut writer = Sv7BitWriter::new();
         let mut state = Sv8FrameState::new();
         for pf in 0..packet_frames {
@@ -364,6 +381,27 @@ pub fn encode_sv8_from_pcm_f64(
         audio_packets += 1;
         frame_index += packet_frames;
     }
+
+    // §9.2: the seek table lands after the audio — one entry per
+    // 2^SEEK_PWR_DELTA AP packets (entries are byte offsets relative
+    // to header_position, which is 0 in this buffer) — then the SO
+    // forward reference is back-patched with the measured distance
+    // (§9.1: ST_position − SO_position).
+    let st_pos = out.len();
+    let table = SeekTableFields {
+        seek_pwr_delta: SEEK_PWR_DELTA,
+        entries: ap_offsets
+            .iter()
+            .copied()
+            .step_by(1 << SEEK_PWR_DELTA)
+            .collect(),
+    };
+    write_packet(&mut out, *b"ST", &table.payload()?);
+    let so_payload = SeekOffsetFields {
+        st_offset: (st_pos - so_pos) as u64,
+    }
+    .payload()?;
+    out[so_pos + 3..so_pos + 8].copy_from_slice(&so_payload);
 
     write_packet(&mut out, *b"SE", &[]);
     Ok(Sv8EncodedStream {
@@ -523,7 +561,9 @@ mod tests {
                 "StreamHeader",
                 "ReplayGain",
                 "EncoderInfo",
+                "SeekTableOffset",
                 "AudioPacket",
+                "SeekTable",
                 "StreamEnd"
             ]
         );
