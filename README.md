@@ -155,6 +155,43 @@ re-pinned on the shifted window; the encoder picks the smallest
 `beginning_silence` (0..=481) that keeps its real tail inside the
 coded frames, so its own streams never rely on drain approximation.
 
+**Round 450: the SV8 seek layer is complete, and the CNS noise
+waveform is conformance-proven against the native decoder.** The
+newly staged headers-and-coding **§9** closed the last SV8
+packet-payload gap, and the crate now speaks the whole of it
+(`sv8_seek`): the §9.1 `SO` fixed 5-byte back-patchable
+seek-table-offset, the §9.2 `ST` table with its **Golomb `k = 12`
+second-difference entry code** (re-composing every parsed corpus
+table is **byte-exact** against the reference encoder), and random
+access — `Sv8SeekIndex` + `decode_sv8_from_entry` enter the packet
+stream at any indexed `AP` and rejoin the linear decode within
+±1 LSB past the 481-sample priming transient. The **encoder writes
+the layer too** (`SO` back-patch + thinned `ST`), proven end to end
+by a third-party demuxer's `-ss` seek landing on an entry-aligned
+frame boundary of our own stream and matching its linear decode
+byte-for-byte thereafter (`tests/sv8_seek_corpus.rs`,
+`tests/sv8_encoder_seek.rs`). On the CNS front, the freshly staged
+**native console-decoder oracle** settles the r405 waveform question:
+our decode of the `cns-pns` fixtures lands within **±1 LSB per
+sample** of the native PCM on both the SV7 stream and its SV8
+transcode — the staged two-LFSR generator facts and this crate's
+consumption order **are** the native decoder's own (the old
+"irreproducible noise" finding was the FFmpeg oracle's different
+generator), and our SV7/SV8 decodes of the transcode pair are
+identical (`tests/cns_native_oracle.rs`). That identity in turn
+unlocks **encoder-side CNS** (opt-in `pns_threshold`): hiss bands go
+out as `Res = −1` with an SCF sized to the band's rms — a tones+hiss
+encode shrinks −88.7 % at 0.006 % tone-projection error and
+noise-loudness ratio 1.000, and the reference console decoder decodes
+our CNS streams at max 1 LSB from our own
+(`tests/sv8_encoder_cns.rs`). The posture election is now measured
+rate-distortion (exact per-band sample-pass wire bits vs measured
+L/R-domain error). The round also **fuzz-hardened** the frame
+readers: a `fuzz/` libFuzzer harness (3 targets) plus always-on
+hostile-input gates surfaced and fixed an SV8 drain DoS (hostile `SH`
+totals), an `ST` extrapolation overflow, and an unbounded speculative
+allocation (`tests/hostile_inputs.rs`).
+
 The crate now also grows an **SV7 bitstream encode side** (round 382):
 a clean-room-invertible encoder for the SV7 frame body that round-trips
 every decode path bit-for-bit against the readers/decoders already in
@@ -522,16 +559,15 @@ Musepack ships in two incompatible stream-format generations:
   `ms_stereo::ms_to_lr` (`L = M + S`, `R = M − S`) — corpus-proven for
   the SV8 path too (round 419); the generic closure entry point
   remains.
-- **CNS scalefactor participation** — CNS bands (`Res == −1`) now read
-  SCFI + DSCF like coded bands (the §5.2 "`Res ≠ 0`" gate + the
-  structural spec's "noise scaled by the band's scalefactor"), but the
-  corpus contains **no CNS bands**, so this is grounded-but-unvalidated;
-  a wrong convention now fails the per-frame bit budget loudly. A
-  CNS-bearing fixture (mppenc `--pns`?) would pin it.
-- The `SO` / `ST` packet payload field maps (the `SH` / `RG` / `EI`
-  field maps are now wired — see `sh_header` / `rg_header` /
-  `ei_header`; the `SO` seek-table-offset and `ST` seek-table layouts
-  remain GAP in `spec/musepack-headers-and-coding.md`).
+- **CNS scalefactor participation — CLOSED (round 405, wire-pinned;
+  round 450, waveform-pinned):** the `cns-pns` fixtures prove CNS
+  bands take part in SCFI + DSCF while reading zero sample bits, and
+  the native-oracle gates prove the decoded noise waveform itself to
+  ±1 LSB (`tests/cns_native_oracle.rs`).
+- **`SO` / `ST` seek payloads — CLOSED (round 450):** the §9 field
+  maps are wired both ways in `sv8_seek` (parse + compose, corpus
+  byte-exact), with random access and encoder-side generation. No
+  SV8 packet-payload gap remains.
 - **32-band polyphase synthesis filterbank** — **WIRED** (round 366,
   `synthesis`). The reconstruction path now runs end-to-end to PCM for
   both generations: per-band decode → dequant + per-granule-SCF multiply
