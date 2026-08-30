@@ -2042,6 +2042,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   implemented this round and are the target of the pending
   Musepack observer-trace round (workspace task #1263).
 
+## [0.0.3] - 2026-08-30
+
+### Other
+
+- Version rebaseline: 0.0.1 and 0.0.2 on crates.io are the yanked pre-rebuild
+  lineage, so the clean-room rebuild publishes from 0.0.3 (user-authorized
+  bump; release-plz resumes normal management from here).
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-musepack/releases/tag/v0.0.2) - 2026-05-30
 
 ### Other
