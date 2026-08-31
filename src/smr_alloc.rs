@@ -57,9 +57,12 @@ fn margin_db(quality: f64) -> f64 {
 }
 
 /// The absolute-floor step at `quality` (s16 LSBs): the step whose
-/// noise is taken as inaudible regardless of masking.
+/// noise is taken as tolerable regardless of masking. One octave per
+/// quality step — this is what retires the broadband low-level floor
+/// (hiss) at coarse qualities, where the masked floors alone would
+/// keep all 32 bands finely coded.
 fn floor_step(quality: f64) -> f64 {
-    0.4 * ((SMR_QUALITY_MAX - quality) / 2.0).exp2()
+    0.5 * (SMR_QUALITY_MAX - quality).exp2()
 }
 
 /// Mean-square power of one band's 36 subband samples.
@@ -143,8 +146,10 @@ mod tests {
             "step[20] = {}",
             steps[20]
         );
-        // The masker's own band tolerates far more noise.
-        assert!(steps[5] > 20.0 * steps[20], "step[5] = {}", steps[5]);
+        // The masker's own band tolerates far more noise (with the
+        // q5 absolute floor at 16 LSBs, the loud band's masked step
+        // is an order of magnitude above it).
+        assert!(steps[5] > 10.0 * steps[20], "step[5] = {}", steps[5]);
     }
 
     #[test]
