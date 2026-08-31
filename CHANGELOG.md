@@ -8,6 +8,78 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 454** — **Tag pass-through on the whole-stream decode.**
+  New [`mpc_decode::decode_mpc_stream_tagged`]: a buffer opening with
+  an ID3v2 marker instead of a Musepack magic resyncs to the wrapped
+  stream (headers-and-coding §9.2 places `header_position` after any
+  leading ID3v2 block) by scanning for a plausible stream start
+  (`MPCK`, or `MP+` with version nibble 7) that actually decodes,
+  under a bounded attempt budget against hostile magic-lookalike
+  stuffing; trailing APEv2/ID3 tails were already outside both
+  generations' in-stream terminators (§9.3) and are now pinned by
+  tests. The registry decoder routes through the tagged entry and
+  treats a magic failure on a buffer still inside its leading tag
+  block as `NeedMore`, so split-packet feeding of tagged streams
+  works. Tag *contents* are passed over, never parsed.
+
+- **Round 454** — **§9.2 decoder-side seek-table thinning + encoder
+  granularity policy.** `Sv8SeekIndex::from_seek_packets_with_ceiling`
+  implements the documented memory policy: when
+  `cap = 2 + total_samples / (1152 << seek_pwr)` exceeds the ceiling,
+  `seek_pwr`/`diff_pwr` step together, only every `2^diff_pwr`-th
+  decoded entry is retained (each residual still decodes in
+  sequence), and a stored count beyond `cap << diff_pwr` — more than
+  the `SH` sample count justifies — is clamped. The default ceiling
+  is the reference decoder's 65536, so ordinary files resolve
+  unchanged. The encoder is now stream-length-aware too
+  (`seek_pwr_delta_for`): the reference `delta = 1` widens (4-bit
+  cap) only past ~2^17 `AP` packets. Gates: thinned random access on
+  a 116-`AP` stream (ceiling 8, stride 16) rejoins the linear decode
+  within ±1 LSB past priming; an overpromising 40-entry `ST` against
+  a 4-frame `SH` clamps to 6.
+
+- **Round 454** — **SMR-driven per-band allocation — the encoder
+  quality ladder (both generations).** New [`smr_alloc`] policy
+  module: per frame, band powers (stereo-joined by max) spread into
+  neighbours with direction-dependent decay (12 dB/band up,
+  24 dB/band down), lowered by a quality-scaled signal-to-mask margin
+  (`10 + 6q` dB) and floored by a quality-scaled absolute threshold
+  (one octave per quality step); per-band step targets follow the
+  uniform-quantiser noise law. Both frame builders take
+  `quality: Option<f64>` (0 = coarsest … 10 = finest) and run their
+  rate-distortion elections with the band's own step target and
+  Lagrangian; both whole-stream encoder settings thread it through
+  (`None` keeps the flat allocation — byte-identical to r450).
+  Measured on 1.5 s of music-like stereo content
+  (`tests/encoder_quality.rs`, decoding our own streams): SV8
+  q2/q5/q8 = 54.7/289.1/553.3 kbps at 21.9/40.0/58.0 dB SNR (SV7
+  within 2% at every rung); flat default 572.8 kbps / 64.8 dB; SMR
+  q7 461.5 kbps / 51.9 dB. Gated: rate and SNR strictly monotone in
+  quality, gapless length exact at every rung, SMR undercutting the
+  flat rate on masking-friendly content.
+
+- **Round 454** — **Registry typed encoder options + SV7 output.**
+  `MusepackEncoderOptions` (core `CodecOptionsStruct`): `sv`
+  (7 = `MP+` / 8 = `MPCK`, default 8), `quality`, `step`, `ms`,
+  `max_band`, `block_power`, `pns`, `profile` — parsed and validated
+  once at `make_encoder`, strict on unknown keys and out-of-range
+  values. The registry encoder emits **both generations** from PCM:
+  `sv=7` routes flush through the SV7 whole-stream encoder
+  (stereo-only through the registry — the `MP+` body always decodes
+  as stereo), and the optionless default output stays byte-identical.
+
+- **Round 454** — **Fuzz refresh over the new paths.** A fourth
+  libFuzzer target, `encode_roundtrip`, fuzzes the from-PCM encode →
+  decode round trip structure-aware for both generations: the leading
+  input bytes pick the generation and the policy knobs (quality vs
+  flat allocation, M/S, `max_band`, `block_power`, CNS threshold,
+  sample rate), the rest becomes s16 PCM — the encoders must accept
+  every in-range input, the emitted stream must decode, and the
+  gapless sample count must match exactly. Bounded campaign over all
+  four targets (~21 min foreground): `encode_roundtrip` 151 k,
+  `sv7_file_decode` 125 k, `sv8_stream_decode` 16 k, `sv8_seek_index`
+  40 k executions — **zero artifacts, no findings**.
+
 - **Round 450** — **SV8 seek layer complete (headers-and-coding §9;
   docs `af8e75c` + `dd39285`) — the `SO` / `ST` payload gap is
   closed.** New [`sv8_seek`] module:

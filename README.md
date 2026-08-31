@@ -48,8 +48,14 @@ reproduces the reference encoder's bytes exactly
 `oxideav_core::register!`) with a directly-callable
 `registry::make_decoder` factory. (The SV8 path has since been closed
 and corpus-validated at absolute loudness — round 419, below.)
-~690 lib tests + the corpus integration gates; remaining gaps tracked
-in `CHANGELOG.md` `[Unreleased]`.
+~775 lib tests + the corpus integration gates; per-round detail lives
+in `CHANGELOG.md` `[Unreleased]`. **No open decode or encode gap is
+tracked**: the §2.6 chain, CNS (waveform-conformant), the seek layer
+(incl. §9.2 decoder-side thinning), tag pass-through, the from-PCM
+encoders for both generations (flat + SMR quality-ladder allocation),
+and the dual-API registry surface (typed encoder options, both
+generations) are all closed; the remaining decode residue is the
+±1 LSB f64-vs-f32 synthesis rounding against the reference oracles.
 
 **Round 405: CNS / PNS validated on the wire.** The freshly staged
 `cns-pns` fixture (mppenc 1.16 `--pns 1.0`; 215 noise-band instances
@@ -304,6 +310,15 @@ Musepack ships in two incompatible stream-format generations:
   frames, so each channel's filter must be reused across all frames) and
   `synthesize_stereo_frame_interleaved` produces interleaved `2 × 1152`
   `L, R, …` PCM from the post-M/S-undo L/R subband matrices.
+- `smr_alloc` — the perceptual per-band bit-allocation policy shared
+  by both encoders (round 454): frame band powers spread into
+  neighbours with direction-dependent decay, a quality-scaled
+  signal-to-mask margin and absolute floor, and per-band step targets
+  from the uniform-quantiser noise law. Drives the `quality` knob
+  (0 = coarsest … 10 = finest) of both encoder settings structs and
+  the registry's typed options; `None`/unset keeps the flat
+  `step_target` allocation. Pure encoder policy — nothing on the wire
+  changes beyond the resulting `Res`/SCF choices.
 - `analysis` — the 32-band polyphase **analysis** subband filter
   (round 429), the forward counterpart of `synthesis` and the
   encoder's front end: 512-sample FIFO, analysis window = the
@@ -329,14 +344,15 @@ Musepack ships in two incompatible stream-format generations:
   key-frame-led `AP` packets, `SE`) with gapless fields chosen so
   the decoder's `481 + silence` window returns exactly the input
   (`encode_sv8_from_pcm_f64` / `_s16`).
-- `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo *structure*:
+- `ms_stereo` — SV7/SV8 §2.6 mid/side stereo-undo:
   `undo_ms_stereo(stereo, ms_flags, undo)` walks a stereo pair of
   `SubbandMatrix` rows, transforming each `msflag`-set subband's
   (mid, side) rows via a caller-supplied `undo(m, s) -> (l, r)` closure
-  and passing L/R subbands through. The per-sample mid/side →
-  left/right arithmetic is a documented GAP (unspecified under
-  `docs/audio/musepack/`) threaded as the closure knob, isolated for a
-  one-edit pin once a trace lands.
+  and passing L/R subbands through. The arithmetic itself is
+  corpus-pinned since round 390 (`ms_to_lr`: `L = M + S`,
+  `R = M − S`, no normalisation — `undo_ms_stereo_pinned` is the
+  knob-free entry); the closure form remains for callers that need to
+  override it.
 - `scf` — SV7 SCF coding-method decoder (SCFI selector + DSCF deltas).
 - `cns` — CNS / noise-substitution two-LFSR PRNG.
 - `sv7_band_decode` / `sv7_band_header` — SV7 per-band header loop and
@@ -397,7 +413,9 @@ Musepack ships in two incompatible stream-format generations:
   { channels: StereoSubbandMatrix, ms_flags }` — exactly the input
   `ms_stereo::undo_ms_stereo` + the synthesis filterbank consume. The
   shared CNS PRNG threads across both channels in decode order; the two
-  §2.6 GAPs (absolute SCF anchor, M/S-undo arithmetic) stay caller knobs.
+  formerly-GAP §2.6 conventions (absolute SCF anchor, M/S-undo
+  arithmetic) stay caller knobs at this layer, pinned by the r390
+  corpus at the stream layer (`sv7_stream`).
 - `sv7_stream` — SV7 **stereo stream driver**. `Sv7StreamDecoder` owns
   the cross-frame state (one persistent `MultiChannelSynthesis` — the
   filterbank overlap spans 15 frames — a shared CNS PRNG, and the §2.6
@@ -464,9 +482,12 @@ Musepack ships in two incompatible stream-format generations:
   truncation, gapless trim via
   `Sv7HeaderFields::effective_total_samples`); and
   `decode_mpc_stream` dispatches a raw buffer by magic to the SV7 or
-  SV8 whole-stream decoder. Self-decodable and spec-grounded
-  (§1/§1.1/§4); byte-for-byte interop with externally-encoded files
-  awaits a fixture corpus (none under `docs/audio/musepack/`).
+  SV8 whole-stream decoder — `decode_mpc_stream_tagged` (round 454)
+  additionally passes over a leading ID3v2 block (bounded magic
+  resync; trailing APEv2/ID3 tails already sit outside both
+  generations' in-stream terminators). Spec-grounded (§1/§1.1/§4) and
+  corpus-validated against externally-encoded files since round 390
+  (`tests/sv7_corpus.rs`).
 - `sv8_stereo_frame` — the SV8 **two-channel frame-body decode**
   (round 419, fixture-pinned): `Max_used_Band` (keyframe log code over
   the count range / non-key `Bands` delta), the §6.2 stereo resolution
@@ -556,7 +577,7 @@ Musepack ships in two incompatible stream-format generations:
   the knob-free canonical decode paths (the closure-knob variants are
   retained for callers that need to override the predicate).
 
-## Not yet wired (DOCS-GAP / downstream)
+## Formerly tracked gaps — closure ledger (all closed)
 
 - **SV7 absolute SCF anchor — CLOSED (round 390, corpus-pinned):**
   `reconstruct::sv7_absolute_scf_gain` (unity at index 1, s16 domain).
@@ -616,9 +637,11 @@ and the SV8 packet-size varint convention is resolved as inclusive
 
 This crate owns the **Musepack bitstream** only — SV7 frame layout and
 SV8 packet structure (SV8's packet framing is intrinsic to the format).
-Container-level concerns beyond the codec's intrinsic framing (e.g.
-APE-tag parsing for ReplayGain metadata) route through the relevant
-sibling crate.
+Metadata tags wrapped around a stream are **passed over, not parsed**:
+the whole-stream decoders skip a leading ID3v2 block and ignore
+trailing APEv2/ID3 tails (headers-and-coding §9.2/§9.3), while tag
+*content* parsing (ReplayGain from APEv2, etc.) routes through the
+relevant sibling crate.
 
 ## License
 
