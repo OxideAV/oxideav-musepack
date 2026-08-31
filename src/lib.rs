@@ -270,6 +270,7 @@ pub mod requant;
 pub mod rg_header;
 pub mod scf;
 pub mod sh_header;
+pub mod smr_alloc;
 pub mod stream_shape;
 pub mod sv7_band_decode;
 pub mod sv7_band_header;

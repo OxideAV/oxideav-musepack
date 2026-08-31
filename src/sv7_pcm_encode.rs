@@ -56,6 +56,12 @@ pub struct Sv7EncoderSettings {
     /// ([`Sv7FrameBuildSettings::pns_threshold`]); a positive value
     /// also raises the stream's `MP+ 0x17` PNS version-byte flag.
     pub pns_threshold: f64,
+    /// Perceptual quality (0 = coarsest … 10 = finest): when set, the
+    /// per-band allocation switches from the flat `step_target` to
+    /// the SMR-driven policy ([`crate::smr_alloc`]) — the encoder's
+    /// measured rate ladder. `None` (the default) keeps the flat
+    /// allocation (bit-identical output to previous rounds).
+    pub quality: Option<f64>,
 }
 
 impl Default for Sv7EncoderSettings {
@@ -66,6 +72,7 @@ impl Default for Sv7EncoderSettings {
             max_band: 31,
             profile: 10,
             pns_threshold: 0.0,
+            quality: None,
         }
     }
 }
@@ -128,6 +135,7 @@ pub fn encode_sv7_from_pcm_f64(
         step_target: settings.step_target,
         stream_ms: settings.stream_ms,
         pns_threshold: settings.pns_threshold,
+        quality: settings.quality,
     };
 
     let mut writer = Sv7FileWriter::new(header)?;

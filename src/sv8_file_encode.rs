@@ -97,6 +97,12 @@ pub struct Sv8EncoderSettings {
     /// [`Sv8FrameBuildSettings::pns_threshold`]. When enabled the
     /// `EI` packet's PNS flag is set.
     pub pns_threshold: f64,
+    /// Perceptual quality (0 = coarsest … 10 = finest): when set, the
+    /// per-band allocation switches from the flat `step_target` to
+    /// the SMR-driven policy ([`crate::smr_alloc`]) — the encoder's
+    /// measured rate ladder. `None` (the default) keeps the flat
+    /// allocation (bit-identical output to previous rounds).
+    pub quality: Option<f64>,
 }
 
 impl Default for Sv8EncoderSettings {
@@ -111,6 +117,7 @@ impl Default for Sv8EncoderSettings {
             block_power: 3,
             profile: 80,
             pns_threshold: 0.0,
+            quality: None,
         }
     }
 }
@@ -337,6 +344,7 @@ pub fn encode_sv8_from_pcm_f64(
         step_target: settings.step_target,
         stream_ms: settings.stream_ms,
         pns_threshold: settings.pns_threshold,
+        quality: settings.quality,
     };
 
     // Stream prefix: magic + SH + RG + EI.

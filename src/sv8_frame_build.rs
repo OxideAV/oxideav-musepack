@@ -85,17 +85,24 @@ pub struct Sv8FrameBuildSettings {
     /// bands (the spec §5.4/§6.4 `Res = −1` path; wire-compatible
     /// with the corpus `cns-pns` fixtures).
     pub pns_threshold: f64,
+    /// Perceptual quality (0 = coarsest … 10 = finest): when set, the
+    /// per-band allocation switches from the flat `step_target` to
+    /// the SMR-driven step-target vector of [`crate::smr_alloc`]
+    /// (masked + absolute noise floors per band). `None` (the
+    /// default) keeps the flat allocation.
+    pub quality: Option<f64>,
 }
 
 impl Default for Sv8FrameBuildSettings {
     /// Default: `step_target = 2.0` s16 LSBs (a noise floor roughly
     /// 84 dB below full scale per band before SCF granularity),
-    /// stream M/S on, CNS emission off.
+    /// stream M/S on, CNS emission off, flat allocation.
     fn default() -> Self {
         Self {
             step_target: 2.0,
             stream_ms: true,
             pns_threshold: 0.0,
+            quality: None,
         }
     }
 }
@@ -223,20 +230,29 @@ pub fn build_sv8_stereo_frame(
     let mut granule_scf: Vec<[[i32; SCF_GRANULES_PER_BAND]; 2]> = Vec::with_capacity(nb_considered);
     let mut levels: Vec<[[i32; SAMPLES_PER_BAND]; 2]> = Vec::with_capacity(nb_considered);
 
-    // Rate-distortion weight for the posture election: at a uniform
-    // quantiser near the step target, one extra bit of rate buys
-    // roughly a 4x noise-power reduction, i.e. Δsse per sample per
-    // bit ≈ step²/16 — used as the Lagrangian λ so bit costs and
-    // squared errors are commensurable. Policy only.
-    let lambda = settings.step_target * settings.step_target / 16.0;
+    // Per-band step targets: the flat `step_target`, or the
+    // SMR-driven vector when a quality is set ([`crate::smr_alloc`]).
+    let steps = match settings.quality {
+        Some(q) => crate::smr_alloc::smr_step_targets(left, right, nb_considered, q),
+        None => [settings.step_target; SV7_SUBBAND_COUNT],
+    };
 
     for b in 0..nb_considered {
         let l = &left[b];
         let r = &right[b];
+        let step_target = steps[b];
+
+        // Rate-distortion weight for the posture election: at a
+        // uniform quantiser near the band's step target, one extra
+        // bit of rate buys roughly a 4x noise-power reduction, i.e.
+        // Δsse per sample per bit ≈ step²/16 — used as the Lagrangian
+        // λ so bit costs and squared errors are commensurable. Policy
+        // only.
+        let lambda = step_target * step_target / 16.0;
 
         // L/R posture candidate.
-        let cand_l = ChannelCandidate::build(l, settings.step_target)?;
-        let cand_r = ChannelCandidate::build(r, settings.step_target)?;
+        let cand_l = ChannelCandidate::build(l, step_target)?;
+        let cand_r = ChannelCandidate::build(r, step_target)?;
 
         // M/S posture candidate (only when the stream allows it),
         // elected by measured rate + distortion: the mid/side
@@ -254,8 +270,8 @@ pub fn build_sv8_stereo_frame(
         let mut use_ms = false;
         let mut cand_ms: Option<(ChannelCandidate, ChannelCandidate)> = None;
         if settings.stream_ms {
-            let cand_m = ChannelCandidate::build(&mid, settings.step_target)?;
-            let cand_s = ChannelCandidate::build(&side, settings.step_target)?;
+            let cand_m = ChannelCandidate::build(&mid, step_target)?;
+            let cand_s = ChannelCandidate::build(&side, step_target)?;
 
             // Measured L/R-domain squared error of each posture.
             let (rec_l, rec_r) = (cand_l.recon()?, cand_r.recon()?);

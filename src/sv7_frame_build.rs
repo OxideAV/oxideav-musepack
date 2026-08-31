@@ -60,6 +60,11 @@ pub struct Sv7FrameBuildSettings {
     /// Noise-substitution threshold in s16-domain subband peak units;
     /// `0.0` (default) emits no CNS bands. See the SV8 twin.
     pub pns_threshold: f64,
+    /// Perceptual quality (0 = coarsest … 10 = finest) switching the
+    /// per-band allocation from the flat `step_target` to the
+    /// SMR-driven vector of [`crate::smr_alloc`]; `None` (default)
+    /// keeps the flat allocation. See the SV8 twin.
+    pub quality: Option<f64>,
 }
 
 impl Default for Sv7FrameBuildSettings {
@@ -68,6 +73,7 @@ impl Default for Sv7FrameBuildSettings {
             step_target: 2.0,
             stream_ms: true,
             pns_threshold: 0.0,
+            quality: None,
         }
     }
 }
@@ -253,7 +259,12 @@ pub fn build_sv7_stereo_frame(
         return Err(Error::MaxBandOutOfRange(max_band));
     }
     let nb = max_band as usize + 1;
-    let lambda = settings.step_target * settings.step_target / 16.0;
+    // Per-band step targets: the flat `step_target`, or the
+    // SMR-driven vector when a quality is set ([`crate::smr_alloc`]).
+    let steps = match settings.quality {
+        Some(q) => crate::smr_alloc::smr_step_targets(left, right, nb, q),
+        None => [settings.step_target; crate::sv7_band_header::SV7_SUBBAND_COUNT],
+    };
 
     let mut out = Sv7EncStereoFrame {
         left: Vec::with_capacity(nb),
@@ -265,8 +276,12 @@ pub fn build_sv7_stereo_frame(
     for b in 0..nb {
         let l = &left[b];
         let r = &right[b];
-        let cand_l = ChannelCandidate::build(l, settings.step_target)?;
-        let cand_r = ChannelCandidate::build(r, settings.step_target)?;
+        let step_target = steps[b];
+        // The SV8 twin's Lagrangian, per band (Δsse per bit ≈
+        // step²/16 near the band's step target).
+        let lambda = step_target * step_target / 16.0;
+        let cand_l = ChannelCandidate::build(l, step_target)?;
+        let cand_r = ChannelCandidate::build(r, step_target)?;
 
         let mut mid = [0.0_f64; SAMPLES_PER_BAND];
         let mut side = [0.0_f64; SAMPLES_PER_BAND];
@@ -278,8 +293,8 @@ pub fn build_sv7_stereo_frame(
         let mut use_ms = false;
         let mut elected: (ChannelCandidate, ChannelCandidate);
         if settings.stream_ms {
-            let cand_m = ChannelCandidate::build(&mid, settings.step_target)?;
-            let cand_s = ChannelCandidate::build(&side, settings.step_target)?;
+            let cand_m = ChannelCandidate::build(&mid, step_target)?;
+            let cand_s = ChannelCandidate::build(&side, step_target)?;
             let mut sse_lr = 0.0_f64;
             let mut sse_ms = 0.0_f64;
             for k in 0..SAMPLES_PER_BAND {
