@@ -344,11 +344,33 @@ impl Sv8SeekIndex {
     ///   §9.2 parse.
     /// - Any packet-walk error of the prefix scan.
     pub fn from_seek_packets(input: &[u8]) -> Result<Option<Self>> {
+        Self::from_seek_packets_with_ceiling(input, SEEK_TABLE_CAP)
+    }
+
+    /// [`Sv8SeekIndex::from_seek_packets`] with an explicit capacity
+    /// ceiling — the §9.2 **decoder-side table-thinning** policy. When
+    /// the stream's own capacity estimate
+    /// `cap = 2 + total_samples / (1152 << seek_pwr)` exceeds
+    /// `ceiling`, both `seek_pwr` and a counter `diff_pwr` are
+    /// incremented until it fits; only every `2^diff_pwr`-th decoded
+    /// entry is then retained, and a stored entry count beyond
+    /// `cap << diff_pwr` (more entries than the `SH` sample count can
+    /// justify) is clamped. Every retained-or-not entry is still
+    /// *decoded* in sequence — each §9.2 residual depends on its two
+    /// predecessors — so this is a memory policy, not a wire-format
+    /// change; `diff_pwr` is 0 for any ordinary file at the default
+    /// ceiling ([`SEEK_TABLE_CAP`], the reference posture).
+    ///
+    /// # Errors
+    ///
+    /// As [`Sv8SeekIndex::from_seek_packets`].
+    pub fn from_seek_packets_with_ceiling(input: &[u8], ceiling: u64) -> Result<Option<Self>> {
         let after_magic = parse_sv8_magic(input)?;
         let total = input.len() - after_magic;
         let mut stream = PacketStream::new(&input[after_magic..], PacketSizeConvention::Inclusive);
 
         let mut frames_per_packet = 0u64;
+        let mut sample_count: Option<u64> = None;
         let mut so: Option<(u64, SeekOffsetFields)> = None;
         while let Some(packet) = stream.next_packet()? {
             // Offset (relative to header_position) of the *next*
@@ -357,7 +379,9 @@ impl Sv8SeekIndex {
             let next_off = (total - stream.remaining_bytes().len()) as u64;
             match TypedPacket::classify(packet) {
                 TypedPacket::StreamHeader(sh) => {
-                    frames_per_packet = sh.fields()?.frames_per_audio_packet();
+                    let fields = sh.fields()?;
+                    frames_per_packet = fields.frames_per_audio_packet();
+                    sample_count = Some(fields.sample_count);
                 }
                 TypedPacket::SeekTableOffset(pkt) => {
                     let extent = packet.header.header_len as u64 + packet.payload.len() as u64;
@@ -395,15 +419,44 @@ impl Sv8SeekIndex {
                 "SO offset points at a non-ST packet",
             ));
         };
-        let table = SeekTableFields::parse(st.payload_bytes())?;
+        let mut table = SeekTableFields::parse(st.payload_bytes())?;
+
+        // §9.2 decoder-side thinning (see the method docs). Only
+        // meaningful with a parsed `SH` (the §9.0 skeleton places one
+        // before `SO`; without it there is no sample count to bound
+        // by).
+        let mut diff_pwr = 0u32;
+        if let Some(samples) = sample_count {
+            let frame_len = crate::SAMPLES_PER_FRAME_PER_CHANNEL as u64;
+            let eff_block_pwr = frames_per_packet.max(1).trailing_zeros();
+            let ceiling = ceiling.max(2);
+            let cap_for =
+                |sp: u32| 2 + samples / frame_len.checked_shl(sp).unwrap_or(u64::MAX).max(1);
+            let mut seek_pwr = eff_block_pwr + u32::from(table.seek_pwr_delta);
+            let mut cap = cap_for(seek_pwr);
+            while cap > ceiling {
+                seek_pwr += 1;
+                diff_pwr += 1;
+                cap = cap_for(seek_pwr);
+            }
+            let justified = cap.checked_shl(diff_pwr).unwrap_or(u64::MAX);
+            if table.entries.len() as u64 > justified {
+                table.entries.truncate(justified as usize);
+            }
+        }
 
         // Resolve to absolute buffer offsets. Entries are relative to
         // header_position (the MPCK magic) — §9.2 "Reference point".
         let base = (after_magic - SV8_MAGIC.len()) as u64;
-        let positions = table.entries.iter().map(|&e| base + e).collect();
+        let positions = table
+            .entries
+            .iter()
+            .step_by(1usize << diff_pwr.min(63))
+            .map(|&e| base + e)
+            .collect();
         Ok(Some(Self {
             positions,
-            packets_per_entry: 1u64 << table.seek_pwr_delta,
+            packets_per_entry: (1u64 << table.seek_pwr_delta) << diff_pwr,
             frames_per_packet,
         }))
     }

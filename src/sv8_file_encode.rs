@@ -117,8 +117,30 @@ impl Default for Sv8EncoderSettings {
 
 /// §9.2 seek granularity the encoder writes: one `ST` entry per
 /// `2^SEEK_PWR_DELTA` `AP` packets (the reference default posture,
-/// `seek_pwr_delta = 1`).
+/// `seek_pwr_delta = 1`). For streams long enough that this stride
+/// would overrun the reference decoder's table capacity, the encoder
+/// widens it — see [`seek_pwr_delta_for`].
 pub const SEEK_PWR_DELTA: u8 = 1;
+
+/// The §9.2 `seek_pwr_delta` this encoder writes for a stream of
+/// `audio_packets` `AP` packets: the reference default
+/// [`SEEK_PWR_DELTA`], widened (halving the stored entry count per
+/// step) until the table fits the reference decoder's
+/// [`crate::sv8_seek::SEEK_TABLE_CAP`]-entry capacity without
+/// decoder-side thinning, capped at the field's 4-bit maximum.
+/// Encoder policy: any table is legal on the wire (§9.2 decoders
+/// thin oversized ones themselves) — writing one that every reader
+/// keeps whole just wastes no one's memory. Only streams beyond
+/// ~2^17 `AP` packets (≈ 1100 hours at the default 64-frame packets)
+/// widen at all.
+#[must_use]
+pub fn seek_pwr_delta_for(audio_packets: u64) -> u8 {
+    let mut delta = SEEK_PWR_DELTA;
+    while delta < 0xF && audio_packets.div_ceil(1u64 << delta) > crate::sv8_seek::SEEK_TABLE_CAP {
+        delta += 1;
+    }
+    delta
+}
 
 /// Append a §3 varint: big-endian 7-bit groups, continuation high bit
 /// on all but the last byte.
@@ -399,12 +421,13 @@ pub fn encode_sv8_from_pcm_f64(
     // forward reference is back-patched with the measured distance
     // (§9.1: ST_position − SO_position).
     let st_pos = out.len();
+    let seek_pwr_delta = seek_pwr_delta_for(audio_packets);
     let table = SeekTableFields {
-        seek_pwr_delta: SEEK_PWR_DELTA,
+        seek_pwr_delta,
         entries: ap_offsets
             .iter()
             .copied()
-            .step_by(1 << SEEK_PWR_DELTA)
+            .step_by(1 << seek_pwr_delta)
             .collect(),
     };
     write_packet(&mut out, *b"ST", &table.payload()?);
