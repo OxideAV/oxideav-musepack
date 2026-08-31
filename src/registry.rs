@@ -17,17 +17,21 @@
 //! decodes (SV7: [`crate::sv7_file_decode::decode_sv7_file`], r390;
 //! SV8: [`crate::sv8_decode::decode_sv8_stream`], r419/r429).
 //!
-//! The [`oxideav_core::Encoder`] implementation (round 429) is the
-//! whole-stream from-PCM **SV8 encoder**
-//! ([`crate::sv8_file_encode`]): S16 interleaved frames in, one
-//! complete `MPCK` stream out at flush (the `SH` totals are only
-//! known once the input ends).
+//! The [`oxideav_core::Encoder`] implementation (round 429; typed
+//! options + SV7 output round 454) is a whole-stream from-PCM
+//! encoder for **both generations**: S16 interleaved frames in, one
+//! complete `MPCK` (default) or `MP+` (`sv=7`) stream out at flush
+//! (the stream totals are only known once the input ends). The
+//! [`MusepackEncoderOptions`] schema exposes the generation switch,
+//! the quality / step allocation knobs, M/S posture, `max_band`,
+//! `block_power`, CNS threshold, and profile tag through
+//! `CodecParameters::options`.
 
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecParameters, Decoder, Frame, Packet,
-    RuntimeContext,
+    parse_options, AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct,
+    CodecParameters, Decoder, Frame, OptionField, OptionKind, OptionValue, Packet, RuntimeContext,
 };
 
 use crate::mpc_decode::decode_mpc_stream_tagged;
@@ -160,6 +164,174 @@ impl Decoder for MpcStreamDecoder {
     }
 }
 
+/// Typed encoder options (the crate's [`CodecOptionsStruct`] schema),
+/// parsed once at [`make_encoder`] from `CodecParameters::options`.
+/// Every knob mirrors a field of
+/// [`crate::sv8_file_encode::Sv8EncoderSettings`] /
+/// [`crate::sv7_pcm_encode::Sv7EncoderSettings`]; consumers that know
+/// the typed structs at compile time can call the whole-stream
+/// encoders directly instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MusepackEncoderOptions {
+    /// Stream generation to emit: `7` (`MP+`) or `8` (`MPCK`, the
+    /// default).
+    pub sv: u8,
+    /// Perceptual quality `0..=10` switching to the SMR-driven
+    /// allocation ([`crate::smr_alloc`]); `None` = flat allocation.
+    pub quality: Option<f64>,
+    /// Flat s16-domain step target (used when `quality` is unset).
+    pub step_target: f64,
+    /// Stream-wide M/S posture.
+    pub stream_ms: bool,
+    /// Highest coded subband (`1..=31`).
+    pub max_band: u8,
+    /// SV8 `SH` block power (`0..=7`); ignored for SV7 output.
+    pub block_power: u8,
+    /// Noise-substitution threshold (`0.0` = CNS emission off).
+    pub pns_threshold: f64,
+    /// Informational profile tag; `None` = the generation's default
+    /// (80 for SV8, 10 for SV7).
+    pub profile: Option<u8>,
+}
+
+impl Default for MusepackEncoderOptions {
+    fn default() -> Self {
+        Self {
+            sv: 8,
+            quality: None,
+            step_target: 2.0,
+            stream_ms: true,
+            max_band: 31,
+            block_power: 3,
+            pns_threshold: 0.0,
+            profile: None,
+        }
+    }
+}
+
+impl CodecOptionsStruct for MusepackEncoderOptions {
+    const SCHEMA: &'static [OptionField] = &[
+        OptionField {
+            name: "sv",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(8),
+            help: "stream generation to emit: 7 (MP+) or 8 (MPCK)",
+        },
+        OptionField {
+            name: "quality",
+            kind: OptionKind::F32,
+            default: OptionValue::F32(-1.0),
+            help: "perceptual quality 0-10 (SMR allocation); negative = flat step allocation",
+        },
+        OptionField {
+            name: "step",
+            kind: OptionKind::F32,
+            default: OptionValue::F32(2.0),
+            help: "flat quantisation-step target in s16 LSBs (when quality is unset)",
+        },
+        OptionField {
+            name: "ms",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(true),
+            help: "stream-wide mid/side posture",
+        },
+        OptionField {
+            name: "max_band",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(31),
+            help: "highest coded subband (1-31)",
+        },
+        OptionField {
+            name: "block_power",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(3),
+            help: "SV8 audio-block size exponent (0-7); ignored for sv=7",
+        },
+        OptionField {
+            name: "pns",
+            kind: OptionKind::F32,
+            default: OptionValue::F32(0.0),
+            help: "noise-substitution threshold in s16 subband-peak units (0 = off)",
+        },
+        OptionField {
+            name: "profile",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "informational profile tag (omit for the generation default)",
+        },
+    ];
+
+    fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
+        match key {
+            "sv" => {
+                let v = value.as_u32()?;
+                if v != 7 && v != 8 {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "musepack: option 'sv' must be 7 or 8, got {v}"
+                    )));
+                }
+                self.sv = v as u8;
+            }
+            "quality" => {
+                let q = value.as_f32()?;
+                self.quality = if q < 0.0 {
+                    None
+                } else {
+                    Some(f64::from(q).min(10.0))
+                };
+            }
+            "step" => {
+                let s = value.as_f32()?;
+                if !s.is_finite() || s <= 0.0 {
+                    return Err(oxideav_core::Error::invalid(
+                        "musepack: option 'step' must be positive",
+                    ));
+                }
+                self.step_target = f64::from(s);
+            }
+            "ms" => self.stream_ms = value.as_bool()?,
+            "max_band" => {
+                let v = value.as_u32()?;
+                if !(1..=31).contains(&v) {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "musepack: option 'max_band' must be 1..=31, got {v}"
+                    )));
+                }
+                self.max_band = v as u8;
+            }
+            "block_power" => {
+                let v = value.as_u32()?;
+                if v > 7 {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "musepack: option 'block_power' must be 0..=7, got {v}"
+                    )));
+                }
+                self.block_power = v as u8;
+            }
+            "pns" => {
+                let v = value.as_f32()?;
+                if v < 0.0 {
+                    return Err(oxideav_core::Error::invalid(
+                        "musepack: option 'pns' must be non-negative",
+                    ));
+                }
+                self.pns_threshold = f64::from(v);
+            }
+            "profile" => {
+                let v = value.as_u32()?;
+                if v > 127 {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "musepack: option 'profile' must fit 7 bits, got {v}"
+                    )));
+                }
+                self.profile = if v == 0 { None } else { Some(v as u8) };
+            }
+            _ => unreachable!("guarded by SCHEMA"),
+        }
+        Ok(())
+    }
+}
+
 /// Whole-stream SV8 **encoder** (round 429): accumulates interleaved
 /// S16 PCM frames and, at [`Encoder::flush`], runs the from-PCM SV8
 /// pipeline ([`crate::sv8_file_encode::encode_sv8_from_pcm_s16`]) and
@@ -171,6 +343,8 @@ struct MpcStreamEncoder {
     output_params: CodecParameters,
     sample_freq_index: u8,
     channels: u8,
+    /// Parsed typed options (stream generation, allocation, CNS…).
+    opts: MusepackEncoderOptions,
     /// Accumulated interleaved input samples.
     pcm: Vec<i16>,
     /// The encoded stream, produced at flush and drained by
@@ -206,6 +380,13 @@ impl MpcStreamEncoder {
                 )));
             }
         }
+        let opts: MusepackEncoderOptions = parse_options(&params.options)?;
+        if opts.sv == 7 && channels != 2 {
+            return Err(oxideav_core::Error::unsupported(
+                "musepack: SV7 output is stereo-only (the MP+ frame body always codes two \
+                 channels and decodes as stereo); feed 2 channels or use sv=8",
+            ));
+        }
         let mut output_params = CodecParameters::audio(params.codec_id.clone());
         output_params.sample_rate = Some(sample_rate);
         output_params.channels = Some(channels);
@@ -215,6 +396,7 @@ impl MpcStreamEncoder {
             output_params,
             sample_freq_index,
             channels: channels as u8,
+            opts,
             pcm: Vec::new(),
             encoded: None,
             flushed: false,
@@ -277,14 +459,44 @@ impl oxideav_core::Encoder for MpcStreamEncoder {
             return Ok(());
         }
         self.flushed = true;
-        let enc = crate::sv8_file_encode::encode_sv8_from_pcm_s16(
-            &self.pcm,
-            self.channels,
-            self.sample_freq_index,
-            &crate::sv8_file_encode::Sv8EncoderSettings::default(),
-        )
-        .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?;
-        self.encoded = Some(enc.bytes);
+        let o = &self.opts;
+        let bytes = if o.sv == 7 {
+            let settings = crate::sv7_pcm_encode::Sv7EncoderSettings {
+                step_target: o.step_target,
+                stream_ms: o.stream_ms,
+                max_band: o.max_band,
+                profile: o.profile.unwrap_or(10),
+                pns_threshold: o.pns_threshold,
+                quality: o.quality,
+            };
+            crate::sv7_pcm_encode::encode_sv7_from_pcm_s16(
+                &self.pcm,
+                self.channels,
+                self.sample_freq_index,
+                &settings,
+            )
+            .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?
+            .bytes
+        } else {
+            let settings = crate::sv8_file_encode::Sv8EncoderSettings {
+                step_target: o.step_target,
+                stream_ms: o.stream_ms,
+                max_band: o.max_band,
+                block_power: o.block_power,
+                profile: o.profile.unwrap_or(80),
+                pns_threshold: o.pns_threshold,
+                quality: o.quality,
+            };
+            crate::sv8_file_encode::encode_sv8_from_pcm_s16(
+                &self.pcm,
+                self.channels,
+                self.sample_freq_index,
+                &settings,
+            )
+            .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?
+            .bytes
+        };
+        self.encoded = Some(bytes);
         Ok(())
     }
 }
@@ -514,6 +726,103 @@ mod tests {
         }
         assert_eq!(decoded, n, "gapless sample count through the registry");
         assert!(nonzero, "decoded audio must not be silence");
+    }
+
+    fn opt_params(rate: u32, channels: u16, opts: &[(&str, &str)]) -> CodecParameters {
+        let mut p = encoder_params(rate, channels);
+        for (k, v) in opts {
+            p.options.insert(*k, *v);
+        }
+        p
+    }
+
+    fn sine_frame(n: usize, channels: usize) -> Frame {
+        let mut data = Vec::with_capacity(2 * n * channels);
+        for i in 0..n {
+            let s = (9000.0 * (0.07 * i as f64).sin()) as i16;
+            for _ in 0..channels {
+                data.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: None,
+            data: vec![data],
+        })
+    }
+
+    fn encode_all(params: &CodecParameters, frame: &Frame) -> Packet {
+        let mut e = make_encoder(params).unwrap();
+        e.send_frame(frame).unwrap();
+        e.flush().unwrap();
+        e.receive_packet().unwrap()
+    }
+
+    /// The `sv=7` option emits an `MP+` stream that round-trips
+    /// through the registry decoder at the exact gapless length.
+    #[test]
+    fn sv7_option_emits_mp_plus_and_round_trips() {
+        let n = 3_000usize;
+        let frame = sine_frame(n, 2);
+        let pkt = encode_all(&opt_params(44_100, 2, &[("sv", "7")]), &frame);
+        assert_eq!(&pkt.data[..3], b"MP+");
+
+        let mut d = make_decoder(&params()).unwrap();
+        d.send_packet(&pkt).unwrap();
+        let mut decoded = 0usize;
+        loop {
+            match d.receive_frame() {
+                Ok(Frame::Audio(af)) => decoded += af.samples as usize,
+                Ok(_) => panic!("audio frames only"),
+                Err(oxideav_core::Error::Eof) => break,
+                Err(e) => panic!("decode: {e}"),
+            }
+        }
+        assert_eq!(decoded, n, "gapless sample count");
+    }
+
+    /// The quality knob reaches the registry: a coarse quality
+    /// shrinks the packet against the flat default, for both
+    /// generations.
+    #[test]
+    fn quality_option_scales_the_rate() {
+        let frame = sine_frame(6_000, 2);
+        for sv in ["7", "8"] {
+            let flat = encode_all(&opt_params(44_100, 2, &[("sv", sv)]), &frame);
+            let coarse = encode_all(
+                &opt_params(44_100, 2, &[("sv", sv), ("quality", "3")]),
+                &frame,
+            );
+            assert!(
+                coarse.data.len() < flat.data.len(),
+                "sv{sv}: quality 3 ({}) must undercut flat ({})",
+                coarse.data.len(),
+                flat.data.len()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_options_are_rejected_at_construction() {
+        for bad in [
+            ("sv", "9"),
+            ("max_band", "0"),
+            ("max_band", "32"),
+            ("block_power", "9"),
+            ("step", "0"),
+            ("pns", "-1"),
+            ("profile", "128"),
+            ("nonsense", "1"),
+        ] {
+            assert!(
+                make_encoder(&opt_params(44_100, 2, &[bad])).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+        // SV7 output is stereo-only through the registry.
+        assert!(make_encoder(&opt_params(44_100, 1, &[("sv", "7")])).is_err());
+        // Mono SV8 with options stays fine.
+        assert!(make_encoder(&opt_params(44_100, 1, &[("sv", "8"), ("quality", "5")])).is_ok());
     }
 
     #[test]
