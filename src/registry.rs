@@ -30,7 +30,7 @@ use oxideav_core::{
     RuntimeContext,
 };
 
-use crate::mpc_decode::decode_mpc_stream;
+use crate::mpc_decode::decode_mpc_stream_tagged;
 use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
 
 /// The registry codec id for Musepack (both stream generations).
@@ -68,7 +68,7 @@ impl MpcStreamDecoder {
     /// Decode the accumulated stream and queue its PCM as S16
     /// interleaved frames of up to 1152 samples per channel.
     fn decode_buffer(&mut self) -> oxideav_core::Result<()> {
-        let out = decode_mpc_stream(&self.buffer)
+        let out = decode_mpc_stream_tagged(&self.buffer)
             .map_err(|e| oxideav_core::Error::invalid(e.to_string()))?;
         let channels = usize::from(out.channels().max(1));
         let pcm = out.pcm();
@@ -125,9 +125,14 @@ impl Decoder for MpcStreamDecoder {
                 Ok(()) => {}
                 // A truncated stream just needs more packets — unless
                 // the caller already flushed, in which case it is a
-                // genuine error.
+                // genuine error. A buffer still inside a leading ID3v2
+                // block (tag pass-through) reports a magic failure
+                // until the wrapped stream arrives — same treatment.
                 Err(oxideav_core::Error::InvalidData(msg))
-                    if !self.flushed && msg.contains("unexpected end of input") =>
+                    if !self.flushed
+                        && (msg.contains("unexpected end of input")
+                            || (self.buffer.starts_with(b"ID3")
+                                && msg.contains("does not start with the SV7"))) =>
                 {
                     return Err(oxideav_core::Error::NeedMore);
                 }
@@ -393,6 +398,24 @@ mod tests {
         d.send_packet(&packet(b.to_vec())).unwrap();
         d.flush().unwrap();
         assert!(matches!(d.receive_frame(), Ok(Frame::Audio(_))));
+    }
+
+    #[test]
+    fn id3v2_prefixed_stream_decodes_through_the_registry() {
+        // Tag pass-through (headers-and-coding §9.2/§9.3): a stream
+        // wrapped in a leading ID3v2 block and a trailing APEv2-shaped
+        // tail decodes as if untagged.
+        let mut tagged = b"ID3\x04\x00\x00opaque-tag-bytes".to_vec();
+        tagged.extend_from_slice(&sv7_stream());
+        tagged.extend_from_slice(b"APETAGEX\xd0\x07\x00\x00tail");
+        let mut d = make_decoder(&params()).unwrap();
+        d.send_packet(&packet(tagged)).unwrap();
+        d.flush().unwrap();
+        let mut frames = 0;
+        while let Ok(Frame::Audio(_)) = d.receive_frame() {
+            frames += 1;
+        }
+        assert_eq!(frames, 2);
     }
 
     #[test]

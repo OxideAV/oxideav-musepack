@@ -100,6 +100,75 @@ pub fn decode_mpc_stream(bytes: &[u8]) -> Result<MpcDecodedStream> {
     }
 }
 
+/// The 3-byte marker opening an ID3v2 tag block.
+const ID3V2_MARKER: [u8; 3] = *b"ID3";
+
+/// Cap on how many resync candidates [`decode_mpc_stream_tagged`]
+/// will attempt a whole-stream decode at (each failed attempt is
+/// fail-fast, but a hostile tag stuffed with magic look-alikes must
+/// not turn into unbounded re-decodes).
+const MAX_RESYNC_ATTEMPTS: usize = 16;
+
+/// Positions in `bytes` (strictly after the ID3v2 marker) that look
+/// like a Musepack stream start: the SV8 `MPCK` magic, or the SV7
+/// `MP+` magic followed by a version byte with low nibble 7 (the §1
+/// stream-version convention — `0x07` / `0x17`).
+fn resync_candidates(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    (ID3V2_MARKER.len()..bytes.len().saturating_sub(3)).filter(|&i| {
+        bytes[i..].starts_with(b"MPCK")
+            || (bytes[i..].starts_with(b"MP+") && bytes[i + 3] & 0xF == 7)
+    })
+}
+
+/// [`decode_mpc_stream`] with **tag pass-through**: a buffer whose
+/// Musepack stream is wrapped in metadata tags decodes as if the tags
+/// were absent.
+///
+/// - **Leading ID3v2 block** — headers-and-coding §9.2 defines the
+///   stream's `header_position` as "the start of the stream after any
+///   leading ID3v2 block". When `bytes` opens with the `ID3` marker
+///   instead of a Musepack magic, this entry resyncs by scanning for
+///   the first plausible stream start (`MPCK`, or `MP+` + version
+///   nibble 7) that decodes successfully (bounded attempts). The tag
+///   block itself is passed over, not parsed — tag *contents* belong
+///   to the metadata sibling crates.
+/// - **Trailing tags** — nothing to do here: both whole-stream
+///   decoders already stop at their in-stream terminator (SV7: the §1.1
+///   11-bit trailer + flush frame, with any tail ignored; SV8: the
+///   `SE` packet — §9.3 places APEv2/ID3 tags after it, outside the
+///   packet stream).
+///
+/// A buffer that already starts with a Musepack magic decodes
+/// identically to [`decode_mpc_stream`].
+///
+/// # Errors
+///
+/// - [`crate::Error::InvalidMagic`] if `bytes` starts with neither a
+///   Musepack magic nor an ID3v2 marker, or no resync candidate
+///   decodes.
+/// - Every error of the routed whole-stream decoder.
+pub fn decode_mpc_stream_tagged(bytes: &[u8]) -> Result<MpcDecodedStream> {
+    match decode_mpc_stream(bytes) {
+        Ok(out) => Ok(out),
+        Err(e) => {
+            if !bytes.starts_with(&ID3V2_MARKER) {
+                return Err(e);
+            }
+            let mut last = crate::Error::InvalidMagic;
+            for (attempt, pos) in resync_candidates(bytes).enumerate() {
+                if attempt >= MAX_RESYNC_ATTEMPTS {
+                    break;
+                }
+                match decode_mpc_stream(&bytes[pos..]) {
+                    Ok(out) => return Ok(out),
+                    Err(e) => last = e,
+                }
+            }
+            Err(last)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +248,93 @@ mod tests {
         let (_, mut raw) = sv7_file();
         raw.truncate(10); // valid magic, truncated header
         assert_eq!(decode_mpc_stream(&raw), Err(Error::UnexpectedEof));
+    }
+
+    // ─── tag pass-through ───────────────────────────────────
+
+    /// A fake ID3v2-shaped leading block: the `ID3` marker plus
+    /// opaque bytes (the tagged entry never parses the block, so the
+    /// content past the marker is arbitrary).
+    fn id3_prefix(len: usize) -> Vec<u8> {
+        let mut out = b"ID3\x04\x00\x00".to_vec();
+        out.extend((0..len).map(|i| (i * 37 + 5) as u8));
+        out
+    }
+
+    #[test]
+    fn tagged_entry_is_transparent_for_untagged_streams() {
+        let (_, raw) = sv7_file();
+        assert_eq!(
+            decode_mpc_stream_tagged(&raw).unwrap(),
+            decode_mpc_stream(&raw).unwrap()
+        );
+    }
+
+    #[test]
+    fn leading_id3v2_block_is_skipped_sv7() {
+        let (_, raw) = sv7_file();
+        let mut tagged = id3_prefix(301);
+        tagged.extend_from_slice(&raw);
+        let out = decode_mpc_stream_tagged(&tagged).unwrap();
+        assert_eq!(out, decode_mpc_stream(&raw).unwrap());
+    }
+
+    #[test]
+    fn leading_id3v2_block_is_skipped_sv8() {
+        let raw = sv8_stream();
+        let mut tagged = id3_prefix(64);
+        tagged.extend_from_slice(&raw);
+        let out = decode_mpc_stream_tagged(&tagged).unwrap();
+        assert_eq!(out.kind(), StreamKind::Sv8);
+        assert_eq!(out.channels(), 1);
+    }
+
+    #[test]
+    fn resync_skips_magic_lookalikes_inside_the_tag() {
+        // A tag block containing a decoy `MPCK` (backed by garbage)
+        // and a decoy `MP+\x07` before the real SV7 stream: the
+        // bounded resync walks past both.
+        let (_, raw) = sv7_file();
+        let mut tagged = id3_prefix(16);
+        tagged.extend_from_slice(b"MPCKgarbage");
+        tagged.extend_from_slice(b"MP+\x07nope");
+        tagged.extend_from_slice(&raw);
+        let out = decode_mpc_stream_tagged(&tagged).unwrap();
+        assert_eq!(out, decode_mpc_stream(&raw).unwrap());
+    }
+
+    #[test]
+    fn tagged_entry_rejects_non_tag_garbage() {
+        assert_eq!(
+            decode_mpc_stream_tagged(b"RIFFxxxxxxxx"),
+            Err(Error::InvalidMagic)
+        );
+        // ID3 marker but no stream behind it.
+        assert_eq!(
+            decode_mpc_stream_tagged(&id3_prefix(64)),
+            Err(Error::InvalidMagic)
+        );
+    }
+
+    #[test]
+    fn trailing_tag_bytes_after_the_stream_are_ignored() {
+        // §9.3: anything after the SV7 trailer / SV8 `SE` packet is
+        // outside the stream — an APEv2-shaped tail must not disturb
+        // the decode.
+        let (_, raw) = sv7_file();
+        let mut with_tail = raw.clone();
+        with_tail.extend_from_slice(b"APETAGEX\xd0\x07\x00\x00trailing-tag-bytes");
+        assert_eq!(
+            decode_mpc_stream_tagged(&with_tail).unwrap(),
+            decode_mpc_stream(&raw).unwrap()
+        );
+
+        let raw8 = sv8_stream();
+        let mut with_tail8 = raw8.clone();
+        // sv8_stream() has no SE packet, so close it first.
+        with_tail8.extend_from_slice(b"SE\x03");
+        with_tail8.extend_from_slice(b"APETAGEX\xd0\x07\x00\x00tail");
+        let out = decode_mpc_stream_tagged(&with_tail8).unwrap();
+        assert_eq!(out.kind(), StreamKind::Sv8);
     }
 }
