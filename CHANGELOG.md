@@ -6,6 +6,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-musepack/compare/v0.0.3...v0.0.4) - 2026-08-31
+
+### Other
+
+- structure-aware encode round-trip target + clean 21-min campaign; README gap-list rewrite
+- typed encoder options - generation switch, quality ladder, CNS
+- quality-ladder calibration + measured rate-ladder gates
+- SMR-driven per-band allocation - the quality knob (both generations)
+- sv8 seek: $9.2 decoder-side table thinning + long-stream granularity policy
+- tag pass-through - leading ID3v2 resync + trailing-tag tolerance
+
 ### Added
 
 - **Round 454** — **Tag pass-through on the whole-stream decode.**
