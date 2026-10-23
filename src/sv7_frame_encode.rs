@@ -19,7 +19,7 @@
 //! §5.1–§5.5; the pass layout is fixture-corpus-pinned (see
 //! [`crate::sv7_stereo_frame`]).
 
-use crate::sv7_band_decode::{band_type_uses_context_selector, SAMPLES_PER_BAND};
+use crate::sv7_band_decode::{SAMPLES_PER_BAND, band_type_uses_context_selector};
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_sample_encode::encode_sv7_band;
 use crate::{Error, Result};
@@ -113,7 +113,7 @@ pub fn encode_sv7_band_samples(writer: &mut Sv7BitWriter, band: &Sv7EncBand) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::huffman::{sv7_q3_ctx, Sv7BitReader};
+    use crate::huffman::{Sv7BitReader, sv7_q3_ctx};
     use crate::sv7_band_decode::decode_sv7_band;
 
     fn q3_levels() -> [i32; SAMPLES_PER_BAND] {

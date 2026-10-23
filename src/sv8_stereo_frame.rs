@@ -332,7 +332,7 @@ pub fn reconstruct_sv8_stereo_frame(frame: &Sv8StereoFrameDecode) -> Result<Ster
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv8_huffman::{table_for_role, Sv8CanonicalTable, Sv8TableRole, SV8_RES_1_TABLE};
+    use crate::sv8_huffman::{SV8_RES_1_TABLE, Sv8CanonicalTable, Sv8TableRole, table_for_role};
 
     /// MSB-first left-justified bit packer (mirrors the SV8 sub-walk
     /// tests).
@@ -487,10 +487,11 @@ mod tests {
         assert_eq!(f.nbands, 3);
         assert_eq!(f.res, vec![[0, 0]; 3]);
         assert_eq!(f.ms_flags, vec![false; 3]);
-        assert!(f
-            .levels
-            .iter()
-            .all(|b| b.iter().all(|ch| ch.iter().all(|&s| s == 0))));
+        assert!(
+            f.levels
+                .iter()
+                .all(|b| b.iter().all(|ch| ch.iter().all(|&s| s == 0)))
+        );
     }
 
     #[test]
@@ -512,7 +513,7 @@ mod tests {
         push_keyframe_mub(&mut p, 1, max_band);
         p.push(r3, l3); // L res
         p.push(r3, l3); // R res
-                        // M/S bitmap: tot = 1 → log code over 0..2 → 1 bit; cnt 0.
+        // M/S bitmap: tot = 1 → log code over 0..2 → 1 bit; cnt 0.
         p.push_raw(0, 1);
         // SCFI pass: one scfi-2 codeword for (3,3).
         p.push(s15, sl15);
@@ -580,8 +581,8 @@ mod tests {
         p.push(r3, l3);
         p.push_raw(0, 1); // M/S: tot 1 → cnt 0
         p.push(s15, sl15); // SCFI: both non-zero → scfi-2 (3,3)
-                           // DSCF L: non-key + known memory (34) → dscf-2 delta 30:
-                           // ((34 − 25 + 30) & 127) − 6 = 33.
+        // DSCF L: non-key + known memory (34) → dscf-2 delta 30:
+        // ((34 − 25 + 30) & 127) − 6 = 33.
         p.push(d30, dl30);
         // DSCF R: first use → raw7 absolute 50 → 44.
         p.push_raw(50, 7);

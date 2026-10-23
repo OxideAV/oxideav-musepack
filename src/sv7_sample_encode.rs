@@ -33,7 +33,7 @@ use crate::huffman::{
     sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx,
 };
 use crate::requant::band_type_to_res_bits;
-use crate::sv7_band_decode::{band_type_case, BandDecodeCase, SAMPLES_PER_BAND};
+use crate::sv7_band_decode::{BandDecodeCase, SAMPLES_PER_BAND, band_type_case};
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_huffman_encode::write_symbol;
 use crate::{Error, Result};
@@ -90,7 +90,7 @@ pub fn encode_grouped3_band(
         return Err(Error::UnsupportedBandType(1));
     }
     let table = sv7_q1_ctx(ctx);
-    for group in samples.chunks_exact(3) {
+    for group in samples.as_chunks::<3>().0 {
         let value = pack_grouped3([group[0], group[1], group[2]])?;
         write_symbol(writer, table, value)?;
     }
@@ -113,7 +113,7 @@ pub fn encode_grouped2_band(
         return Err(Error::UnsupportedBandType(2));
     }
     let table = sv7_q2_ctx(ctx);
-    for group in samples.chunks_exact(2) {
+    for group in samples.as_chunks::<2>().0 {
         let value = pack_grouped2([group[0], group[1]])?;
         write_symbol(writer, table, value)?;
     }

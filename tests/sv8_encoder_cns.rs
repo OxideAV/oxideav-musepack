@@ -21,8 +21,8 @@ use oxideav_musepack::cns::CnsPrng;
 use oxideav_musepack::huffman::Sv7BitReader;
 use oxideav_musepack::packet_stream::{PacketSizeConvention, PacketStream};
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
-use oxideav_musepack::sv8_file_encode::{encode_sv8_from_pcm_f64, Sv8EncoderSettings};
-use oxideav_musepack::sv8_stereo_frame::{decode_sv8_stereo_frame, Sv8FrameState};
+use oxideav_musepack::sv8_file_encode::{Sv8EncoderSettings, encode_sv8_from_pcm_f64};
+use oxideav_musepack::sv8_stereo_frame::{Sv8FrameState, decode_sv8_stereo_frame};
 use oxideav_musepack::typed_packet::TypedPacket;
 use std::f64::consts::PI;
 
@@ -232,7 +232,9 @@ fn reference_decoder_matches_our_decode_of_cns_streams() {
     // 44-byte canonical RIFF header, then s16le samples.
     let data = &wav_bytes[44..];
     let theirs: Vec<i16> = data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(theirs.len(), ours.len(), "sample counts differ");

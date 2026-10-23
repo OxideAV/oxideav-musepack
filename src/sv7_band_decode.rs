@@ -97,8 +97,8 @@
 
 use crate::cns::CnsPrng;
 use crate::huffman::{
-    decode as huffman_decode, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx,
-    sv7_q6_ctx, sv7_q7_ctx, Sv7BitReader,
+    Sv7BitReader, decode as huffman_decode, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx,
+    sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx,
 };
 use crate::requant::band_type_to_res_bits;
 use crate::{Error, Result};
@@ -250,7 +250,7 @@ pub fn decode_grouped3_band(
         return Err(Error::UnsupportedBandType(1));
     }
     let table = sv7_q1_ctx(ctx);
-    for group in out.chunks_exact_mut(3) {
+    for group in out.as_chunks_mut::<3>().0 {
         let value = huffman_decode(reader, table)?;
         group.copy_from_slice(&unpack_grouped3_value(value)?);
     }
@@ -273,7 +273,7 @@ pub fn decode_grouped2_band(
         return Err(Error::UnsupportedBandType(2));
     }
     let table = sv7_q2_ctx(ctx);
-    for group in out.chunks_exact_mut(2) {
+    for group in out.as_chunks_mut::<2>().0 {
         let value = huffman_decode(reader, table)?;
         group.copy_from_slice(&unpack_grouped2_value(value)?);
     }

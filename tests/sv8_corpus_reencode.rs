@@ -17,14 +17,14 @@
 //! escape-vs-direct forms are forced by the delta value; the non-key
 //! `Bands` delta ring resolves to the in-alphabet form).
 
+use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 use oxideav_musepack::cns::CnsPrng;
 use oxideav_musepack::huffman::Sv7BitReader;
 use oxideav_musepack::packet_stream::{PacketSizeConvention, PacketStream};
 use oxideav_musepack::sh_header::StreamHeaderFields;
 use oxideav_musepack::sv7_bitwriter::Sv7BitWriter;
-use oxideav_musepack::sv8_stereo_frame::{decode_sv8_stereo_frame, Sv8FrameState};
+use oxideav_musepack::sv8_stereo_frame::{Sv8FrameState, decode_sv8_stereo_frame};
 use oxideav_musepack::sv8_stereo_frame_encode::encode_sv8_stereo_frame;
-use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 
 const CORPUS: [&str; 7] = [
     "stereo-sine-partial-last-frame",

@@ -74,7 +74,7 @@
 //! absolute output then differs from a fully-anchored decode by one
 //! global constant scale.
 
-use crate::requant::{band_type_index, DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO};
+use crate::requant::{DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO, band_type_index};
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::{Error, Result};
 
@@ -341,7 +341,7 @@ pub fn reconstruct_sv7_band_from_levels(
     granule_scf: [u8; GRANULES_PER_BAND],
     out: &mut [f64; SAMPLES_PER_BAND],
 ) -> Result<()> {
-    use crate::sv7_band_decode::{band_type_case, BandDecodeCase};
+    use crate::sv7_band_decode::{BandDecodeCase, band_type_case};
 
     match band_type_case(band_type) {
         BandDecodeCase::Cns => {

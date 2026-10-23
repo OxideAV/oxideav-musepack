@@ -30,12 +30,12 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    parse_options, AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct,
-    CodecParameters, Decoder, Frame, OptionField, OptionKind, OptionValue, Packet, RuntimeContext,
+    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
+    Decoder, Frame, OptionField, OptionKind, OptionValue, Packet, RuntimeContext, parse_options,
 };
 
-use crate::mpc_decode::decode_mpc_stream_tagged;
 use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
+use crate::mpc_decode::decode_mpc_stream_tagged;
 
 /// The registry codec id for Musepack (both stream generations).
 pub const MUSEPACK_CODEC_ID: &str = "musepack";
@@ -373,12 +373,12 @@ impl MpcStreamEncoder {
                 "musepack: {channels} channels (only mono and stereo are wired)"
             )));
         }
-        if let Some(fmt) = params.sample_format {
-            if fmt != oxideav_core::SampleFormat::S16 {
-                return Err(oxideav_core::Error::unsupported(format!(
-                    "musepack: encoder input must be S16 interleaved, got {fmt:?}"
-                )));
-            }
+        if let Some(fmt) = params.sample_format
+            && fmt != oxideav_core::SampleFormat::S16
+        {
+            return Err(oxideav_core::Error::unsupported(format!(
+                "musepack: encoder input must be S16 interleaved, got {fmt:?}"
+            )));
         }
         let opts: MusepackEncoderOptions = parse_options(&params.options)?;
         if opts.sv == 7 && channels != 2 {
@@ -433,7 +433,7 @@ impl oxideav_core::Encoder for MpcStreamEncoder {
                 data.len()
             )));
         }
-        for pair in data[..want].chunks_exact(2) {
+        for pair in data[..want].as_chunks::<2>().0 {
             self.pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
         }
         Ok(())
@@ -558,7 +558,7 @@ mod tests {
 
     /// A small complete SV7 stream via the crate's own writer.
     fn sv7_stream() -> Vec<u8> {
-        use crate::sv7_file_encode::{encode_sv7_file, Sv7EncStereoFrame};
+        use crate::sv7_file_encode::{Sv7EncStereoFrame, encode_sv7_file};
         use crate::sv7_header::Sv7HeaderFields;
         let hdr = Sv7HeaderFields {
             frame_count: 2,

@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn left_justified_codeword_round_trips_through_huffman_decode() {
-        use crate::huffman::{decode, SV7_BANDTYPE_HEADER_TABLE};
+        use crate::huffman::{SV7_BANDTYPE_HEADER_TABLE, decode};
         // Emit the bandtype-header codeword for value 2 (code 0x5800,
         // length 6) then decode it back.
         let entry = SV7_BANDTYPE_HEADER_TABLE

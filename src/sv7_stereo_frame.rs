@@ -83,8 +83,8 @@ use crate::frame_reconstruct::zero_subband_matrix;
 use crate::huffman::Sv7BitReader;
 use crate::ms_stereo::StereoSubbandMatrix;
 use crate::reconstruct::reconstruct_sv7_band_absolute;
-use crate::sv7_band_decode::{band_type_uses_context_selector, decode_sv7_band, SAMPLES_PER_BAND};
-use crate::sv7_band_header::{decode_res_header_grounded, SV7_SUBBAND_COUNT};
+use crate::sv7_band_decode::{SAMPLES_PER_BAND, band_type_uses_context_selector, decode_sv7_band};
+use crate::sv7_band_header::{SV7_SUBBAND_COUNT, decode_res_header_grounded};
 use crate::sv7_scf_decode::{decode_sv7_band_dscf, decode_sv7_scfi};
 use crate::{Error, Result};
 
@@ -438,7 +438,7 @@ mod tests {
         p.push_raw(0, 4); // R band0
         p.push(0x0000, 2); // L band1 delta -1 → Res -1
         p.push(0x0000, 2); // R band1 delta -1 → Res -1
-                           // SCFI pass: band1 L, band1 R (band0 silent).
+        // SCFI pass: band1 L, band1 R (band0 silent).
         p.push(scfi_c, scfi_l);
         p.push(scfi_c, scfi_l);
         // DSCF pass: band1 L (delta 0 → SCF 0), band1 R (delta 0).

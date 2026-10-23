@@ -33,7 +33,7 @@
 //! [`crate::requant`] / [`crate::reconstruct`].
 
 use crate::reconstruct::sv7_absolute_scf_gain;
-use crate::requant::{band_type_index, DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO};
+use crate::requant::{DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO, band_type_index};
 use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::{Error, Result};

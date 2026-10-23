@@ -43,7 +43,7 @@
 
 use crate::huffman::Sv7BitReader;
 use crate::sv7_file_encode::{SV7_FRAME_LENGTH_PREFIX_BITS, SV7_LAST_FRAME_TRAILER_BITS};
-use crate::sv7_header::{Sv7HeaderFields, SV7_SAMPLES_PER_FRAME};
+use crate::sv7_header::{SV7_SAMPLES_PER_FRAME, Sv7HeaderFields};
 use crate::sv7_header_encode::SV7_HEADER_BITS;
 use crate::sv7_stream::Sv7StreamDecoder;
 use crate::synthesis::SYNTHESIS_PRIME_SAMPLES;
@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::huffman::sv7_q3_ctx;
     use crate::sv7_band_decode::SAMPLES_PER_BAND;
-    use crate::sv7_file_encode::{encode_sv7_file, Sv7EncStereoFrame, Sv7FileWriter};
+    use crate::sv7_file_encode::{Sv7EncStereoFrame, Sv7FileWriter, encode_sv7_file};
     use crate::sv7_frame_encode::Sv7EncBand;
     use crate::sv7_stream::STEREO_FRAME_PCM_LEN;
 

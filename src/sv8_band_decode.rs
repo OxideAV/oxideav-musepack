@@ -192,7 +192,7 @@ pub const fn case_uses_first_order_context(case: Sv8BandDecodeCase) -> bool {
 
 use crate::cns::CnsPrng;
 use crate::huffman::Sv7BitReader;
-use crate::sv7_band_decode::{fill_cns_band, fill_zero_band, SAMPLES_PER_BAND};
+use crate::sv7_band_decode::{SAMPLES_PER_BAND, fill_cns_band, fill_zero_band};
 use crate::sv8_sample_decode::{
     decode_sv8_context_band, decode_sv8_context_band_grounded, decode_sv8_escape_band,
     decode_sv8_grouped2_band, decode_sv8_grouped3_band, decode_sv8_grouped3_band_grounded,
@@ -557,7 +557,7 @@ mod tests {
         // case 2 (`Grouped3`), SV7 case 2 (Grouped2) sits at SV8
         // case 3..4 (`Grouped2`). The classifiers' outputs must
         // honour the shift.
-        use crate::sv7_band_decode::{band_type_case, BandDecodeCase};
+        use crate::sv7_band_decode::{BandDecodeCase, band_type_case};
         // SV7 case 1 is Grouped3; SV8 case 1 is SparseBand.
         assert_eq!(band_type_case(1), BandDecodeCase::Grouped3);
         assert_eq!(sv8_band_type_case(1), Sv8BandDecodeCase::SparseBand);
@@ -579,7 +579,7 @@ mod tests {
     fn classifier_agrees_with_sv7_sibling_on_shared_cns_and_empty_arms() {
         // SV7 and SV8 share the `case -1` (Cns) and `case 0` (Empty)
         // arms verbatim per spec §2.5 + §3.4.
-        use crate::sv7_band_decode::{band_type_case, BandDecodeCase};
+        use crate::sv7_band_decode::{BandDecodeCase, band_type_case};
         assert_eq!(band_type_case(-1), BandDecodeCase::Cns);
         assert_eq!(sv8_band_type_case(-1), Sv8BandDecodeCase::Cns);
         assert_eq!(band_type_case(0), BandDecodeCase::Empty);
@@ -598,7 +598,7 @@ mod tests {
 
     // ─── decode_sv8_band dispatcher ─────────────────────────
 
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_Q2_1_TABLE, SV8_Q9UP_TABLE};
+    use crate::sv8_huffman::{SV8_Q2_1_TABLE, SV8_Q9UP_TABLE, Sv8CanonicalTable};
     use crate::sv8_sample_decode::GROUPED3_CODEWORDS_PER_BAND;
 
     /// MSB-first left-justified bit packer (mirrors the one in
@@ -758,7 +758,7 @@ mod tests {
         // ctx_for_prev (always 0) every sample uses ctx-0's Q5 table;
         // feed 36 copies of that table's shortest codeword and confirm
         // the dispatcher matches the direct arm sample-for-sample.
-        use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+        use crate::sv8_huffman::{Sv8TableRole, table_for_role};
         let table = table_for_role(Sv8TableRole::Q5, 0).expect("q5 ctx0");
         let (code, len) = first_row(table);
         let mut p = BitPacker::new();
@@ -960,7 +960,7 @@ mod tests {
         // band_type 5..=8 must route through the grounded §6.4.2
         // context decoder; the dispatcher's widened i32 output must
         // equal the direct grounded i8 arm sample-for-sample.
-        use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+        use crate::sv8_huffman::{Sv8TableRole, table_for_role};
         for band_type in [5_i8, 6, 7, 8] {
             let role = match band_type {
                 5 => Sv8TableRole::Q5,
@@ -1002,7 +1002,7 @@ mod tests {
     #[test]
     fn grounded_dispatch_case_two_matches_grounded_direct() {
         // band_type 2 routes to the grounded grouped3 arm (no knob).
-        use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+        use crate::sv8_huffman::{Sv8TableRole, table_for_role};
         // Grounded path starts in ctx-1 (q2-2); over-provision buffer.
         let table = table_for_role(Sv8TableRole::Q2, 1).expect("q2 ctx1");
         let (code, len) = first_row(table);

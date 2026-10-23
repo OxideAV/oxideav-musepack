@@ -25,14 +25,14 @@
 //! `tests/sv8_encoder_seek.rs` — the staged fixtures are short (1-2
 //! `AP` packets each).
 
+use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 use oxideav_musepack::framing::parse_sv8_magic;
 use oxideav_musepack::packet_stream::{PacketSizeConvention, PacketStream};
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
 use oxideav_musepack::sv8_seek::{
-    decode_sv8_from_entry, SeekTableFields, Sv8SeekIndex, SO_PAYLOAD_LEN,
+    SO_PAYLOAD_LEN, SeekTableFields, Sv8SeekIndex, decode_sv8_from_entry,
 };
 use oxideav_musepack::synthesis::SYNTHESIS_PRIME_SAMPLES;
-use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 
 const FIXTURES: &[&str] = &[
     "cns-pns",

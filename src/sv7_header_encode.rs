@@ -33,7 +33,7 @@
 
 use crate::framing::{SV7_MAGIC, SV7_VERSION_NIBBLE};
 use crate::sv7_bitwriter::Sv7BitWriter;
-use crate::sv7_header::{Sv7HeaderFields, SV7_MAX_BAND_INCLUSIVE};
+use crate::sv7_header::{SV7_MAX_BAND_INCLUSIVE, Sv7HeaderFields};
 use crate::{Error, Result};
 
 /// Total logical header length in bits: the 32-bit `MP+`+version prefix
@@ -145,13 +145,13 @@ pub fn write_sv7_header_fields(
     writer.write_bits(u32::from(fields.profile), 4); // field 5
     writer.write_bits(u32::from(fields.link), 2); // field 6
     writer.write_bits(u32::from(fields.sample_freq_index), 2); // field 7
-                                                               // Fields 8..12: max-level + the four 16-bit ReplayGain values.
+    // Fields 8..12: max-level + the four 16-bit ReplayGain values.
     writer.write_bits(u32::from(fields.max_level), 16); // field 8
     writer.write_bits(u32::from(fields.title_gain), 16); // field 9
     writer.write_bits(u32::from(fields.title_peak), 16); // field 10
     writer.write_bits(u32::from(fields.album_gain), 16); // field 11
     writer.write_bits(u32::from(fields.album_peak), 16); // field 12
-                                                         // Fields 13..17: gapless / seek flags, reserved, encoder version.
+    // Fields 13..17: gapless / seek flags, reserved, encoder version.
     writer.write_bits(u32::from(fields.true_gapless), 1); // field 13
     writer.write_bits(u32::from(fields.last_frame_samples), 11); // field 14
     writer.write_bits(u32::from(fields.fast_seek), 1); // field 15

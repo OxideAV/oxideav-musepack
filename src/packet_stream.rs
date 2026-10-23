@@ -38,7 +38,7 @@
 //!   walker reports each packet it sees and treats `SE` as a stop
 //!   signal regardless of where it appears.
 
-use crate::framing::{parse_packet_header, PacketHeader, PacketKey};
+use crate::framing::{PacketHeader, PacketKey, parse_packet_header};
 use crate::{Error, Result};
 
 /// Which interpretation of the SV8 packet varint to use when

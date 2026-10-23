@@ -43,7 +43,7 @@
 //! black-box stream measurements and §9.2 is a facts-only extraction
 //! — both staged in `docs/`; no external source consulted here.
 
-use crate::framing::{parse_sv8_magic, parse_varint, SV8_MAGIC};
+use crate::framing::{SV8_MAGIC, parse_sv8_magic, parse_varint};
 use crate::huffman::Sv7BitReader;
 use crate::packet_stream::{PacketSizeConvention, PacketStream};
 use crate::sv7_bitwriter::Sv7BitWriter;

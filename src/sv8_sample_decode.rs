@@ -147,7 +147,7 @@
 use crate::huffman::Sv7BitReader;
 use crate::requant::RES_BITS;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
-use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+use crate::sv8_huffman::{Sv8TableRole, table_for_role};
 use crate::{Error, Result};
 
 /// Number of grouped codewords per band for §3.4 case 2
@@ -409,7 +409,7 @@ pub fn decode_sv8_sparse_band(
     out: &mut [i8; SAMPLES_PER_BAND],
 ) -> Result<()> {
     let table = table_for_role(Sv8TableRole::Q1, 0).ok_or(Error::UnsupportedBandType(1))?;
-    for half in out.chunks_exact_mut(SPARSE_GROUP_SIZE) {
+    for half in out.as_chunks_mut::<SPARSE_GROUP_SIZE>().0 {
         let cnt = table.decode(reader)?;
         if !(0..=SPARSE_GROUP_SIZE as i8).contains(&cnt) {
             return Err(Error::GroupedSymbolOutOfRange(cnt));
@@ -489,7 +489,7 @@ pub fn decode_sv8_grouped3_band(
     out: &mut [i8; SAMPLES_PER_BAND],
 ) -> Result<()> {
     let table = table_for_role(Sv8TableRole::Q2, ctx).ok_or(Error::UnsupportedBandType(2))?;
-    for group in out.chunks_exact_mut(3) {
+    for group in out.as_chunks_mut::<3>().0 {
         let symbol = table.decode(reader)?;
         group.copy_from_slice(&unpack_grouped3_symbol(symbol)?);
     }
@@ -518,7 +518,7 @@ pub fn decode_sv8_grouped3_band_grounded(
     out: &mut [i8; SAMPLES_PER_BAND],
 ) -> Result<()> {
     let mut ctx = crate::sv8_context::Sv8Context::new(2).ok_or(Error::UnsupportedBandType(2))?;
-    for group in out.chunks_exact_mut(3) {
+    for group in out.as_chunks_mut::<3>().0 {
         let table = table_for_role(Sv8TableRole::Q2, ctx.table_ctx())
             .ok_or(Error::UnsupportedBandType(2))?;
         let symbol = table.decode(reader)?;
@@ -547,7 +547,7 @@ pub fn decode_sv8_grouped2_band(
         _ => return Err(Error::UnsupportedBandType(band_type)),
     };
     let table = table_for_role(role, 0).ok_or(Error::UnsupportedBandType(band_type))?;
-    for group in out.chunks_exact_mut(2) {
+    for group in out.as_chunks_mut::<2>().0 {
         let symbol = table.decode(reader)?;
         group.copy_from_slice(&unpack_grouped2_symbol(symbol, band_type)?);
     }
@@ -695,9 +695,9 @@ mod tests {
     use super::*;
     use crate::requant::QUANTIZER_OFFSET_D;
     use crate::sv8_huffman::{
-        Sv8CanonicalTable, SV8_Q2_1_TABLE, SV8_Q2_2_TABLE, SV8_Q3_TABLE, SV8_Q4_TABLE,
-        SV8_Q5_1_TABLE, SV8_Q5_2_TABLE, SV8_Q6_1_TABLE, SV8_Q6_2_TABLE, SV8_Q7_1_TABLE,
-        SV8_Q7_2_TABLE, SV8_Q8_1_TABLE, SV8_Q8_2_TABLE, SV8_Q9UP_TABLE,
+        SV8_Q2_1_TABLE, SV8_Q2_2_TABLE, SV8_Q3_TABLE, SV8_Q4_TABLE, SV8_Q5_1_TABLE, SV8_Q5_2_TABLE,
+        SV8_Q6_1_TABLE, SV8_Q6_2_TABLE, SV8_Q7_1_TABLE, SV8_Q7_2_TABLE, SV8_Q8_1_TABLE,
+        SV8_Q8_2_TABLE, SV8_Q9UP_TABLE, Sv8CanonicalTable,
     };
     use std::collections::BTreeSet;
 
@@ -986,8 +986,8 @@ mod tests {
             let mut out = [99_i8; SAMPLES_PER_BAND];
             decode_sv8_grouped3_band(&mut reader, ctx, &mut out).expect("decode");
             // 12 codewords, each fanned into 3 consecutive samples.
-            for (g, group) in out.chunks_exact(3).enumerate() {
-                assert_eq!(group, expected_triplet, "ctx {ctx} group {g}");
+            for (g, group) in out.as_chunks::<3>().0.iter().enumerate() {
+                assert_eq!(*group, expected_triplet, "ctx {ctx} group {g}");
             }
             // Exactly 12 codewords' worth of bits consumed.
             assert_eq!(
@@ -1018,9 +1018,9 @@ mod tests {
         let mut reader = Sv7BitReader::new(&bytes);
         let mut out = [0_i8; SAMPLES_PER_BAND];
         decode_sv8_grouped3_band(&mut reader, 0, &mut out).expect("decode");
-        for (g, group) in out.chunks_exact(3).enumerate() {
+        for (g, group) in out.as_chunks::<3>().0.iter().enumerate() {
             let expected = if g % 2 == 0 { tri_a } else { tri_b };
-            assert_eq!(group, expected, "group {g}");
+            assert_eq!(*group, expected, "group {g}");
         }
     }
 
@@ -1065,8 +1065,8 @@ mod tests {
             let before = reader.bits_remaining();
             let mut out = [99_i8; SAMPLES_PER_BAND];
             decode_sv8_grouped2_band(&mut reader, band_type, &mut out).expect("decode");
-            for (g, group) in out.chunks_exact(2).enumerate() {
-                assert_eq!(group, expected_pair, "band_type {band_type} group {g}");
+            for (g, group) in out.as_chunks::<2>().0.iter().enumerate() {
+                assert_eq!(*group, expected_pair, "band_type {band_type} group {g}");
             }
             assert_eq!(
                 before - reader.bits_remaining(),
@@ -1094,9 +1094,9 @@ mod tests {
         let mut reader = Sv7BitReader::new(&bytes);
         let mut out = [0_i8; SAMPLES_PER_BAND];
         decode_sv8_grouped2_band(&mut reader, 3, &mut out).expect("decode");
-        for (g, group) in out.chunks_exact(2).enumerate() {
+        for (g, group) in out.as_chunks::<2>().0.iter().enumerate() {
             let expected = if g % 2 == 0 { pair_a } else { pair_b };
-            assert_eq!(group, expected, "group {g}");
+            assert_eq!(*group, expected, "group {g}");
         }
     }
 
@@ -1392,7 +1392,7 @@ mod tests {
         let mut idx = 2 * thres;
         let mut r_m = Sv7BitReader::new(&bytes);
         let mut out_m = [0_i8; SAMPLES_PER_BAND];
-        for group in out_m.chunks_exact_mut(3) {
+        for group in out_m.as_chunks_mut::<3>().0 {
             let ctx = (idx > thres) as u8;
             let table = table_for_role(Sv8TableRole::Q2, ctx).unwrap();
             let symbol = table.decode(&mut r_m).unwrap();
@@ -1839,7 +1839,7 @@ mod tests {
 
     #[test]
     fn implemented_cases_match_classifier_arms() {
-        use crate::sv8_band_decode::{sv8_band_type_case, Sv8BandDecodeCase};
+        use crate::sv8_band_decode::{Sv8BandDecodeCase, sv8_band_type_case};
         // The band_type domains this module's decoders accept are
         // exactly the classifier arms they implement.
         assert_eq!(sv8_band_type_case(2), Sv8BandDecodeCase::Grouped3);

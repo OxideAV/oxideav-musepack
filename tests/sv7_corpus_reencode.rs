@@ -20,14 +20,14 @@
 //! content (the original carries one dead all-zero tail word).
 
 use oxideav_musepack::huffman::{
-    decode as vlc, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx,
-    sv7_q7_ctx, Sv7BitReader,
+    Sv7BitReader, decode as vlc, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx,
+    sv7_q6_ctx, sv7_q7_ctx,
 };
 use oxideav_musepack::sv7_band_decode::{
     band_type_uses_context_selector, unpack_grouped2_value, unpack_grouped3_value,
 };
 use oxideav_musepack::sv7_band_header::decode_res_header_grounded;
-use oxideav_musepack::sv7_file_encode::{encode_sv7_file_with_version, Sv7EncStereoFrame};
+use oxideav_musepack::sv7_file_encode::{Sv7EncStereoFrame, encode_sv7_file_with_version};
 use oxideav_musepack::sv7_frame_encode::Sv7EncBand;
 use oxideav_musepack::sv7_header::Sv7HeaderFields;
 use oxideav_musepack::sv7_scf_decode::{decode_sv7_band_dscf, decode_sv7_scfi};

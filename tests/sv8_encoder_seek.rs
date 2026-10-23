@@ -6,17 +6,17 @@
 //! mid-stream entries, so these tests exercise what the corpus gates
 //! cannot: real random access far from the stream head.
 
+use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
 use oxideav_musepack::sv8_file_encode::{
-    encode_sv8_from_pcm_f64, seek_pwr_delta_for, sh_payload, write_packet, write_varint,
-    Sv8EncoderSettings, SEEK_PWR_DELTA,
+    SEEK_PWR_DELTA, Sv8EncoderSettings, encode_sv8_from_pcm_f64, seek_pwr_delta_for, sh_payload,
+    write_packet, write_varint,
 };
 use oxideav_musepack::sv8_seek::{
-    decode_sv8_from_entry, SeekOffsetFields, SeekTableFields, Sv8SeekIndex, SEEK_TABLE_CAP,
-    SO_PAYLOAD_LEN,
+    SEEK_TABLE_CAP, SO_PAYLOAD_LEN, SeekOffsetFields, SeekTableFields, Sv8SeekIndex,
+    decode_sv8_from_entry,
 };
 use oxideav_musepack::synthesis::SYNTHESIS_PRIME_SAMPLES;
-use oxideav_musepack::SAMPLES_PER_FRAME_PER_CHANNEL;
 use std::f64::consts::PI;
 
 /// 3 s of a stereo two-tone test signal in the s16 domain.
@@ -337,7 +337,9 @@ fn ffmpeg_seek_lands_on_our_seek_table() {
             String::from_utf8_lossy(&out.stderr)
         );
         out.stdout
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     };

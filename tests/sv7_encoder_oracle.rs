@@ -4,7 +4,7 @@
 //! `tests/sv8_encoder_oracle.rs`. Skips without the binaries (CI).
 
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
-use oxideav_musepack::sv7_pcm_encode::{encode_sv7_from_pcm_f64, Sv7EncoderSettings};
+use oxideav_musepack::sv7_pcm_encode::{Sv7EncoderSettings, encode_sv7_from_pcm_f64};
 use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,7 +18,9 @@ fn find_bin(name: &str) -> Option<PathBuf> {
 
 fn s16_of(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

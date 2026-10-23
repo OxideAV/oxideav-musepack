@@ -6,8 +6,8 @@
 //! decodable at full declared length.
 
 use oxideav_musepack::mpc_decode::decode_mpc_stream;
-use oxideav_musepack::sv7_pcm_encode::{encode_sv7_from_pcm_f64, Sv7EncoderSettings};
-use oxideav_musepack::sv8_file_encode::{encode_sv8_from_pcm_f64, Sv8EncoderSettings};
+use oxideav_musepack::sv7_pcm_encode::{Sv7EncoderSettings, encode_sv7_from_pcm_f64};
+use oxideav_musepack::sv8_file_encode::{Sv8EncoderSettings, encode_sv8_from_pcm_f64};
 use std::f64::consts::PI;
 
 /// Deterministic pseudo-random f64 in [-1, 1) (xorshift64*).

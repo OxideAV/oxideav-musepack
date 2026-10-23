@@ -51,8 +51,8 @@ use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
 use crate::sv8_quantize::{
-    band_type_for_peak, quant_step, quantize_band, QuantizedBand, SAMPLES_PER_GRANULE, SV8_SCF_MAX,
-    SV8_SCF_MIN,
+    QuantizedBand, SAMPLES_PER_GRANULE, SV8_SCF_MAX, SV8_SCF_MIN, band_type_for_peak, quant_step,
+    quantize_band,
 };
 use crate::sv8_stereo_frame::Sv8StereoFrameDecode;
 use crate::sv8_stereo_frame_encode::band_sample_bits;
@@ -369,7 +369,7 @@ mod tests {
     use crate::ms_stereo::undo_ms_stereo_pinned;
     use crate::sv7_bitwriter::Sv7BitWriter;
     use crate::sv8_stereo_frame::{
-        decode_sv8_stereo_frame, reconstruct_sv8_stereo_frame, Sv8FrameState,
+        Sv8FrameState, decode_sv8_stereo_frame, reconstruct_sv8_stereo_frame,
     };
     use crate::sv8_stereo_frame_encode::encode_sv8_stereo_frame;
 

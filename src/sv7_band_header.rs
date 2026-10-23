@@ -66,7 +66,7 @@
 //!   parameters. The header field map that would source them is GAP
 //!   per §2.1.
 
-use crate::huffman::{decode as huffman_decode, Sv7BitReader, SV7_BANDTYPE_HEADER_TABLE};
+use crate::huffman::{SV7_BANDTYPE_HEADER_TABLE, Sv7BitReader, decode as huffman_decode};
 use crate::{Error, Result};
 
 /// Layer-II-inherited subband count: a Musepack frame's polyphase
@@ -934,7 +934,7 @@ mod tests {
         let mut p = ResPacker::new();
         p.push_raw(3, RES_RAW_BITS); // left
         p.push_raw(4, RES_RAW_BITS); // right
-                                     // No msflag bit; immediately the buffer ends (finish pads).
+        // No msflag bit; immediately the buffer ends (finish pads).
         let bytes = p.finish();
         let mut r = Sv7BitReader::new(&bytes);
         let bands = decode_res_header_grounded(&mut r, 0, 2, false).unwrap();

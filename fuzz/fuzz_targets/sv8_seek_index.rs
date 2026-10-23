@@ -4,7 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_musepack::sv8_seek::{decode_sv8_from_entry, SeekTableFields, Sv8SeekIndex};
+use oxideav_musepack::sv8_seek::{SeekTableFields, Sv8SeekIndex, decode_sv8_from_entry};
 
 fuzz_target!(|data: &[u8]| {
     // The raw §9.2 payload parser on the naked input.

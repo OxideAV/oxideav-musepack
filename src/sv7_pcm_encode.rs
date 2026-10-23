@@ -31,10 +31,10 @@
 //! Source-of-record: §1/§1.1 (header + framing) via the file layer;
 //! everything else is encoder policy over pinned decode facts.
 
-use crate::analysis::{analyze_frame_channel, AnalysisFilter};
+use crate::analysis::{AnalysisFilter, analyze_frame_channel};
 use crate::frame_reconstruct::SubbandMatrix;
 use crate::sv7_file_encode::{Sv7EncStereoFrame, Sv7FileWriter};
-use crate::sv7_frame_build::{build_sv7_stereo_frame, Sv7FrameBuildSettings};
+use crate::sv7_frame_build::{Sv7FrameBuildSettings, build_sv7_stereo_frame};
 use crate::sv7_header::Sv7HeaderFields;
 use crate::synthesis::SYNTHESIS_PRIME_SAMPLES;
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
@@ -110,7 +110,10 @@ pub fn encode_sv7_from_pcm_f64(
     sample_freq_index: u8,
     settings: &Sv7EncoderSettings,
 ) -> Result<Sv7EncodedStream> {
-    if !(1..=2).contains(&channels) || pcm.len() % channels as usize != 0 || pcm.is_empty() {
+    if !(1..=2).contains(&channels)
+        || !pcm.len().is_multiple_of(channels as usize)
+        || pcm.is_empty()
+    {
         return Err(Error::ChannelCountInvalid(channels));
     }
     let nch = channels as usize;
@@ -119,7 +122,7 @@ pub fn encode_sv7_from_pcm_f64(
     let frame_len = SAMPLES_PER_FRAME_PER_CHANNEL as u64;
     let frames = n.div_ceil(frame_len);
     let last = (n - (frames - 1) * frame_len) as u16; // 1..=1152
-                                                      // Priming-tail slack past the declared timeline (module docs).
+    // Priming-tail slack past the declared timeline (module docs).
     let need_flush = frames * frame_len - n < SYNTHESIS_PRIME_SAMPLES as u64;
 
     let header = Sv7HeaderFields {

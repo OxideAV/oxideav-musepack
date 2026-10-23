@@ -68,10 +68,10 @@
 //! - The round-trip behaviour of [`crate::synthesis::SynthesisFilter`]
 //!   (oracle-validated ±1 LSB by the SV7/SV8 corpora) pins the rest.
 
-use crate::frame_reconstruct::{zero_subband_matrix, SubbandMatrix};
+use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
+use crate::frame_reconstruct::{SubbandMatrix, zero_subband_matrix};
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::synthesis::{SUBBANDS, SYNTHESIS_WINDOW, WINDOW_LEN};
-use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
 use core::f64::consts::PI;
 
 /// End-to-end delay of the analysis → synthesis round trip, in PCM
@@ -236,7 +236,7 @@ mod tests {
         let mut a = AnalysisFilter::new();
         let mut s = SynthesisFilter::new();
         let mut out = Vec::with_capacity(pcm.len());
-        for chunk in pcm.chunks_exact(SUBBANDS) {
+        for chunk in pcm.as_chunks::<SUBBANDS>().0 {
             let mut slot = [0.0_f64; SUBBANDS];
             slot.copy_from_slice(chunk);
             let sub = a.analyze(&slot);
@@ -332,7 +332,7 @@ mod tests {
 
         let mut a = AnalysisFilter::new();
         let mut band_energy = [0.0_f64; SUBBANDS];
-        for (c, chunk) in pcm.chunks_exact(SUBBANDS).enumerate() {
+        for (c, chunk) in pcm.as_chunks::<SUBBANDS>().0.iter().enumerate() {
             let mut slot = [0.0_f64; SUBBANDS];
             slot.copy_from_slice(chunk);
             let s = a.analyze(&slot);

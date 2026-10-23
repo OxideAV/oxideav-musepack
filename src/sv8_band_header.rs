@@ -95,7 +95,7 @@
 //! sibling modules under `crates/oxideav-musepack/src/`.
 
 use crate::huffman::Sv7BitReader;
-use crate::sv8_huffman::{table_for_role, Sv8TableRole, SV8_BANDS_TABLE};
+use crate::sv8_huffman::{SV8_BANDS_TABLE, Sv8TableRole, table_for_role};
 use crate::{Error, Result};
 
 /// Inclusive upper bound for the §3.4 used-subbands count.
@@ -334,20 +334,12 @@ pub fn decode_sv8_ms_flags(reader: &mut Sv7BitReader<'_>, tot: u8) -> Result<Vec
     let mask: u32 = if cnt == 0 {
         0
     } else if cnt == n {
-        if n >= 32 {
-            u32::MAX
-        } else {
-            (1u32 << n) - 1
-        }
+        if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
     } else {
         let k = cnt.min(n - cnt);
         let coded = enum_decode_subset(reader, k, n)?;
         let full = if n >= 32 { u32::MAX } else { (1u32 << n) - 1 };
-        if cnt > n / 2 {
-            (!coded) & full
-        } else {
-            coded
-        }
+        if cnt > n / 2 { (!coded) & full } else { coded }
     };
 
     // MSB-first onto ascending bands: bit (tot-1) is the lowest
@@ -425,11 +417,7 @@ where
 /// ring.
 #[inline]
 const fn wrap_res(v: i32) -> i8 {
-    if v > 15 {
-        (v - 17) as i8
-    } else {
-        v as i8
-    }
+    if v > 15 { (v - 17) as i8 } else { v as i8 }
 }
 
 /// The §6.2 per-band Res-table **context** predicate: the context-pair
@@ -440,11 +428,7 @@ const fn wrap_res(v: i32) -> i8 {
 /// above and reads from context 0 (`res-1`) directly.
 #[inline]
 const fn res_ctx_for_above(above: i8) -> u8 {
-    if above > 2 {
-        1
-    } else {
-        0
-    }
+    if above > 2 { 1 } else { 0 }
 }
 
 /// Walk the §6.2 SV8 per-band band-resolution header **fully grounded**
@@ -589,7 +573,7 @@ pub fn decode_band_resolutions_stereo_grounded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_RES_1_TABLE, SV8_RES_2_TABLE};
+    use crate::sv8_huffman::{SV8_RES_1_TABLE, SV8_RES_2_TABLE, Sv8CanonicalTable};
 
     /// MSB-first left-justified bit packer (mirrors the one used in
     /// the SV8 sample-decode tests): push a `length`-bit codeword
@@ -768,13 +752,7 @@ mod tests {
         // Build the rule: after a value with sym0's parity, pick the
         // other table. Choose a rule that yields a clean alternation
         // given sym0/sym1's actual parities.
-        let rule = |prev: RawResVlc| -> u8 {
-            if prev.as_i8() == sym0 {
-                1
-            } else {
-                0
-            }
-        };
+        let rule = |prev: RawResVlc| -> u8 { if prev.as_i8() == sym0 { 1 } else { 0 } };
 
         // Stream: band0 (ctx0 -> sym0) then band1 (ctx1 -> sym1) then
         // band2 (rule(sym1) -> ctx0 -> sym0) ...
@@ -939,18 +917,10 @@ mod tests {
     // Test-local mirrors of the (private const) impl helpers, so the
     // expected vector is computed from the spec rule, not the impl.
     fn wrap_res_ref(v: i32) -> i8 {
-        if v > 15 {
-            (v - 17) as i8
-        } else {
-            v as i8
-        }
+        if v > 15 { (v - 17) as i8 } else { v as i8 }
     }
     fn res_ctx_for_above_ref(above: i8) -> u8 {
-        if above > 2 {
-            1
-        } else {
-            0
-        }
+        if above > 2 { 1 } else { 0 }
     }
 
     #[test]

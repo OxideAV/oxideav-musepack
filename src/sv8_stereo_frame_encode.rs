@@ -26,13 +26,13 @@ use crate::requant::QUANTIZER_OFFSET_D;
 use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_bitwriter::Sv7BitWriter;
-use crate::sv8_band_decode::{sv8_band_type_case, Sv8BandDecodeCase};
+use crate::sv8_band_decode::{Sv8BandDecodeCase, sv8_band_type_case};
 use crate::sv8_context::Sv8Context;
 use crate::sv8_dscf_loop::scfi_coded_granules;
-use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+use crate::sv8_huffman::{Sv8TableRole, table_for_role};
 use crate::sv8_huffman_encode::{write_enum_subset, write_log_code, write_symbol};
 use crate::sv8_sample_decode::SPARSE_GROUP_SIZE;
-use crate::sv8_stereo_frame::{Sv8FrameState, Sv8StereoFrameDecode, SV8_BODY_CHANNELS};
+use crate::sv8_stereo_frame::{SV8_BODY_CHANNELS, Sv8FrameState, Sv8StereoFrameDecode};
 use crate::{Error, Result};
 
 /// §6.3 DSCF fold inverse: the delta `d` (in the 7-bit ring) that folds
@@ -86,7 +86,7 @@ fn write_band_samples(
         Sv8BandDecodeCase::Cns | Sv8BandDecodeCase::Empty => Ok(()),
         Sv8BandDecodeCase::SparseBand => {
             let q1 = table_for_role(Sv8TableRole::Q1, 0).ok_or(Error::UnsupportedBandType(1))?;
-            for half in levels.chunks_exact(SPARSE_GROUP_SIZE) {
+            for half in levels.as_chunks::<SPARSE_GROUP_SIZE>().0 {
                 let n = SPARSE_GROUP_SIZE as u32;
                 let mut mask: u32 = 0;
                 let mut cnt: u32 = 0;
@@ -119,7 +119,7 @@ fn write_band_samples(
         }
         Sv8BandDecodeCase::Grouped3 => {
             let mut ctx = Sv8Context::new(2).ok_or(Error::UnsupportedBandType(2))?;
-            for group in levels.chunks_exact(3) {
+            for group in levels.as_chunks::<3>().0 {
                 let mut tmp: i32 = 0;
                 for (digit, &s) in group.iter().enumerate() {
                     if !(-2..=2).contains(&s) {
@@ -141,7 +141,7 @@ fn write_band_samples(
                 Sv8TableRole::Q4
             };
             let table = table_for_role(role, 0).ok_or(Error::UnsupportedBandType(band_type))?;
-            for pair in levels.chunks_exact(2) {
+            for pair in levels.as_chunks::<2>().0 {
                 for &s in pair {
                     if s.abs() > i32::from(band_type) {
                         return Err(Error::SampleOutOfRange(s));

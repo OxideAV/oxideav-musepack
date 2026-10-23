@@ -92,7 +92,7 @@
 //! `crates/oxideav-musepack/src/`.
 
 use crate::huffman::Sv7BitReader;
-use crate::sv8_huffman::{table_for_role, Sv8TableRole};
+use crate::sv8_huffman::{Sv8TableRole, table_for_role};
 use crate::{Error, Result};
 
 /// Typed wrapper around the raw `i8` value produced by a single
@@ -260,7 +260,7 @@ pub fn decode_sv8_scfi(reader: &mut Sv7BitReader<'_>, nonzero_channels: u8) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_SCFI_1_TABLE, SV8_SCFI_2_TABLE};
+    use crate::sv8_huffman::{SV8_SCFI_1_TABLE, SV8_SCFI_2_TABLE, Sv8CanonicalTable};
 
     /// MSB-first left-justified bit packer (mirrors the one used in the
     /// SV8 band-resolution tests): push a `length`-bit codeword from the

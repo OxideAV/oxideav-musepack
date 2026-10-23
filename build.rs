@@ -186,7 +186,7 @@ fn emit_sv7_huffman_array(
 
     if is_pair {
         assert!(
-            len % 2 == 0,
+            len.is_multiple_of(2),
             "context-pair table {stem} has odd length {len}"
         );
         let half = len / 2;

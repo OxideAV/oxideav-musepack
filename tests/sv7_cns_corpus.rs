@@ -41,10 +41,10 @@
 //!   the FFmpeg oracle's own generator, exactly as suspected.)
 
 use oxideav_musepack::cns::CnsPrng;
-use oxideav_musepack::framing::{SV7Header, SV7_VERSION_PNS_FLAG};
+use oxideav_musepack::framing::{SV7_VERSION_PNS_FLAG, SV7Header};
 use oxideav_musepack::huffman::Sv7BitReader;
 use oxideav_musepack::sv7_band_decode::{
-    band_type_uses_context_selector, decode_sv7_band, SAMPLES_PER_BAND,
+    SAMPLES_PER_BAND, band_type_uses_context_selector, decode_sv7_band,
 };
 use oxideav_musepack::sv7_band_header::decode_res_header_grounded;
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
@@ -63,7 +63,9 @@ fn fixture_bytes(name: &str, file: &str) -> Vec<u8> {
 
 fn oracle_s16(name: &str) -> Vec<i16> {
     fixture_bytes(name, "expected.pcm")
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

@@ -71,7 +71,7 @@
 //! that staged `docs/` content and the sibling modules under
 //! `crates/oxideav-musepack/src/`.
 
-use crate::huffman::{decode as huffman_decode, Sv7BitReader, SV7_DSCF_TABLE, SV7_SCFI_TABLE};
+use crate::huffman::{SV7_DSCF_TABLE, SV7_SCFI_TABLE, Sv7BitReader, decode as huffman_decode};
 use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::{Error, Result};
 

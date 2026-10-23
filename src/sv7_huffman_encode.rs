@@ -70,8 +70,8 @@ pub fn write_symbol(writer: &mut Sv7BitWriter, table: &[Sv7Entry], value: i8) ->
 mod tests {
     use super::*;
     use crate::huffman::{
-        decode, sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx,
-        Sv7BitReader, SV7_BANDTYPE_HEADER_TABLE, SV7_DSCF_TABLE, SV7_SCFI_TABLE,
+        SV7_BANDTYPE_HEADER_TABLE, SV7_DSCF_TABLE, SV7_SCFI_TABLE, Sv7BitReader, decode,
+        sv7_q1_ctx, sv7_q2_ctx, sv7_q3_ctx, sv7_q4_ctx, sv7_q5_ctx, sv7_q6_ctx, sv7_q7_ctx,
     };
 
     /// Encode every distinct value of `table`, then decode it back and

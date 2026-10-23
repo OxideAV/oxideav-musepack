@@ -63,12 +63,12 @@
 //! new frame-body facts — the body layer is the r419 wire-symmetric
 //! encoder.
 
-use crate::analysis::{analyze_frame_channel, AnalysisFilter, ANALYSIS_SYNTHESIS_DELAY};
+use crate::analysis::{ANALYSIS_SYNTHESIS_DELAY, AnalysisFilter, analyze_frame_channel};
 use crate::framing::SV8_MAGIC;
 use crate::sh_header::{SV8_SAMPLE_RATES, SV8_STREAM_VERSION};
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv8_crc::sv8_crc32;
-use crate::sv8_frame_build::{build_sv8_stereo_frame, Sv8FrameBuildSettings};
+use crate::sv8_frame_build::{Sv8FrameBuildSettings, build_sv8_stereo_frame};
 use crate::sv8_seek::{SeekOffsetFields, SeekTableFields};
 use crate::sv8_stereo_frame::Sv8FrameState;
 use crate::sv8_stereo_frame_encode::encode_sv8_stereo_frame;
@@ -312,7 +312,7 @@ pub fn encode_sv8_from_pcm_f64(
     sample_freq_index: u8,
     settings: &Sv8EncoderSettings,
 ) -> Result<Sv8EncodedStream> {
-    if !(1..=2).contains(&channels) || pcm.len() % channels as usize != 0 {
+    if !(1..=2).contains(&channels) || !pcm.len().is_multiple_of(channels as usize) {
         return Err(Error::ChannelCountInvalid(channels));
     }
     let nch = channels as usize;

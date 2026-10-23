@@ -10,11 +10,11 @@
 //! construction (a CRC-valid `SH` promising a 2^40-sample timeline —
 //! the r450 drain-bound regression).
 
+use oxideav_musepack::Error;
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
 use oxideav_musepack::sv8_file_encode::{sh_payload, write_packet};
-use oxideav_musepack::sv8_seek::{decode_sv8_from_entry, SeekTableFields, Sv8SeekIndex};
-use oxideav_musepack::Error;
+use oxideav_musepack::sv8_seek::{SeekTableFields, Sv8SeekIndex, decode_sv8_from_entry};
 
 const SV7_FIXTURES: &[&str] = &[
     "cns-pns",
@@ -33,7 +33,7 @@ const SV8_FIXTURES: &[&str] = &[
     "stereo-sine-xtreme-quality",
 ];
 
-fn fixture(gen: &str, name: &str) -> Vec<u8> {
+fn fixture(r#gen: &str, name: &str) -> Vec<u8> {
     let path = format!(
         "{}/tests/fixtures/{gen}/{name}/input.mpc",
         env!("CARGO_MANIFEST_DIR")

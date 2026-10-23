@@ -39,7 +39,7 @@
 
 use crate::huffman::SV7_BANDTYPE_HEADER_TABLE;
 use crate::sv7_band_header::{
-    Sv7ResBand, RES_HEADER_ESCAPE_SYMBOL, RES_RAW_BITS, SV7_MAX_BAND_INCLUSIVE,
+    RES_HEADER_ESCAPE_SYMBOL, RES_RAW_BITS, SV7_MAX_BAND_INCLUSIVE, Sv7ResBand,
 };
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_huffman_encode::write_symbol;

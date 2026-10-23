@@ -73,9 +73,9 @@ use crate::ms_stereo::undo_ms_stereo_pinned;
 use crate::sh_header::StreamHeaderFields;
 use crate::sv8_reconstruct::decode_and_reconstruct_sv8_channel;
 use crate::sv8_stereo_frame::{
-    decode_sv8_stereo_frame, reconstruct_sv8_stereo_frame, Sv8FrameState,
+    Sv8FrameState, decode_sv8_stereo_frame, reconstruct_sv8_stereo_frame,
 };
-use crate::synthesis::{synthesize_frame_channel, MultiChannelSynthesis, SynthesisFilter};
+use crate::synthesis::{MultiChannelSynthesis, SynthesisFilter, synthesize_frame_channel};
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
 /// One frame's §6.2 decode parameters: the used-band count and the §6.3
@@ -384,7 +384,7 @@ impl Sv8StreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_RES_1_TABLE};
+    use crate::sv8_huffman::{SV8_RES_1_TABLE, Sv8CanonicalTable};
 
     /// MSB-first left-justified bit packer (mirrors the SV8 sub-walk
     /// tests).

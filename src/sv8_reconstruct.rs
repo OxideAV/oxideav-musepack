@@ -56,12 +56,12 @@
 //! sub-walks and the SV7-shared quantiser over the documented geometry.
 
 use crate::cns::CnsPrng;
-use crate::frame_reconstruct::{zero_subband_matrix, SubbandMatrix};
+use crate::frame_reconstruct::{SubbandMatrix, zero_subband_matrix};
 use crate::huffman::Sv7BitReader;
 use crate::reconstruct::{apply_granule_scf_relative_signed, dequantise_band, dequantise_cns_band};
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
-use crate::sv8_frame_decode::{decode_sv8_frame_channel, Sv8BandDecode};
+use crate::sv8_frame_decode::{Sv8BandDecode, decode_sv8_frame_channel};
 use crate::{Error, Result};
 
 /// Reconstruct one SV8 band's 36 `f64` subband samples from its decoded
@@ -186,7 +186,7 @@ pub fn decode_and_reconstruct_sv8_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconstruct::{dequantise_band as deq, DEQUANT_DIVISOR};
+    use crate::reconstruct::{DEQUANT_DIVISOR, dequantise_band as deq};
     use crate::requant::{DEQUANT_COEFFICIENT_C, SCF_STEP_RATIO};
     use crate::scf::SCF_GRANULES_PER_BAND;
 

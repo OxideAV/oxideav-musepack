@@ -67,7 +67,7 @@
 //! the caller drives the per-non-zero-band loop and decides per-band
 //! whether to invoke this module based on the band-type ≠ 0 check.
 
-use crate::huffman::{decode, Sv7BitReader, SV7_DSCF_TABLE, SV7_SCFI_TABLE};
+use crate::huffman::{SV7_DSCF_TABLE, SV7_SCFI_TABLE, Sv7BitReader, decode};
 use crate::{Error, Result};
 
 /// Number of SCF granules per band per channel (Layer-II /

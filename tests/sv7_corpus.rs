@@ -9,7 +9,7 @@
 //! every fact asserted here is pinned by the corpus itself, not by the
 //! crate's own writer.
 
-use oxideav_musepack::mpc_decode::{decode_mpc_stream, MpcDecodedStream};
+use oxideav_musepack::mpc_decode::{MpcDecodedStream, decode_mpc_stream};
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
 use oxideav_musepack::sv7_header::Sv7HeaderFields;
 
@@ -126,7 +126,9 @@ fn corpus_pcm_matches_oracle_within_one_lsb() {
     for e in &CORPUS {
         let bytes = fixture_bytes(e.name, "input.mpc");
         let oracle: Vec<i16> = fixture_bytes(e.name, "expected.pcm")
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         let out = decode_sv7_file(&bytes).expect("decode");

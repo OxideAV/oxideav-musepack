@@ -8,9 +8,9 @@ use oxideav_musepack::packet_stream::{PacketSizeConvention, PacketStream};
 use oxideav_musepack::sv7_bitwriter::Sv7BitWriter;
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
 use oxideav_musepack::sv8_file_encode::{
-    encode_sv8_from_pcm_f64, encode_sv8_from_pcm_s16, Sv8EncoderSettings,
+    Sv8EncoderSettings, encode_sv8_from_pcm_f64, encode_sv8_from_pcm_s16,
 };
-use oxideav_musepack::sv8_stereo_frame::{decode_sv8_stereo_frame, Sv8FrameState};
+use oxideav_musepack::sv8_stereo_frame::{Sv8FrameState, decode_sv8_stereo_frame};
 use oxideav_musepack::sv8_stereo_frame_encode::encode_sv8_stereo_frame;
 use oxideav_musepack::typed_packet::TypedPacket;
 use std::f64::consts::PI;

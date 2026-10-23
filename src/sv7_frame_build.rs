@@ -29,15 +29,15 @@
 //! pinned in the crate; no new format facts.
 
 use crate::frame_reconstruct::SubbandMatrix;
-use crate::requant::{band_type_index, DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO};
+use crate::requant::{DEQUANT_COEFFICIENT_C, QUANTIZER_OFFSET_D, SCF_STEP_RATIO, band_type_index};
 use crate::scf::SCF_GRANULES_PER_BAND;
-use crate::sv7_band_decode::{band_type_uses_context_selector, SAMPLES_PER_BAND};
+use crate::sv7_band_decode::{SAMPLES_PER_BAND, band_type_uses_context_selector};
 use crate::sv7_band_header::SV7_MAX_BAND_INCLUSIVE;
 use crate::sv7_bitwriter::Sv7BitWriter;
 use crate::sv7_file_encode::Sv7EncStereoFrame;
-use crate::sv7_frame_encode::{encode_sv7_band_samples, Sv7EncBand};
+use crate::sv7_frame_encode::{Sv7EncBand, encode_sv7_band_samples};
 use crate::sv8_quantize::{
-    band_type_for_peak, choose_granule_scf, quant_step, quantize_granule, SAMPLES_PER_GRANULE,
+    SAMPLES_PER_GRANULE, band_type_for_peak, choose_granule_scf, quant_step, quantize_granule,
 };
 use crate::{Error, Result};
 
@@ -372,7 +372,7 @@ mod tests {
     use crate::huffman::Sv7BitReader;
     use crate::sv7_band_header::decode_res_header_grounded;
     use crate::sv7_bitwriter::Sv7BitWriter;
-    use crate::sv7_stereo_frame::{decode_sv7_stereo_frame, Sv7ScfMemory};
+    use crate::sv7_stereo_frame::{Sv7ScfMemory, decode_sv7_stereo_frame};
     use crate::sv7_stereo_frame_encode::encode_sv7_stereo_frame;
 
     struct Rng(u64);

@@ -37,7 +37,7 @@
 //!   the ISO 11172-3 PDF outside this crate's
 //!   `docs/audio/musepack/` source-of-truth scope.
 
-use crate::reconstruct::{reconstruct_sv7_band_from_levels, GRANULES_PER_BAND, SCF_INDEX_COUNT};
+use crate::reconstruct::{GRANULES_PER_BAND, SCF_INDEX_COUNT, reconstruct_sv7_band_from_levels};
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
 use crate::{Error, Result};

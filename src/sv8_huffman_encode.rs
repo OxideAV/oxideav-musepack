@@ -188,9 +188,9 @@ mod tests {
     use crate::huffman::Sv7BitReader;
     use crate::sv8_band_header::decode_log_code;
     use crate::sv8_huffman::{
-        table_for_role, Sv8TableRole, SV8_BANDS_TABLE, SV8_DSCF_1_TABLE, SV8_DSCF_2_TABLE,
-        SV8_Q1_TABLE, SV8_Q9UP_TABLE, SV8_RES_1_TABLE, SV8_RES_2_TABLE, SV8_SCFI_1_TABLE,
-        SV8_SCFI_2_TABLE,
+        SV8_BANDS_TABLE, SV8_DSCF_1_TABLE, SV8_DSCF_2_TABLE, SV8_Q1_TABLE, SV8_Q9UP_TABLE,
+        SV8_RES_1_TABLE, SV8_RES_2_TABLE, SV8_SCFI_1_TABLE, SV8_SCFI_2_TABLE, Sv8TableRole,
+        table_for_role,
     };
     use crate::sv8_sample_decode::enum_decode_subset;
 
@@ -217,10 +217,10 @@ mod tests {
             Sv8TableRole::Q8,
         ] {
             for ctx in 0..2 {
-                if let Some(t) = table_for_role(role, ctx) {
-                    if !out.iter().any(|e| std::ptr::eq(*e, t)) {
-                        out.push(t);
-                    }
+                if let Some(t) = table_for_role(role, ctx)
+                    && !out.iter().any(|e| std::ptr::eq(*e, t))
+                {
+                    out.push(t);
                 }
             }
         }

@@ -49,8 +49,8 @@ use crate::cns::CnsPrng;
 use crate::frame_reconstruct::zero_subband_matrix;
 use crate::huffman::Sv7BitReader;
 use crate::ms_stereo::undo_ms_stereo_pinned;
-use crate::sv7_stereo_frame::{decode_sv7_stereo_frame, Sv7ScfMemory};
-use crate::synthesis::{synthesize_stereo_frame_interleaved, MultiChannelSynthesis};
+use crate::sv7_stereo_frame::{Sv7ScfMemory, decode_sv7_stereo_frame};
+use crate::synthesis::{MultiChannelSynthesis, synthesize_stereo_frame_interleaved};
 use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 
 /// PCM samples produced by one stereo frame, interleaved `L, R, …`

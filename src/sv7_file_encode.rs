@@ -378,7 +378,7 @@ impl Sv7FileWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::huffman::{sv7_q3_ctx, Sv7BitReader};
+    use crate::huffman::{Sv7BitReader, sv7_q3_ctx};
     use crate::sv7_band_decode::SAMPLES_PER_BAND;
     use crate::sv7_header_encode::SV7_HEADER_BITS;
 

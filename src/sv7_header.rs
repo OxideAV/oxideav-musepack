@@ -151,7 +151,7 @@ impl Sv7HeaderFields {
         const PREFIX_LEN: usize = SV7_MAGIC.len() + 1; // MP+ + version
         const FIELD_BYTES: usize = 21;
         const LOGICAL_LEN: usize = PREFIX_LEN + FIELD_BYTES; // 25
-                                                             // Round up to the 32-bit word grid that the swap operates on.
+        // Round up to the 32-bit word grid that the swap operates on.
         const HEADER_LEN: usize = LOGICAL_LEN.next_multiple_of(4); // 28
 
         if input.len() < SV7_MAGIC.len() + 1 {
@@ -208,7 +208,7 @@ impl Sv7HeaderFields {
         let true_gapless = reader.read_bits(1)? != 0; // field 13
         let last_frame_samples = reader.read_bits(11)?; // field 14
         let fast_seek = reader.read_bits(1)? != 0; // field 15
-                                                   // Reserved 19 bits: split into 16 + 3 (read_bits caps at 16).
+        // Reserved 19 bits: split into 16 + 3 (read_bits caps at 16).
         let reserved_hi = reader.read_bits(16)? as u32; // field 16a
         let reserved_lo = reader.read_bits(3)? as u32; // field 16b
         let reserved = (reserved_hi << 3) | reserved_lo;

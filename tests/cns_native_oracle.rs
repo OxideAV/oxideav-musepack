@@ -39,7 +39,7 @@
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
 
-fn fixture(gen: &str, file: &str) -> Vec<u8> {
+fn fixture(r#gen: &str, file: &str) -> Vec<u8> {
     let path = format!(
         "{}/tests/fixtures/{gen}/cns-pns/{file}",
         env!("CARGO_MANIFEST_DIR")
@@ -49,7 +49,9 @@ fn fixture(gen: &str, file: &str) -> Vec<u8> {
 
 fn s16(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -205,14 +207,14 @@ fn sv8_cns_loudness_calibrates_to_the_native_oracle() {
 /// oracle's different generator, not of the staged facts.
 #[test]
 fn cns_waveform_is_per_sample_exact_against_the_native_oracle() {
-    for gen in ["sv7", "sv8"] {
-        let native = s16(&fixture(gen, "expected-mpcdec.pcm"));
-        let ours = if gen == "sv7" {
-            decode_sv7_file(&fixture(gen, "input.mpc"))
+    for r#gen in ["sv7", "sv8"] {
+        let native = s16(&fixture(r#gen, "expected-mpcdec.pcm"));
+        let ours = if r#gen == "sv7" {
+            decode_sv7_file(&fixture(r#gen, "input.mpc"))
                 .expect("decode")
                 .pcm_s16()
         } else {
-            decode_sv8_stream(&fixture(gen, "input.mpc"))
+            decode_sv8_stream(&fixture(r#gen, "input.mpc"))
                 .expect("decode")
                 .pcm_s16()
         };

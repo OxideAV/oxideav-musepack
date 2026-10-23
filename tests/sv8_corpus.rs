@@ -31,9 +31,9 @@
 //! — and, more strongly, by the transcode-identity gate above.
 
 use oxideav_musepack::framing::StreamKind;
-use oxideav_musepack::mpc_decode::{decode_mpc_stream, MpcDecodedStream};
+use oxideav_musepack::mpc_decode::{MpcDecodedStream, decode_mpc_stream};
 use oxideav_musepack::sv7_file_decode::decode_sv7_file;
-use oxideav_musepack::sv8_decode::{decode_sv8_stream, Sv8DecodedStream};
+use oxideav_musepack::sv8_decode::{Sv8DecodedStream, decode_sv8_stream};
 
 /// One fixture's expected `SH` facts plus its gate profile.
 struct Expect {
@@ -136,7 +136,7 @@ const CORPUS: [Expect; 7] = [
     },
 ];
 
-fn fixture_bytes(gen: &str, name: &str, file: &str) -> Vec<u8> {
+fn fixture_bytes(r#gen: &str, name: &str, file: &str) -> Vec<u8> {
     let path = format!(
         "{}/tests/fixtures/{gen}/{name}/{file}",
         env!("CARGO_MANIFEST_DIR")
@@ -144,9 +144,11 @@ fn fixture_bytes(gen: &str, name: &str, file: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-fn oracle_s16(gen: &str, name: &str) -> Vec<i16> {
-    fixture_bytes(gen, name, "expected.pcm")
-        .chunks_exact(2)
+fn oracle_s16(r#gen: &str, name: &str) -> Vec<i16> {
+    fixture_bytes(r#gen, name, "expected.pcm")
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

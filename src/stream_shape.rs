@@ -41,10 +41,10 @@
 //!   §2.2), not a packet sequence; the shape observer here is SV8
 //!   only.
 
-use crate::framing::{parse_sv8_magic, PacketKey};
+use crate::Result;
+use crate::framing::{PacketKey, parse_sv8_magic};
 use crate::packet_stream::{PacketSizeConvention, PacketStream};
 use crate::typed_packet::TypedPacket;
-use crate::Result;
 
 /// Structural summary of one SV8 byte stream.
 ///
@@ -202,8 +202,8 @@ pub fn scan_sv8_stream(input: &[u8], convention: PacketSizeConvention) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framing::SV8_MAGIC;
     use crate::Error;
+    use crate::framing::SV8_MAGIC;
 
     /// Build a synthetic SV8 byte stream: `MPCK` magic + each packet
     /// as `[2-byte key][1-byte size varint][payload]`. The size is

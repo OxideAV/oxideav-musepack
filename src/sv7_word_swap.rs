@@ -75,10 +75,10 @@ pub fn word_swap_sv7_body(raw: &[u8]) -> Vec<u8> {
 /// trailing word cannot be swapped in place without growing the buffer —
 /// use [`word_swap_sv7_body`] for that case).
 pub fn word_swap_sv7_body_in_place(buf: &mut [u8]) -> bool {
-    if buf.len() % 4 != 0 {
+    if !buf.len().is_multiple_of(4) {
         return false;
     }
-    for word in buf.chunks_exact_mut(4) {
+    for word in buf.as_chunks_mut::<4>().0 {
         word.reverse();
     }
     true

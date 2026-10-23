@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use crate::huffman::Sv7BitReader;
     use crate::sv8_band_header::decode_keyframe_max_used_band;
-    use crate::sv8_huffman::{Sv8CanonicalTable, SV8_BANDS_TABLE};
+    use crate::sv8_huffman::{SV8_BANDS_TABLE, Sv8CanonicalTable};
 
     /// MSB-first left-justified bit packer.
     struct BitPacker {

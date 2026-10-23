@@ -21,9 +21,9 @@
 //! [`crate::sv7_stereo_frame`]). Round-tripped against the decoder in
 //! the tests below.
 
-use crate::sv7_band_header::{Sv7ResBand, SV7_MAX_BAND_INCLUSIVE};
+use crate::sv7_band_header::{SV7_MAX_BAND_INCLUSIVE, Sv7ResBand};
 use crate::sv7_bitwriter::Sv7BitWriter;
-use crate::sv7_frame_encode::{encode_sv7_band_samples, Sv7EncBand};
+use crate::sv7_frame_encode::{Sv7EncBand, encode_sv7_band_samples};
 use crate::sv7_scf_encode::{choose_scfi, encode_sv7_band_dscf, encode_sv7_scfi};
 use crate::sv7_stereo_frame::Sv7ScfMemory;
 use crate::{Error, Result};
@@ -92,13 +92,7 @@ pub fn encode_sv7_stereo_frame(
     // Pass 1 — §5.1 shared band-type header (both channels + M/S).
     crate::sv7_band_header_encode::encode_res_header_grounded(writer, &res_bands, 2, stream_ms)?;
 
-    let chan = |ch: usize, b: usize| -> &Sv7EncBand {
-        if ch == 0 {
-            &left[b]
-        } else {
-            &right[b]
-        }
-    };
+    let chan = |ch: usize, b: usize| -> &Sv7EncBand { if ch == 0 { &left[b] } else { &right[b] } };
 
     // Pass 2 — SCFI selectors, band-major / channel-minor.
     for b in 0..left.len() {
@@ -133,7 +127,7 @@ pub fn encode_sv7_stereo_frame(
 mod tests {
     use super::*;
     use crate::cns::CnsPrng;
-    use crate::huffman::{sv7_q3_ctx, Sv7BitReader};
+    use crate::huffman::{Sv7BitReader, sv7_q3_ctx};
     use crate::reconstruct::{reconstruct_sv7_band_absolute, sv7_absolute_scf_gain};
     use crate::requant::DEQUANT_COEFFICIENT_C;
     use crate::sv7_band_decode::SAMPLES_PER_BAND;

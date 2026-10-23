@@ -19,7 +19,7 @@
 //! coverage).
 
 use oxideav_musepack::sv8_decode::decode_sv8_stream;
-use oxideav_musepack::sv8_file_encode::{encode_sv8_from_pcm_f64, Sv8EncoderSettings};
+use oxideav_musepack::sv8_file_encode::{Sv8EncoderSettings, encode_sv8_from_pcm_f64};
 use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,7 +35,9 @@ fn find_bin(name: &str) -> Option<PathBuf> {
 /// Interleaved s16le bytes → i16s.
 fn s16_of(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

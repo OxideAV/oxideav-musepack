@@ -76,7 +76,7 @@ use crate::huffman::Sv7BitReader;
 use crate::scf::SCF_GRANULES_PER_BAND;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
-use crate::sv8_band_decode::{decode_sv8_band_grounded, sv8_band_type_case, Sv8BandDecodeCase};
+use crate::sv8_band_decode::{Sv8BandDecodeCase, decode_sv8_band_grounded, sv8_band_type_case};
 use crate::sv8_band_header::decode_band_resolutions_grounded;
 use crate::sv8_dscf_loop::decode_sv8_band_scf;
 use crate::sv8_scf_header::decode_sv8_scfi;
@@ -195,8 +195,8 @@ pub fn decode_sv8_frame_channel(
 mod tests {
     use super::*;
     use crate::sv8_huffman::{
-        table_for_role, Sv8CanonicalTable, Sv8TableRole, SV8_RES_1_TABLE, SV8_RES_2_TABLE,
-        SV8_SCFI_1_TABLE,
+        SV8_RES_1_TABLE, SV8_RES_2_TABLE, SV8_SCFI_1_TABLE, Sv8CanonicalTable, Sv8TableRole,
+        table_for_role,
     };
 
     /// MSB-first left-justified bit packer (mirrors the SV8 sub-walk
@@ -296,11 +296,7 @@ mod tests {
 
     /// The §6.2 signed wrap for a top-band raw value (values > 15 wrap −17).
     fn wrap_ref(v: i32) -> i8 {
-        if v > 15 {
-            (v - 17) as i8
-        } else {
-            v as i8
-        }
+        if v > 15 { (v - 17) as i8 } else { v as i8 }
     }
 
     #[test]

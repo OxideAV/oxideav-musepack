@@ -317,7 +317,7 @@ mod tests {
         payload.push(0x81); // varint continuation
         payload.push(0x00); // varint final → 128
         payload.push(0x03); // silence varint → 3
-                            // tail: freq 2, max_band-1 4, channels-1 1, ms 0, bp 0
+        // tail: freq 2, max_band-1 4, channels-1 1, ms 0, bp 0
         let bits: u16 = (2u16 << 13) | (4u16 << 8) | (1u16 << 4);
         payload.extend_from_slice(&bits.to_be_bytes());
         let sh = StreamHeaderFields::parse(&payload).unwrap();

@@ -24,10 +24,10 @@
 //! (the two magics / stream generations). No new format facts — pure
 //! dispatch over the two already-grounded whole-stream decoders.
 
-use crate::framing::{identify_stream, StreamKind};
-use crate::sv7_file_decode::{decode_sv7_file, Sv7DecodedFile};
-use crate::sv8_decode::{decode_sv8_stream, Sv8DecodedStream};
 use crate::Result;
+use crate::framing::{StreamKind, identify_stream};
+use crate::sv7_file_decode::{Sv7DecodedFile, decode_sv7_file};
+use crate::sv8_decode::{Sv8DecodedStream, decode_sv8_stream};
 
 /// A decoded Musepack stream of either generation.
 #[derive(Debug, Clone, PartialEq)]
@@ -172,9 +172,9 @@ pub fn decode_mpc_stream_tagged(bytes: &[u8]) -> Result<MpcDecodedStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv7_file_encode::{encode_sv7_file, Sv7EncStereoFrame};
-    use crate::sv7_header::Sv7HeaderFields;
     use crate::Error;
+    use crate::sv7_file_encode::{Sv7EncStereoFrame, encode_sv7_file};
+    use crate::sv7_header::Sv7HeaderFields;
 
     fn sv7_file() -> (Sv7HeaderFields, Vec<u8>) {
         let hdr = Sv7HeaderFields {

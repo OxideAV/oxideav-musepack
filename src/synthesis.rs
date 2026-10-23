@@ -58,10 +58,10 @@
 //!   cross-referenced against
 //!   `docs/audio/mp3/mp1-annex-b-iso-extracts.md`'s table description).
 
+use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
 use crate::frame_reconstruct::SubbandMatrix;
 use crate::sv7_band_decode::SAMPLES_PER_BAND;
 use crate::sv7_band_header::SV7_SUBBAND_COUNT;
-use crate::SAMPLES_PER_FRAME_PER_CHANNEL;
 use core::f64::consts::PI;
 
 /// Number of subbands fed to the filter at each time slot (the 32
