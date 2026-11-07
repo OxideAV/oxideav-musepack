@@ -177,7 +177,7 @@ fn corpus_streams_decode_through_unified_entry() {
         MpcDecodedStream::Sv7(f) => {
             assert_eq!(f, decode_sv7_file(&bytes).unwrap());
         }
-        MpcDecodedStream::Sv8(_) => panic!("expected SV7"),
+        _ => panic!("expected SV7"),
     }
 }
 

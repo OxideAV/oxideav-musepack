@@ -55,6 +55,7 @@ use crate::typed_packet::TypedPacket;
 /// vocabulary, and `total_payload_bytes` is the cumulative opaque
 /// payload byte tally across every emitted packet.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamShape {
     /// Count of `SH` Stream-Header packets observed.
     pub sh_count: u32,

@@ -87,10 +87,7 @@ fn measure_sv7(pcm: &[f64], quality: Option<f64>) -> (usize, f64) {
         pcm,
         2,
         0,
-        &Sv7EncoderSettings {
-            quality,
-            ..Sv7EncoderSettings::default()
-        },
+        &Sv7EncoderSettings::default().with_quality(quality),
     )
     .expect("SV7 encode");
     let dec = decode_mpc_stream(&enc.bytes).expect("decode");

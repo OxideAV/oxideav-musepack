@@ -255,59 +255,96 @@
 
 #![forbid(unsafe_code)]
 
+#[doc(hidden)]
 pub mod analysis;
+#[doc(hidden)]
 pub mod cns;
 pub mod ei_header;
+#[doc(hidden)]
 pub mod frame_reconstruct;
 pub mod framing;
+#[doc(hidden)]
 pub mod huffman;
 pub mod mpc_decode;
+#[doc(hidden)]
 pub mod ms_stereo;
 pub mod packet_stream;
+#[doc(hidden)]
 pub mod reconstruct;
 pub mod registry;
+#[doc(hidden)]
 pub mod requant;
 pub mod rg_header;
+#[doc(hidden)]
 pub mod scf;
 pub mod sh_header;
+#[doc(hidden)]
 pub mod smr_alloc;
 pub mod stream_shape;
+#[doc(hidden)]
 pub mod sv7_band_decode;
+#[doc(hidden)]
 pub mod sv7_band_header;
+#[doc(hidden)]
 pub mod sv7_band_header_encode;
+#[doc(hidden)]
 pub mod sv7_bitwriter;
 pub mod sv7_file_decode;
 pub mod sv7_file_encode;
+#[doc(hidden)]
 pub mod sv7_frame_build;
+#[doc(hidden)]
 pub mod sv7_frame_encode;
 pub mod sv7_header;
 pub mod sv7_header_encode;
+#[doc(hidden)]
 pub mod sv7_huffman_encode;
 pub mod sv7_pcm_encode;
+#[doc(hidden)]
 pub mod sv7_sample_encode;
+#[doc(hidden)]
 pub mod sv7_scf_decode;
+#[doc(hidden)]
 pub mod sv7_scf_encode;
+#[doc(hidden)]
 pub mod sv7_stereo_frame;
+#[doc(hidden)]
 pub mod sv7_stereo_frame_encode;
 pub mod sv7_stream;
+#[doc(hidden)]
 pub mod sv7_word_swap;
+#[doc(hidden)]
 pub mod sv8_band_decode;
+#[doc(hidden)]
 pub mod sv8_band_header;
+#[doc(hidden)]
 pub mod sv8_context;
+#[doc(hidden)]
 pub mod sv8_crc;
 pub mod sv8_decode;
+#[doc(hidden)]
 pub mod sv8_dscf_loop;
 pub mod sv8_file_encode;
+#[doc(hidden)]
 pub mod sv8_frame_build;
+#[doc(hidden)]
 pub mod sv8_frame_decode;
+#[doc(hidden)]
 pub mod sv8_huffman;
+#[doc(hidden)]
 pub mod sv8_huffman_encode;
+#[doc(hidden)]
 pub mod sv8_quantize;
+#[doc(hidden)]
 pub mod sv8_reconstruct;
+#[doc(hidden)]
 pub mod sv8_sample_decode;
+#[doc(hidden)]
 pub mod sv8_scf_header;
 pub mod sv8_seek;
+#[doc(hidden)]
 pub mod sv8_stereo_frame;
+#[doc(hidden)]
 pub mod sv8_stereo_frame_encode;
 pub mod sv8_stream;
 pub mod synthesis;
@@ -326,6 +363,7 @@ pub const SAMPLES_PER_FRAME_PER_CHANNEL: usize = 1152;
 /// Crate-local error type. Concrete variants land as the Implementer
 /// rounds populate the codec pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// Reserved placeholder. Replaced by real variants in round 1.
     NotImplemented,

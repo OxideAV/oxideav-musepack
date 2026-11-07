@@ -295,6 +295,7 @@ fn write_bit_varint(w: &mut Sv7BitWriter, value: u64) {
 /// entries as **absolute byte offsets** into the buffer, plus the
 /// frame bookkeeping to enter the stream at an arbitrary frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sv8SeekIndex {
     /// Absolute byte offsets (into the buffer the index was built
     /// from) of the indexed `AP` packets' key bytes.
@@ -500,6 +501,7 @@ impl Sv8SeekIndex {
 /// The result of a random-access decode entered mid-stream via an
 /// [`Sv8SeekIndex`] entry.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Sv8SeekDecode {
     /// The stream frame number (0-based, from the first coded frame)
     /// at which `pcm` begins.

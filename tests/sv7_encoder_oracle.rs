@@ -156,10 +156,7 @@ fn reference_decoder_matches_our_sv7_cns_streams() {
     let n = 30_000usize;
     let pcm = test_signal(n, 260.0);
     let base = encode_sv7_from_pcm_f64(&pcm, 2, 0, &Sv7EncoderSettings::default()).expect("plain");
-    let cns_settings = Sv7EncoderSettings {
-        pns_threshold: 400.0,
-        ..Sv7EncoderSettings::default()
-    };
+    let cns_settings = Sv7EncoderSettings::default().with_pns_threshold(400.0);
     let enc = encode_sv7_from_pcm_f64(&pcm, 2, 0, &cns_settings).expect("cns encode");
     assert_eq!(&enc.bytes[..3], b"MP+");
     assert_eq!(enc.bytes[3], 0x17, "PNS version byte");

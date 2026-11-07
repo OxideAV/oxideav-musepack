@@ -154,6 +154,7 @@ pub const SV8_MAGIC: [u8; 4] = *b"MPCK";
 /// variant as its raw two bytes for forward compatibility — the
 /// observer-trace round is allowed to surface additional keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PacketKey {
     /// `SH` — Stream Header. First payload packet, analogue of the
     /// SV7 fixed header. Payload field map is GAP (spec §3.2).
@@ -318,6 +319,7 @@ pub fn parse_sv8_magic(input: &[u8]) -> Result<usize> {
 
 /// Stream generation, identified by leading magic bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamKind {
     /// SV7 — `MP+` magic. Frame container is non-byte-aligned and
     /// not implemented here.

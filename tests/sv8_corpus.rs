@@ -294,7 +294,7 @@ fn magic_dispatch_routes_sv8_to_the_packet_decoder() {
             assert_eq!(s.frames_decoded, 20);
             assert_eq!(s.pcm.len(), 2 * 22050);
         }
-        MpcDecodedStream::Sv7(_) => panic!("expected SV8"),
+        _ => panic!("expected SV8"),
     }
 }
 

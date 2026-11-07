@@ -52,6 +52,7 @@ use crate::{Error, Result};
 /// A fully decoded SV7 stream: the parsed §1 header and the interleaved
 /// `L, R, …` PCM of every frame (gapless-trimmed per §1 fields 13/14).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Sv7DecodedFile {
     /// The parsed §1 fixed-header fields.
     pub header: Sv7HeaderFields,

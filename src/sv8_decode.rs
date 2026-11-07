@@ -60,6 +60,7 @@ use crate::{Error, Result, SAMPLES_PER_FRAME_PER_CHANNEL};
 /// The result of decoding a complete SV8 stream: the `SH` header fields
 /// and the gapless-trimmed PCM.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Sv8DecodedStream {
     /// The decoded `SH` stream-header fields (§2).
     pub header: StreamHeaderFields,

@@ -105,6 +105,44 @@ pub struct Sv8EncoderSettings {
     pub quality: Option<f64>,
 }
 
+impl Sv8EncoderSettings {
+    /// Builder-style setter for [`step_target`](Self::step_target).
+    pub fn with_step_target(mut self, step_target: f64) -> Self {
+        self.step_target = step_target;
+        self
+    }
+    /// Builder-style setter for [`stream_ms`](Self::stream_ms).
+    pub fn with_stream_ms(mut self, stream_ms: bool) -> Self {
+        self.stream_ms = stream_ms;
+        self
+    }
+    /// Builder-style setter for [`max_band`](Self::max_band).
+    pub fn with_max_band(mut self, max_band: u8) -> Self {
+        self.max_band = max_band;
+        self
+    }
+    /// Builder-style setter for [`block_power`](Self::block_power).
+    pub fn with_block_power(mut self, block_power: u8) -> Self {
+        self.block_power = block_power;
+        self
+    }
+    /// Builder-style setter for [`profile`](Self::profile).
+    pub fn with_profile(mut self, profile: u8) -> Self {
+        self.profile = profile;
+        self
+    }
+    /// Builder-style setter for [`pns_threshold`](Self::pns_threshold).
+    pub fn with_pns_threshold(mut self, pns_threshold: f64) -> Self {
+        self.pns_threshold = pns_threshold;
+        self
+    }
+    /// Builder-style setter for [`quality`](Self::quality).
+    pub fn with_quality(mut self, quality: Option<f64>) -> Self {
+        self.quality = quality;
+        self
+    }
+}
+
 impl Default for Sv8EncoderSettings {
     /// Defaults: `step_target = 2.0`, M/S on, all 32 subbands,
     /// `block_power = 3` (the reference posture), profile 80
@@ -282,6 +320,7 @@ pub fn ei_payload(profile: u8, pns: bool, major: u8, minor: u8, build: u8) -> Re
 /// The result of a whole-stream encode: the `MPCK` bytes plus the
 /// realised stream geometry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sv8EncodedStream {
     /// The complete `MPCK` byte stream.
     pub bytes: Vec<u8>,

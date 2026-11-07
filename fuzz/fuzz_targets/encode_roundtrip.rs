@@ -40,14 +40,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if sv7 {
-        let settings = oxideav_musepack::sv7_pcm_encode::Sv7EncoderSettings {
-            step_target,
-            stream_ms,
-            max_band,
-            profile: 10,
-            pns_threshold,
-            quality,
-        };
+        let settings = oxideav_musepack::sv7_pcm_encode::Sv7EncoderSettings::default()
+            .with_step_target(step_target)
+            .with_stream_ms(stream_ms)
+            .with_max_band(max_band)
+            .with_profile(10)
+            .with_pns_threshold(pns_threshold)
+            .with_quality(quality);
         let enc = oxideav_musepack::sv7_pcm_encode::encode_sv7_from_pcm_s16(
             &pcm,
             channels,

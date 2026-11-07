@@ -172,6 +172,7 @@ impl Decoder for MpcStreamDecoder {
 /// the typed structs at compile time can call the whole-stream
 /// encoders directly instead.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MusepackEncoderOptions {
     /// Stream generation to emit: `7` (`MP+`) or `8` (`MPCK`, the
     /// default).
@@ -192,6 +193,49 @@ pub struct MusepackEncoderOptions {
     /// Informational profile tag; `None` = the generation's default
     /// (80 for SV8, 10 for SV7).
     pub profile: Option<u8>,
+}
+
+impl MusepackEncoderOptions {
+    /// Builder-style setter for [`sv`](Self::sv).
+    pub fn with_sv(mut self, sv: u8) -> Self {
+        self.sv = sv;
+        self
+    }
+    /// Builder-style setter for [`quality`](Self::quality).
+    pub fn with_quality(mut self, quality: Option<f64>) -> Self {
+        self.quality = quality;
+        self
+    }
+    /// Builder-style setter for [`step_target`](Self::step_target).
+    pub fn with_step_target(mut self, step_target: f64) -> Self {
+        self.step_target = step_target;
+        self
+    }
+    /// Builder-style setter for [`stream_ms`](Self::stream_ms).
+    pub fn with_stream_ms(mut self, stream_ms: bool) -> Self {
+        self.stream_ms = stream_ms;
+        self
+    }
+    /// Builder-style setter for [`max_band`](Self::max_band).
+    pub fn with_max_band(mut self, max_band: u8) -> Self {
+        self.max_band = max_band;
+        self
+    }
+    /// Builder-style setter for [`block_power`](Self::block_power).
+    pub fn with_block_power(mut self, block_power: u8) -> Self {
+        self.block_power = block_power;
+        self
+    }
+    /// Builder-style setter for [`pns_threshold`](Self::pns_threshold).
+    pub fn with_pns_threshold(mut self, pns_threshold: f64) -> Self {
+        self.pns_threshold = pns_threshold;
+        self
+    }
+    /// Builder-style setter for [`profile`](Self::profile).
+    pub fn with_profile(mut self, profile: Option<u8>) -> Self {
+        self.profile = profile;
+        self
+    }
 }
 
 impl Default for MusepackEncoderOptions {

@@ -208,6 +208,7 @@ impl<'a> StreamEndPacket<'a> {
 /// Every variant carries the same opaque payload slice the upstream
 /// walker emitted — this module does NOT decode any payload field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TypedPacket<'a> {
     /// `SH` Stream Header (spec §3.2).
     StreamHeader(StreamHeaderPacket<'a>),

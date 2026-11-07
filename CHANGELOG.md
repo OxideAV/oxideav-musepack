@@ -6,8 +6,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `with_<field>` builder setters on `MusepackEncoderOptions`,
+  `Sv7EncoderSettings` and `Sv8EncoderSettings`.
+
 ### Changed
 
+- `#[non_exhaustive]` on `MusepackEncoderOptions`, `Sv7EncoderSettings`,
+  the derived / result records `StreamShape`, `Sv7DecodedFile`,
+  `Sv8DecodedStream`, `Sv7EncodedStream`, `Sv8EncodedStream`,
+  `Sv8SeekIndex`, `Sv8SeekDecode`, and the enums `Error`, `PacketKey`,
+  `StreamKind`, `MpcDecodedStream`, `TypedPacket`. `Sv8EncoderSettings`
+  stays exhaustive for now (a sibling test builds it with a struct
+  literal); the 1:1 header-field records stay exhaustive.
+- `#[doc(hidden)]` on the internal kernel modules `analysis`, `cns`,
+  `frame_reconstruct`, `huffman`, `ms_stereo`, `reconstruct`,
+  `requant`, `scf`, `smr_alloc`, the SV7 band / scalefactor / frame /
+  bit-writer / Huffman-encode / word-swap modules and the SV8 band /
+  context / CRC / DSCF / frame / Huffman / quantise / reconstruct /
+  sample / scalefactor / stereo-frame modules.
 - edition 2024, MSRV 1.95
 
 ## [0.0.4](https://github.com/OxideAV/oxideav-musepack/compare/v0.0.3...v0.0.4) - 2026-08-31

@@ -31,6 +31,7 @@ use crate::sv8_decode::{Sv8DecodedStream, decode_sv8_stream};
 
 /// A decoded Musepack stream of either generation.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MpcDecodedStream {
     /// An SV7 (`MP+`) stereo stream.
     Sv7(Sv7DecodedFile),
