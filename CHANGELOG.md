@@ -6,6 +6,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-musepack/compare/v0.0.4...v0.0.5) - 2026-11-07
+
+### Other
+
+- API hygiene: non_exhaustive settings / results / enums, hidden kernels
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - `with_<field>` builder setters on `MusepackEncoderOptions`,
